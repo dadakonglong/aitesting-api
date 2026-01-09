@@ -1,0 +1,180 @@
+version: '3.8'
+
+services:
+  # PostgreSQL数据库
+  postgres:
+    image: postgres:15
+    container_name: aitesting-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-aitesting}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    networks:
+      - aitesting-network
+
+  # Neo4j图数据库
+  neo4j:
+    image: neo4j:5.12
+    container_name: aitesting-neo4j
+    ports:
+      - "7474:7474" # HTTP
+      - "7687:7687" # Bolt
+    environment:
+      - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-password}
+      - NEO4J_PLUGINS=["apoc"]
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+    restart: unless-stopped
+    networks:
+      - aitesting-network
+
+  # Qdrant向量数据库
+  qdrant:
+    image: qdrant/qdrant:v1.7.4
+    container_name: aitesting-qdrant
+    ports:
+      - "6333:6333" # HTTP API
+      - "6334:6334" # gRPC API
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
+    networks:
+      - aitesting-network
+
+  # Redis缓存
+  redis:
+    image: redis:7-alpine
+    container_name: aitesting-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    networks:
+      - aitesting-network
+
+  # RabbitMQ消息队列
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: aitesting-rabbitmq
+    ports:
+      - "5672:5672" # AMQP
+      - "15672:15672" # Management UI
+    environment:
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER:-admin}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD:-password}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    restart: unless-stopped
+    networks:
+      - aitesting-network
+
+  # AI处理服务 (Python)
+  ai-service:
+    build:
+      context: ./services/ai-processing
+      dockerfile: Dockerfile
+    container_name: aitesting-ai-service
+    ports:
+      - "${AI_SERVICE_PORT:-8000}:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL}
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - QDRANT_URL=http://qdrant:6333
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - postgres
+      - qdrant
+      - redis
+    restart: unless-stopped
+    networks:
+      - aitesting-network
+
+  # 场景编排服务 (Go)
+  scenario-service:
+    build:
+      context: ./services/scenario-orchestration
+      dockerfile: Dockerfile
+    container_name: aitesting-scenario-service
+    ports:
+      - "${SCENARIO_SERVICE_PORT:-8081}:8081"
+    environment:
+      - SCENARIO_SERVICE_PORT=8081
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-password}@rabbitmq:5672
+      - AI_SERVICE_URL=http://ai-service:8000
+      - KG_SERVICE_URL=http://kg-service:8082
+    depends_on:
+      - postgres
+      - redis
+      - rabbitmq
+      - ai-service
+    restart: unless-stopped
+    networks:
+      - aitesting-network
+
+  # 测试执行服务 (Go)
+  execution-service:
+    build:
+      context: ./services/test-execution
+      dockerfile: Dockerfile
+    container_name: aitesting-execution-service
+    ports:
+      - "${EXECUTION_SERVICE_PORT:-8083}:8083"
+    environment:
+      - EXECUTION_SERVICE_PORT=8083
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-password}@rabbitmq:5672
+    depends_on:
+      - postgres
+      - rabbitmq
+    restart: unless-stopped
+    networks:
+      - aitesting-network
+
+  # 知识图谱服务 (Go)
+  kg-service:
+    build:
+      context: ./services/kg-service
+      dockerfile: Dockerfile
+    container_name: aitesting-kg-service
+    ports:
+      - "${KG_SERVICE_PORT:-8082}:8082"
+    environment:
+      - KG_SERVICE_PORT=8082
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASS=${NEO4J_PASSWORD:-password}
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    depends_on:
+      - neo4j
+      - postgres
+    restart: unless-stopped
+    networks:
+      - aitesting-network
+
+volumes:
+  postgres-data:
+  neo4j-data:
+  neo4j-logs:
+  qdrant-data:
+  redis-data:
+  rabbitmq-data:
+
+
+networks:
+  aitesting-network:
+    driver: bridge

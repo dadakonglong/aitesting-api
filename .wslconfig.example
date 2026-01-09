@@ -1,0 +1,15 @@
+[wsl2]
+# 限制 WSL 2 最大内存使用
+memory=4GB
+
+# 限制 CPU 核心数  
+processors=4
+
+# 限制交换空间
+swap=2GB
+
+# 关闭页面报告（减少内存占用）
+pageReporting=false
+
+# 本地主机转发
+localhostForwarding=true
