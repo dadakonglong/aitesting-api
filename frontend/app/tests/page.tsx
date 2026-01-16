@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Play, Clock, CheckCircle, XCircle, FileText, ChevronDown, ChevronUp, Trash2, Filter, Database, Settings, Plus, X, Globe, ListChecks } from 'lucide-react'
+import { Play, Clock, CheckCircle, XCircle, FileText, ChevronDown, ChevronUp, Trash2, Filter, Database, Settings, Plus, X, Globe, ListChecks, AlertCircle } from 'lucide-react'
 
 export default function TestsPage() {
     const [scenarios, setScenarios] = useState<any[]>([])
@@ -43,6 +43,7 @@ export default function TestsPage() {
     const [selectedEnvId, setSelectedEnvId] = useState<number | null>(null)
     const [newEnvName, setNewEnvName] = useState('')
     const [newEnvUrl, setNewEnvUrl] = useState('')
+    const [envConfigProject, setEnvConfigProject] = useState<string>('') // 用于添加环境时选择项目
 
     useEffect(() => {
         fetchScenarios()
@@ -53,8 +54,7 @@ export default function TestsPage() {
         if (selectedProject !== 'all') {
             fetchEnvironments(selectedProject)
         } else {
-            setEnvironments([])
-            setSelectedEnvId(null)
+            fetchAllEnvironments()
         }
     }, [selectedProject])
 
@@ -99,20 +99,50 @@ export default function TestsPage() {
         }
     }
 
+    const fetchAllEnvironments = async () => {
+        try {
+            // 获取所有项目的环境配置
+            const allEnvs: any[] = []
+            for (const project of allProjects) {
+                const response = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/projects/${project}/environments`)
+                if (response.ok) {
+                    const data = await response.json()
+                    // 为每个环境添加项目信息
+                    const envsWithProject = data.map((env: any) => ({ ...env, project_id: project }))
+                    allEnvs.push(...envsWithProject)
+                }
+            }
+            setEnvironments(allEnvs)
+            // 查找第一个默认环境
+            const defaultEnv = allEnvs.find((e: any) => e.is_default) || allEnvs[0]
+            if (defaultEnv) setSelectedEnvId(defaultEnv.id)
+        } catch (error) {
+            console.error('获取所有环境配置失败:', error)
+        }
+    }
+
     const handleSaveEnv = async () => {
         if (!newEnvName || !newEnvUrl) return
+        const targetProject = selectedProject === 'all' ? envConfigProject : selectedProject
+        if (!targetProject) return
+
         try {
-            const response = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/projects/${selectedProject}/environments`, {
+            const response = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/projects/${targetProject}/environments`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     env_name: newEnvName,
                     base_url: newEnvUrl,
-                    is_default: environments.length === 0
+                    is_default: environments.filter(e => e.project_id === targetProject).length === 0
                 })
             })
             if (response.ok) {
-                fetchEnvironments(selectedProject)
+                if (selectedProject === 'all') {
+                    fetchAllEnvironments()
+                    setEnvConfigProject('')
+                } else {
+                    fetchEnvironments(selectedProject)
+                }
                 setNewEnvName('')
                 setNewEnvUrl('')
             }
@@ -121,7 +151,8 @@ export default function TestsPage() {
         }
     }
 
-    const handleDeleteEnv = async (envName: string) => {
+    const handleDeleteEnv = async (envName: string, projectId?: string) => {
+        const targetProject = projectId || selectedProject
         setShowConfirm({
             show: true,
             title: '删除项目环境',
@@ -129,10 +160,16 @@ export default function TestsPage() {
             type: 'danger',
             onConfirm: async () => {
                 try {
-                    const response = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/projects/${selectedProject}/environments/${envName}`, {
+                    const response = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/projects/${targetProject}/environments/${envName}`, {
                         method: 'DELETE'
                     })
-                    if (response.ok) fetchEnvironments(selectedProject)
+                    if (response.ok) {
+                        if (selectedProject === 'all') {
+                            fetchAllEnvironments()
+                        } else {
+                            fetchEnvironments(selectedProject)
+                        }
+                    }
                 } catch (error) {
                     console.error('删除环境失败:', error)
                 }
@@ -215,6 +252,23 @@ export default function TestsPage() {
         setExecutingSingleStep(stepKey)
         const env = environments.find(e => e.id === selectedEnvId)
         const baseUrl = env ? env.base_url : 'http://localhost:8000'
+
+        // 检查是否有参数映射依赖
+        if (step.param_mappings && step.param_mappings.length > 0) {
+            const dependentSteps = step.param_mappings.map((m: any) => m.from_step).filter(Boolean)
+            if (dependentSteps.length > 0) {
+                const confirmed = confirm(
+                    `⚠️ 此接口依赖步骤 ${dependentSteps.join(', ')} 的数据。\n\n` +
+                    `单独执行时无法获取依赖数据,可能导致执行失败。\n\n` +
+                    `建议执行完整场景,或确保已手动配置所需参数。\n\n` +
+                    `是否继续执行?`
+                )
+                if (!confirmed) {
+                    setExecutingSingleStep(null)
+                    return
+                }
+            }
+        }
 
         try {
             // 直接发送步骤数组,不需要test_case_id
@@ -335,19 +389,17 @@ export default function TestsPage() {
                         管理测试环境与执行场景用例
                     </p>
                 </div>
-                {selectedProject !== 'all' && (
-                    <button
-                        onClick={() => setShowEnvConfig(true)}
-                        style={{
-                            display: 'flex', alignItems: 'center', gap: '0.5rem',
-                            padding: '0.5rem 1rem', background: 'white', border: '1px solid #E5E7EB',
-                            borderRadius: '0.5rem', color: '#374151', fontSize: '0.875rem', fontWeight: '500',
-                            cursor: 'pointer', transition: 'all 0.2s'
-                        }}
-                    >
-                        <Settings size={18} /> 项目环境配置
-                    </button>
-                )}
+                <button
+                    onClick={() => setShowEnvConfig(true)}
+                    style={{
+                        display: 'flex', alignItems: 'center', gap: '0.5rem',
+                        padding: '0.5rem 1rem', background: 'white', border: '1px solid #E5E7EB',
+                        borderRadius: '0.5rem', color: '#374151', fontSize: '0.875rem', fontWeight: '500',
+                        cursor: 'pointer', transition: 'all 0.2s'
+                    }}
+                >
+                    <Settings size={18} /> 项目环境配置
+                </button>
             </div>
 
             {/* 环境配置弹窗 */}
@@ -356,25 +408,43 @@ export default function TestsPage() {
                     position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
                     display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100
                 }}>
-                    <div style={{ background: 'white', width: '32rem', borderRadius: '1rem', padding: '1.5rem', boxShadow: '0 25px 50px -12px rgba(0,0,0,0.25)' }}>
+                    <div style={{ background: 'white', width: '40rem', maxHeight: '80vh', borderRadius: '1rem', padding: '1.5rem', boxShadow: '0 25px 50px -12px rgba(0,0,0,0.25)', display: 'flex', flexDirection: 'column' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
-                            <h3 style={{ fontSize: '1.25rem', fontWeight: '700' }}>【{selectedProject}】环境域名配置</h3>
+                            <h3 style={{ fontSize: '1.25rem', fontWeight: '700' }}>
+                                {selectedProject === 'all' ? '所有项目环境配置' : `【${selectedProject}】环境域名配置`}
+                            </h3>
                             <button onClick={() => setShowEnvConfig(false)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#6B7280' }}><X size={24} /></button>
                         </div>
 
-                        <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem' }}>
-                            <input placeholder="环境名(如 test)" value={newEnvName} onChange={e => setNewEnvName(e.target.value)} style={{ flex: 1, padding: '0.5rem', border: '1px solid #E5E7EB', borderRadius: '0.375rem' }} />
-                            <input placeholder="Base URL" value={newEnvUrl} onChange={e => setNewEnvUrl(e.target.value)} style={{ flex: 2, padding: '0.5rem', border: '1px solid #E5E7EB', borderRadius: '0.375rem' }} />
-                            <button onClick={handleSaveEnv} style={{ background: '#3B82F6', color: 'white', padding: '0.5rem 1rem', border: 'none', borderRadius: '0.375rem', cursor: 'pointer' }}><Plus size={20} /></button>
-                        </div>
+                        {/* 添加环境表单 */}
+                        {selectedProject !== 'all' ? (
+                            // 选了项目:直接添加到该项目
+                            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem' }}>
+                                <input placeholder="环境名(如 test)" value={newEnvName} onChange={e => setNewEnvName(e.target.value)} style={{ flex: 1, padding: '0.5rem', border: '1px solid #E5E7EB', borderRadius: '0.375rem' }} />
+                                <input placeholder="Base URL" value={newEnvUrl} onChange={e => setNewEnvUrl(e.target.value)} style={{ flex: 2, padding: '0.5rem', border: '1px solid #E5E7EB', borderRadius: '0.375rem' }} />
+                                <button onClick={handleSaveEnv} style={{ background: '#3B82F6', color: 'white', padding: '0.5rem 1rem', border: 'none', borderRadius: '0.375rem', cursor: 'pointer' }}><Plus size={20} /></button>
+                            </div>
+                        ) : (
+                            // 未选项目:需要选择项目
+                            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem' }}>
+                                <select value={envConfigProject} onChange={e => setEnvConfigProject(e.target.value)} style={{ flex: 1, padding: '0.5rem', border: '1px solid #E5E7EB', borderRadius: '0.375rem' }}>
+                                    <option value="">选择项目</option>
+                                    {allProjects.map(p => <option key={p} value={p}>{p}</option>)}
+                                </select>
+                                <input placeholder="环境名(如 test)" value={newEnvName} onChange={e => setNewEnvName(e.target.value)} style={{ flex: 1, padding: '0.5rem', border: '1px solid #E5E7EB', borderRadius: '0.375rem' }} />
+                                <input placeholder="Base URL" value={newEnvUrl} onChange={e => setNewEnvUrl(e.target.value)} style={{ flex: 2, padding: '0.5rem', border: '1px solid #E5E7EB', borderRadius: '0.375rem' }} />
+                                <button onClick={handleSaveEnv} disabled={!envConfigProject} style={{ background: envConfigProject ? '#3B82F6' : '#9CA3AF', color: 'white', padding: '0.5rem 1rem', border: 'none', borderRadius: '0.375rem', cursor: envConfigProject ? 'pointer' : 'not-allowed' }}><Plus size={20} /></button>
+                            </div>
+                        )}
 
-                        <div style={{ maxHeight: '20rem', overflowY: 'auto' }}>
+                        <div style={{ flex: 1, overflowY: 'auto' }}>
                             {environments.length === 0 ? (
-                                <p style={{ textAlign: 'center', color: '#9CA3AF', padding: '1rem' }}>暂无配置，请添加接口对应的域名</p>
+                                <p style={{ textAlign: 'center', color: '#9CA3AF', padding: '1rem' }}>暂无配置,请添加接口对应的域名</p>
                             ) : (
                                 <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                                    <thead style={{ background: '#F9FAFB' }}>
+                                    <thead style={{ background: '#F9FAFB', position: 'sticky', top: 0 }}>
                                         <tr>
+                                            {selectedProject === 'all' && <th style={{ textAlign: 'left', padding: '0.75rem', fontSize: '0.75rem', color: '#6B7280' }}>项目</th>}
                                             <th style={{ textAlign: 'left', padding: '0.75rem', fontSize: '0.75rem', color: '#6B7280' }}>状态</th>
                                             <th style={{ textAlign: 'left', padding: '0.75rem', fontSize: '0.75rem', color: '#6B7280' }}>环境名</th>
                                             <th style={{ textAlign: 'left', padding: '0.75rem', fontSize: '0.75rem', color: '#6B7280' }}>域名</th>
@@ -384,11 +454,12 @@ export default function TestsPage() {
                                     <tbody>
                                         {environments.map(env => (
                                             <tr key={env.id} style={{ borderBottom: '1px solid #F3F4F6' }}>
+                                                {selectedProject === 'all' && <td style={{ padding: '0.75rem', color: '#3B82F6', fontWeight: '600', fontSize: '0.8125rem' }}>{env.project_id}</td>}
                                                 <td style={{ padding: '0.75rem' }}>{env.is_default ? '✅' : '-'}</td>
                                                 <td style={{ padding: '0.75rem', fontWeight: '500' }}>{env.env_name}</td>
                                                 <td style={{ padding: '0.75rem', color: '#6B7280', fontSize: '0.8125rem' }}>{env.base_url}</td>
                                                 <td>
-                                                    <button onClick={() => handleDeleteEnv(env.env_name)} style={{ border: 'none', background: 'none', color: '#EF4444', cursor: 'pointer' }}><Trash2 size={16} /></button>
+                                                    <button onClick={() => handleDeleteEnv(env.env_name, env.project_id)} style={{ border: 'none', background: 'none', color: '#EF4444', cursor: 'pointer' }}><Trash2 size={16} /></button>
                                                 </td>
                                             </tr>
                                         ))}
@@ -420,19 +491,21 @@ export default function TestsPage() {
                         </select>
                     </div>
 
-                    {selectedProject !== 'all' && (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                            <Globe size={18} style={{ color: '#6B7280' }} />
-                            <select
-                                value={selectedEnvId || ''}
-                                onChange={(e) => setSelectedEnvId(Number(e.target.value))}
-                                style={{ padding: '0.5rem 1rem', border: '1px solid #E5E7EB', borderRadius: '0.5rem', outline: 'none', background: 'white' }}
-                            >
-                                <option value="">使用默认域名</option>
-                                {environments.map(e => <option key={e.id} value={e.id}>{e.env_name} ({e.base_url})</option>)}
-                            </select>
-                        </div>
-                    )}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                        <Globe size={18} style={{ color: '#6B7280' }} />
+                        <select
+                            value={selectedEnvId || ''}
+                            onChange={(e) => setSelectedEnvId(Number(e.target.value))}
+                            style={{ padding: '0.5rem 1rem', border: '1px solid #E5E7EB', borderRadius: '0.5rem', outline: 'none', background: 'white' }}
+                        >
+                            <option value="">使用默认域名</option>
+                            {environments.map(e => (
+                                <option key={e.id} value={e.id}>
+                                    {selectedProject === 'all' ? `[${e.project_id}] ${e.env_name} (${e.base_url})` : `${e.env_name} (${e.base_url})`}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
@@ -569,6 +642,25 @@ export default function TestsPage() {
                                                                 <span style={{ fontWeight: '800', color: step.api_method === 'POST' ? '#3B82F6' : '#10B981', minWidth: '40px' }}>{step.api_method}</span>
                                                                 <code style={{ fontFamily: 'monospace', color: '#334155', flex: 1 }}>{step.api_path}</code>
                                                                 <span style={{ color: '#64748B' }}>- {step.description}</span>
+                                                                {/* 依赖提示 */}
+                                                                {step.param_mappings && step.param_mappings.length > 0 && (
+                                                                    <span
+                                                                        style={{
+                                                                            fontSize: '0.7rem',
+                                                                            color: '#F59E0B',
+                                                                            background: '#FEF3C7',
+                                                                            padding: '0.125rem 0.5rem',
+                                                                            borderRadius: '0.25rem',
+                                                                            display: 'flex',
+                                                                            alignItems: 'center',
+                                                                            gap: '0.25rem'
+                                                                        }}
+                                                                        title={`依赖步骤: ${step.param_mappings.map((m: any) => m.from_step).filter(Boolean).join(', ')}`}
+                                                                    >
+                                                                        <AlertCircle size={12} />
+                                                                        依赖
+                                                                    </span>
+                                                                )}
                                                                 <button
                                                                     onClick={(e) => {
                                                                         e.stopPropagation()
