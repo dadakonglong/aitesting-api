@@ -64,15 +64,17 @@ func (ctx *ExecutionContext) Get(key string) (interface{}, bool) {
 
 // StepResult 步骤执行结果
 type StepResult struct {
-	StepID       string                 `json:"step_id"`
-	StepOrder    int                    `json:"step_order"`
-	Success      bool                   `json:"success"`
-	StatusCode   int                    `json:"status_code"`
-	Request      map[string]interface{} `json:"request"`
-	Response     map[string]interface{} `json:"response"`
-	ResponseTime int64                  `json:"response_time_ms"`
-	Assertions   []AssertionResult      `json:"assertions"`
-	ErrorMsg     string                 `json:"error_msg,omitempty"`
+	StepID          string                 `json:"step_id"`
+	StepOrder       int                    `json:"step_order"`
+	Success         bool                   `json:"success"`
+	StatusCode      int                    `json:"status_code"`
+	Request         map[string]interface{} `json:"request"`
+	Response        map[string]interface{} `json:"response"`
+	ResponseHeaders map[string][]string    `json:"response_headers"`
+	ResponseTime    int64                  `json:"response_time_ms"`
+	Assertions      []AssertionResult      `json:"assertions"`
+	Extractions     []ExtractionRecord     `json:"extractions"`
+	ErrorMsg        string                 `json:"error_msg,omitempty"`
 }
 
 // AssertionResult 断言结果
@@ -81,6 +83,16 @@ type AssertionResult struct {
 	Passed      bool        `json:"passed"`
 	ActualValue interface{} `json:"actual_value,omitempty"`
 	ErrorMsg    string      `json:"error_msg,omitempty"`
+}
+
+// ExtractionRecord 提取记录 - 展示AI自动识别的接口依赖关系
+type ExtractionRecord struct {
+	FromStep       int         `json:"from_step"`
+	FromField      string      `json:"from_field"`
+	ToField        string      `json:"to_field"`
+	ExtractedValue interface{} `json:"extracted_value"`
+	Success        bool        `json:"success"`
+	ErrorMsg       string      `json:"error_msg,omitempty"`
 }
 
 // TestExecutor 测试执行器
@@ -130,13 +142,14 @@ func (e *TestExecutor) executeStep(step *TestStep, execCtx *ExecutionContext) *S
 
 	startTime := time.Now()
 
-	// 1. 解析参数（替换变量引用）
-	params, err := e.resolveParams(step.Params, step.ParamMappings, execCtx)
+	// 1. 解析参数（替换变量引用）并记录提取过程
+	params, extractions, err := e.resolveParams(step.Params, step.ParamMappings, execCtx)
 	if err != nil {
 		result.Success = false
 		result.ErrorMsg = fmt.Sprintf("解析参数失败: %v", err)
 		return result
 	}
+	result.Extractions = extractions
 
 	// 2. 构建完整URL
 	fullURL := e.baseURL + step.APIPath
@@ -152,6 +165,8 @@ func (e *TestExecutor) executeStep(step *TestStep, execCtx *ExecutionContext) *S
 	result.ResponseTime = time.Since(startTime).Milliseconds()
 	result.StatusCode = resp.StatusCode()
 	result.Request = params
+	// 保存响应头
+	result.ResponseHeaders = resp.Header()
 
 	// 4. 解析响应
 	var responseBody map[string]interface{}
@@ -172,40 +187,61 @@ func (e *TestExecutor) executeStep(step *TestStep, execCtx *ExecutionContext) *S
 	return result
 }
 
-// resolveParams 解析参数
+// resolveParams 解析参数并记录提取过程
 func (e *TestExecutor) resolveParams(
 	params map[string]interface{},
 	mappings []ParamMapping,
 	execCtx *ExecutionContext,
-) (map[string]interface{}, error) {
+) (map[string]interface{}, []ExtractionRecord, error) {
 	resolved := make(map[string]interface{})
+	var extractions []ExtractionRecord
 
 	// 复制原始参数
 	for k, v := range params {
 		resolved[k] = v
 	}
 
-	// 应用参数映射
+	// 应用参数映射并记录提取过程
 	for _, mapping := range mappings {
+		extraction := ExtractionRecord{
+			FromStep:  mapping.FromStep,
+			FromField: mapping.FromField,
+			ToField:   mapping.ToField,
+			Success:   false,
+		}
+
 		stepKey := fmt.Sprintf("step_%d", mapping.FromStep)
 		stepData, ok := execCtx.Get(stepKey)
 		if !ok {
-			return nil, fmt.Errorf("步骤%d的数据不存在", mapping.FromStep)
+			extraction.ErrorMsg = fmt.Sprintf("步骤%d的数据不存在", mapping.FromStep)
+			extractions = append(extractions, extraction)
+			return nil, extractions, fmt.Errorf("步骤%d的数据不存在", mapping.FromStep)
 		}
 
 		// 提取字段值
 		value, err := extractFieldValue(stepData, mapping.FromField)
 		if err != nil {
-			return nil, err
+			extraction.ErrorMsg = err.Error()
+			extractions = append(extractions, extraction)
+			return nil, extractions, err
 		}
+
+		// 记录提取的值
+		extraction.ExtractedValue = value
+		extraction.Success = true
 
 		// 设置到目标字段
 		if err := setFieldValue(resolved, mapping.ToField, value); err != nil {
-			return nil, err
+			extraction.Success = false
+			extraction.ErrorMsg = err.Error()
+			extractions = append(extractions, extraction)
+			return nil, extractions, err
 		}
+
+		extractions = append(extractions, extraction)
 	}
 
-	return resolved, nil
+	return resolved, extractions, nil
 }
 
 // sendRequest 发送HTTP请求

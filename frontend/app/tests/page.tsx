@@ -14,6 +14,9 @@ export default function TestsPage() {
     const [allProjects, setAllProjects] = useState<string[]>([])
     const [isDeleting, setIsDeleting] = useState<number | null>(null)
     const [expandedSteps, setExpandedSteps] = useState<Set<string>>(new Set()) // scenarioId_stepOrder
+    const [activeStepTab, setActiveStepTab] = useState<Record<string, string>>({}) // key: scenarioId_stepOrder, value: tab name
+    const [executingSingleStep, setExecutingSingleStep] = useState<string | null>(null) // scenarioId_stepOrder
+    const [singleStepResults, setSingleStepResults] = useState<Record<string, any>>({}) // key: scenarioId_stepOrder
 
     // 批量执行相关
     const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
@@ -207,6 +210,50 @@ export default function TestsPage() {
         }
     }
 
+    const handleSingleStepExecute = async (scenarioId: number, step: any) => {
+        const stepKey = `${scenarioId}_${step.step_order}`
+        setExecutingSingleStep(stepKey)
+        const env = environments.find(e => e.id === selectedEnvId)
+        const baseUrl = env ? env.base_url : 'http://localhost:8000'
+
+        try {
+            // 直接发送步骤数组,不需要test_case_id
+            const requestBody = {
+                environment: env?.env_name || 'test',
+                base_url: baseUrl,
+                steps: [step]
+            }
+
+            const response = await fetch(`${process.env.NEXT_PUBLIC_EXEC_API_URL}/api/v1/executions`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(requestBody),
+            })
+
+            if (response.ok) {
+                const execution = await response.json()
+                setSingleStepResults(prev => ({ ...prev, [stepKey]: execution.results[0] }))
+                // 自动展开结果
+                setExpandedSteps(prev => new Set(prev).add(stepKey))
+                setActiveStepTab(prev => ({ ...prev, [stepKey]: '响应体' }))
+            } else {
+                const errData = await response.json().catch(() => ({}))
+                throw new Error(errData.detail || '接口执行失败')
+            }
+        } catch (error: any) {
+            setSingleStepResults(prev => ({
+                ...prev,
+                [stepKey]: {
+                    success: false,
+                    error: error.message || '执行失败',
+                    status_code: 'Error'
+                }
+            }))
+        } finally {
+            setExecutingSingleStep(null)
+        }
+    }
+
     const handleBatchExecute = async () => {
         if (selectedIds.size === 0) return
         if (!confirm(`确定要执行选中的 ${selectedIds.size} 个场景吗？`)) return
@@ -260,8 +307,13 @@ export default function TestsPage() {
         const key = `${scenarioId}_${stepOrder}`
         setExpandedSteps(prev => {
             const next = new Set(prev)
-            if (next.has(key)) next.delete(key)
-            else next.add(key)
+            if (next.has(key)) {
+                next.delete(key)
+            } else {
+                next.add(key)
+                // 默认显示"提取"标签页(核心功能)
+                setActiveStepTab(prev => ({ ...prev, [key]: '提取' }))
+            }
             return next
         })
     }
@@ -504,14 +556,129 @@ export default function TestsPage() {
                                         </div>
                                         {previewScenarios.has(scenario.id) && (
                                             <div style={{ marginTop: '0.75rem', padding: '1rem', background: '#F8FAFC', borderRadius: '0.75rem', border: '1px solid #E2E8F0' }}>
-                                                {JSON.parse(scenario.test_case_steps).map((step: any, idx: number) => (
-                                                    <div key={idx} style={{ fontSize: '0.8125rem', display: 'flex', gap: '1rem', padding: '0.5rem 0', borderBottom: idx === JSON.parse(scenario.test_case_steps).length - 1 ? 'none' : '1px dashed #E2E8F0' }}>
-                                                        <b style={{ color: '#94A3B8', minWidth: '1.5rem' }}>{step.step_order}.</b>
-                                                        <span style={{ fontWeight: '800', color: step.api_method === 'POST' ? '#3B82F6' : '#10B981', minWidth: '40px' }}>{step.api_method}</span>
-                                                        <code style={{ fontFamily: 'monospace', color: '#334155' }}>{step.api_path}</code>
-                                                        <span style={{ color: '#64748B' }}>- {step.description}</span>
-                                                    </div>
-                                                ))}
+                                                {JSON.parse(scenario.test_case_steps).map((step: any, idx: number) => {
+                                                    const stepKey = `${scenario.id}_${step.step_order}`
+                                                    const singleResult = singleStepResults[stepKey]
+                                                    const isExecuting = executingSingleStep === stepKey
+
+                                                    return (
+                                                        <div key={idx} style={{ marginBottom: idx === JSON.parse(scenario.test_case_steps).length - 1 ? 0 : '1rem' }}>
+                                                            {/* 步骤信息和执行按钮 */}
+                                                            <div style={{ fontSize: '0.8125rem', display: 'flex', gap: '1rem', padding: '0.5rem 0', alignItems: 'center' }}>
+                                                                <b style={{ color: '#94A3B8', minWidth: '1.5rem' }}>{step.step_order}.</b>
+                                                                <span style={{ fontWeight: '800', color: step.api_method === 'POST' ? '#3B82F6' : '#10B981', minWidth: '40px' }}>{step.api_method}</span>
+                                                                <code style={{ fontFamily: 'monospace', color: '#334155', flex: 1 }}>{step.api_path}</code>
+                                                                <span style={{ color: '#64748B' }}>- {step.description}</span>
+                                                                <button
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation()
+                                                                        handleSingleStepExecute(scenario.id, step)
+                                                                    }}
+                                                                    disabled={isExecuting}
+                                                                    style={{
+                                                                        padding: '0.25rem 0.75rem',
+                                                                        fontSize: '0.75rem',
+                                                                        color: isExecuting ? '#9CA3AF' : '#3B82F6',
+                                                                        background: isExecuting ? '#F3F4F6' : '#EFF6FF',
+                                                                        border: `1px solid ${isExecuting ? '#E5E7EB' : '#DBEAFE'}`,
+                                                                        borderRadius: '0.375rem',
+                                                                        cursor: isExecuting ? 'not-allowed' : 'pointer',
+                                                                        display: 'flex',
+                                                                        alignItems: 'center',
+                                                                        gap: '0.25rem',
+                                                                        transition: 'all 0.2s',
+                                                                        whiteSpace: 'nowrap'
+                                                                    }}
+                                                                    title="单独执行此接口"
+                                                                >
+                                                                    <Play size={12} fill="currentColor" />
+                                                                    {isExecuting ? '执行中...' : '执行'}
+                                                                </button>
+                                                            </div>
+
+                                                            {/* 单步执行结果 */}
+                                                            {singleResult && (
+                                                                <div style={{ marginTop: '0.5rem', marginLeft: '2.5rem' }}>
+                                                                    <div
+                                                                        onClick={() => toggleStepExpand(scenario.id, step.step_order)}
+                                                                        style={{
+                                                                            padding: '0.5rem 0.75rem',
+                                                                            borderRadius: '0.5rem',
+                                                                            fontSize: '0.75rem',
+                                                                            cursor: 'pointer',
+                                                                            display: 'flex',
+                                                                            justifyContent: 'space-between',
+                                                                            alignItems: 'center',
+                                                                            background: singleResult.error || !singleResult.success ? '#FEF2F2' : '#F0FDF4',
+                                                                            color: singleResult.error || !singleResult.success ? '#B91C1C' : '#166534',
+                                                                            border: `1px solid ${singleResult.error || !singleResult.success ? '#FECACA' : '#BBF7D0'}`
+                                                                        }}
+                                                                    >
+                                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                                                            {singleResult.error || !singleResult.success ? <XCircle size={14} /> : <CheckCircle size={14} />}
+                                                                            <span>{singleResult.error || (singleResult.success ? `成功: ${singleResult.status_code}` : `失败: ${singleResult.status_code}`)}</span>
+                                                                        </div>
+                                                                        {expandedSteps.has(stepKey) ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                                                                    </div>
+
+                                                                    {/* 简化的结果展示 */}
+                                                                    {expandedSteps.has(stepKey) && (
+                                                                        <div style={{ padding: '0.75rem', marginTop: '0.5rem', background: 'white', borderRadius: '0.5rem', border: '1px solid #E5E7EB' }}>
+                                                                            <div style={{ display: 'flex', borderBottom: '2px solid #E5E7EB', marginBottom: '0.75rem' }}>
+                                                                                {['响应体', '响应头', '请求内容'].map(tab => (
+                                                                                    <button
+                                                                                        key={tab}
+                                                                                        onClick={(e) => {
+                                                                                            e.stopPropagation()
+                                                                                            setActiveStepTab(prev => ({ ...prev, [stepKey]: tab }))
+                                                                                        }}
+                                                                                        style={{
+                                                                                            padding: '0.5rem 1rem',
+                                                                                            background: (activeStepTab[stepKey] || '响应体') === tab ? '#3B82F6' : 'transparent',
+                                                                                            color: (activeStepTab[stepKey] || '响应体') === tab ? 'white' : '#6B7280',
+                                                                                            border: 'none',
+                                                                                            cursor: 'pointer',
+                                                                                            fontWeight: (activeStepTab[stepKey] || '响应体') === tab ? '600' : '400',
+                                                                                            fontSize: '0.75rem'
+                                                                                        }}
+                                                                                    >
+                                                                                        {tab}
+                                                                                    </button>
+                                                                                ))}
+                                                                            </div>
+                                                                            <div style={{ fontSize: '0.75rem' }}>
+                                                                                {(activeStepTab[stepKey] || '响应体') === '响应体' && (
+                                                                                    <pre style={{ background: '#F8FAFC', padding: '0.75rem', borderRadius: '0.5rem', overflow: 'auto', maxHeight: '300px', fontSize: '0.7rem', margin: 0 }}>
+                                                                                        {typeof singleResult.response === 'string' ? singleResult.response : JSON.stringify(singleResult.response, null, 2)}
+                                                                                    </pre>
+                                                                                )}
+                                                                                {(activeStepTab[stepKey] || '响应体') === '响应头' && singleResult.response_headers && (
+                                                                                    <div style={{ fontSize: '0.7rem' }}>
+                                                                                        {Object.entries(singleResult.response_headers).map(([key, value]: [string, any]) => (
+                                                                                            <div key={key} style={{ padding: '0.25rem 0', borderBottom: '1px solid #F3F4F6' }}>
+                                                                                                <b>{key}:</b> {Array.isArray(value) ? value.join(', ') : String(value)}
+                                                                                            </div>
+                                                                                        ))}
+                                                                                    </div>
+                                                                                )}
+                                                                                {(activeStepTab[stepKey] || '响应体') === '请求内容' && (
+                                                                                    <pre style={{ background: '#F8FAFC', padding: '0.75rem', borderRadius: '0.5rem', overflow: 'auto', maxHeight: '300px', fontSize: '0.7rem', margin: 0 }}>
+                                                                                        {JSON.stringify(singleResult.request_data, null, 2)}
+                                                                                    </pre>
+                                                                                )}
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            )}
+
+                                                            {/* 分隔线 */}
+                                                            {idx !== JSON.parse(scenario.test_case_steps).length - 1 && !singleResult && (
+                                                                <div style={{ borderBottom: '1px dashed #E2E8F0', marginTop: '0.5rem' }} />
+                                                            )}
+                                                        </div>
+                                                    )
+                                                })}
                                             </div>
                                         )}
                                     </div>
@@ -566,20 +733,215 @@ export default function TestsPage() {
                                                             </div>
 
                                                             {expandedSteps.has(stepKey) && (
-                                                                <div style={{ padding: '0 1rem 1rem 3.75rem', fontSize: '0.75rem' }}>
-                                                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                                                                        <div>
-                                                                            <p style={{ fontWeight: '600', color: '#475569', marginBottom: '0.25rem' }}>请求内容 (Request):</p>
-                                                                            <pre style={{ background: '#F8FAFC', padding: '0.75rem', borderRadius: '0.5rem', border: '1px solid #E2E8F0', overflowX: 'auto' }}>
+                                                                <div style={{ padding: '0 1rem 1rem 3.75rem' }}>
+                                                                    {/* 标签页导航 */}
+                                                                    <div style={{ display: 'flex', borderBottom: '2px solid #E5E7EB', marginBottom: '1rem' }}>
+                                                                        {['提取', '响应体', '响应头', '断言', '请求内容'].map(tab => (
+                                                                            <button
+                                                                                key={tab}
+                                                                                onClick={() => setActiveStepTab(prev => ({ ...prev, [stepKey]: tab }))}
+                                                                                style={{
+                                                                                    padding: '0.75rem 1.5rem',
+                                                                                    background: (activeStepTab[stepKey] || '提取') === tab ? '#3B82F6' : 'transparent',
+                                                                                    color: (activeStepTab[stepKey] || '提取') === tab ? 'white' : '#6B7280',
+                                                                                    border: 'none',
+                                                                                    borderBottom: (activeStepTab[stepKey] || '提取') === tab ? '3px solid #3B82F6' : 'none',
+                                                                                    cursor: 'pointer',
+                                                                                    fontWeight: (activeStepTab[stepKey] || '提取') === tab ? '600' : '400',
+                                                                                    transition: 'all 0.2s',
+                                                                                    fontSize: '0.875rem'
+                                                                                }}
+                                                                            >
+                                                                                {tab}
+                                                                            </button>
+                                                                        ))}
+                                                                    </div>
+
+                                                                    {/* 标签页内容 */}
+                                                                    <div style={{ fontSize: '0.75rem' }}>
+                                                                        {/* 提取标签页 (默认,核心功能) */}
+                                                                        {(activeStepTab[stepKey] || '提取') === '提取' && (
+                                                                            <div>
+                                                                                {res.extractions && res.extractions.length > 0 ? (
+                                                                                    <table style={{ width: '100%', background: 'white', borderRadius: '0.5rem', borderCollapse: 'collapse' }}>
+                                                                                        <thead style={{ background: '#EFF6FF' }}>
+                                                                                            <tr>
+                                                                                                <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid #DBEAFE' }}>来源步骤</th>
+                                                                                                <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid #DBEAFE' }}>来源字段</th>
+                                                                                                <th style={{ padding: '0.75rem', textAlign: 'center', borderBottom: '2px solid #DBEAFE', width: '60px' }}>→</th>
+                                                                                                <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid #DBEAFE' }}>目标字段</th>
+                                                                                                <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid #DBEAFE' }}>提取的值</th>
+                                                                                                <th style={{ padding: '0.75rem', textAlign: 'center', borderBottom: '2px solid #DBEAFE', width: '60px' }}>状态</th>
+                                                                                            </tr>
+                                                                                        </thead>
+                                                                                        <tbody>
+                                                                                            {res.extractions.map((ext: any, idx: number) => (
+                                                                                                <tr key={idx} style={{ borderBottom: idx === res.extractions.length - 1 ? 'none' : '1px solid #F3F4F6' }}>
+                                                                                                    <td style={{ padding: '0.75rem' }}>
+                                                                                                        <span style={{
+                                                                                                            background: '#DBEAFE',
+                                                                                                            color: '#1E40AF',
+                                                                                                            padding: '0.25rem 0.5rem',
+                                                                                                            borderRadius: '0.25rem',
+                                                                                                            fontWeight: '600',
+                                                                                                            fontSize: '0.75rem'
+                                                                                                        }}>
+                                                                                                            步骤 {ext.from_step}
+                                                                                                        </span>
+                                                                                                    </td>
+                                                                                                    <td style={{ padding: '0.75rem', fontFamily: 'monospace', fontSize: '0.75rem', color: '#475569' }}>
+                                                                                                        {ext.from_field}
+                                                                                                    </td>
+                                                                                                    <td style={{ padding: '0.75rem', textAlign: 'center', color: '#3B82F6', fontSize: '1.25rem', fontWeight: 'bold' }}>
+                                                                                                        →
+                                                                                                    </td>
+                                                                                                    <td style={{ padding: '0.75rem', fontFamily: 'monospace', fontSize: '0.75rem', color: '#475569' }}>
+                                                                                                        {ext.to_field}
+                                                                                                    </td>
+                                                                                                    <td style={{ padding: '0.75rem' }}>
+                                                                                                        <code style={{
+                                                                                                            background: '#F3F4F6',
+                                                                                                            padding: '0.25rem 0.5rem',
+                                                                                                            borderRadius: '0.25rem',
+                                                                                                            fontSize: '0.75rem',
+                                                                                                            maxWidth: '200px',
+                                                                                                            display: 'inline-block',
+                                                                                                            overflow: 'hidden',
+                                                                                                            textOverflow: 'ellipsis',
+                                                                                                            whiteSpace: 'nowrap',
+                                                                                                            color: '#1F2937'
+                                                                                                        }}>
+                                                                                                            {typeof ext.extracted_value === 'object'
+                                                                                                                ? JSON.stringify(ext.extracted_value)
+                                                                                                                : String(ext.extracted_value)}
+                                                                                                        </code>
+                                                                                                    </td>
+                                                                                                    <td style={{ padding: '0.75rem', textAlign: 'center' }}>
+                                                                                                        {ext.success ? (
+                                                                                                            <span style={{ color: '#10B981', fontSize: '1.25rem' }}>✅</span>
+                                                                                                        ) : (
+                                                                                                            <span style={{ color: '#EF4444', fontSize: '1.25rem' }} title={ext.error_msg}>❌</span>
+                                                                                                        )}
+                                                                                                    </td>
+                                                                                                </tr>
+                                                                                            ))}
+                                                                                        </tbody>
+                                                                                    </table>
+                                                                                ) : (
+                                                                                    <div style={{
+                                                                                        background: 'white',
+                                                                                        padding: '2rem',
+                                                                                        textAlign: 'center',
+                                                                                        borderRadius: '0.5rem',
+                                                                                        color: '#9CA3AF'
+                                                                                    }}>
+                                                                                        <p style={{ margin: 0, fontSize: '0.875rem' }}>此步骤未从其他步骤提取数据</p>
+                                                                                        <p style={{ margin: '0.5rem 0 0', fontSize: '0.75rem' }}>
+                                                                                            (AI会自动识别接口间的依赖关系并生成提取配置)
+                                                                                        </p>
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+                                                                        )}
+
+                                                                        {/* 响应体标签页 */}
+                                                                        {(activeStepTab[stepKey] || '提取') === '响应体' && (
+                                                                            <pre style={{
+                                                                                background: 'white',
+                                                                                padding: '1rem',
+                                                                                borderRadius: '0.5rem',
+                                                                                overflow: 'auto',
+                                                                                maxHeight: '400px',
+                                                                                fontSize: '0.75rem',
+                                                                                margin: 0,
+                                                                                border: '1px solid #E5E7EB'
+                                                                            }}>
+                                                                                {typeof res.response === 'string'
+                                                                                    ? res.response
+                                                                                    : JSON.stringify(res.response, null, 2)}
+                                                                            </pre>
+                                                                        )}
+
+                                                                        {/* 响应头标签页 */}
+                                                                        {(activeStepTab[stepKey] || '提取') === '响应头' && (
+                                                                            <div>
+                                                                                {res.response_headers && Object.keys(res.response_headers).length > 0 ? (
+                                                                                    <table style={{ width: '100%', background: 'white', borderRadius: '0.5rem', borderCollapse: 'collapse' }}>
+                                                                                        <thead style={{ background: '#F3F4F6' }}>
+                                                                                            <tr>
+                                                                                                <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid #E5E7EB' }}>Header名称</th>
+                                                                                                <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid #E5E7EB' }}>值</th>
+                                                                                            </tr>
+                                                                                        </thead>
+                                                                                        <tbody>
+                                                                                            {Object.entries(res.response_headers).map(([key, value]: [string, any]) => (
+                                                                                                <tr key={key} style={{ borderBottom: '1px solid #F3F4F6' }}>
+                                                                                                    <td style={{ padding: '0.75rem', fontWeight: '600', fontSize: '0.75rem' }}>{key}</td>
+                                                                                                    <td style={{ padding: '0.75rem', fontFamily: 'monospace', fontSize: '0.75rem', color: '#475569' }}>
+                                                                                                        {Array.isArray(value) ? value.join(', ') : String(value)}
+                                                                                                    </td>
+                                                                                                </tr>
+                                                                                            ))}
+                                                                                        </tbody>
+                                                                                    </table>
+                                                                                ) : (
+                                                                                    <div style={{ background: 'white', padding: '2rem', textAlign: 'center', borderRadius: '0.5rem', color: '#9CA3AF' }}>
+                                                                                        <p style={{ margin: 0 }}>无响应头信息</p>
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+                                                                        )}
+
+                                                                        {/* 断言标签页 */}
+                                                                        {(activeStepTab[stepKey] || '提取') === '断言' && (
+                                                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                                                                                {res.assertions && res.assertions.length > 0 ? (
+                                                                                    res.assertions.map((assertion: any, idx: number) => (
+                                                                                        <div key={idx} style={{
+                                                                                            background: 'white',
+                                                                                            padding: '1rem',
+                                                                                            borderRadius: '0.5rem',
+                                                                                            borderLeft: `4px solid ${assertion.passed ? '#10B981' : '#EF4444'}`
+                                                                                        }}>
+                                                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                                                                                                <span style={{ fontSize: '1.25rem' }}>{assertion.passed ? '✅' : '❌'}</span>
+                                                                                                <span style={{ fontWeight: '600', fontSize: '0.875rem' }}>
+                                                                                                    {assertion.description || assertion.type || assertion.assertion?.description}
+                                                                                                </span>
+                                                                                            </div>
+                                                                                            <div style={{ fontSize: '0.75rem', color: '#6B7280', marginLeft: '1.75rem' }}>
+                                                                                                <div>期望值: <code style={{ background: '#F3F4F6', padding: '0.125rem 0.25rem', borderRadius: '0.25rem' }}>
+                                                                                                    {JSON.stringify(assertion.expected || assertion.assertion?.expected_value)}
+                                                                                                </code></div>
+                                                                                                <div style={{ marginTop: '0.25rem' }}>实际值: <code style={{ background: '#F3F4F6', padding: '0.125rem 0.25rem', borderRadius: '0.25rem' }}>
+                                                                                                    {JSON.stringify(assertion.actual || assertion.actual_value)}
+                                                                                                </code></div>
+                                                                                            </div>
+                                                                                        </div>
+                                                                                    ))
+                                                                                ) : (
+                                                                                    <div style={{ background: 'white', padding: '2rem', textAlign: 'center', borderRadius: '0.5rem', color: '#9CA3AF' }}>
+                                                                                        <p style={{ margin: 0 }}>无断言信息</p>
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+                                                                        )}
+
+                                                                        {/* 请求内容标签页 */}
+                                                                        {(activeStepTab[stepKey] || '提取') === '请求内容' && (
+                                                                            <pre style={{
+                                                                                background: 'white',
+                                                                                padding: '1rem',
+                                                                                borderRadius: '0.5rem',
+                                                                                overflow: 'auto',
+                                                                                maxHeight: '400px',
+                                                                                fontSize: '0.75rem',
+                                                                                margin: 0,
+                                                                                border: '1px solid #E5E7EB'
+                                                                            }}>
                                                                                 {JSON.stringify(res.request_data, null, 2)}
                                                                             </pre>
-                                                                        </div>
-                                                                        <div>
-                                                                            <p style={{ fontWeight: '600', color: '#475569', marginBottom: '0.25rem' }}>响应结果 (Response):</p>
-                                                                            <pre style={{ background: '#F8FAFC', padding: '0.75rem', borderRadius: '0.5rem', border: '1px solid #E2E8F0', overflowX: 'auto', maxHeight: '20rem' }}>
-                                                                                {typeof res.response === 'string' ? res.response : JSON.stringify(res.response, null, 2)}
-                                                                            </pre>
-                                                                        </div>
+                                                                        )}
                                                                     </div>
                                                                 </div>
                                                             )}

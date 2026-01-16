@@ -347,27 +347,45 @@ async def generate_case(scenario_id: int):
 # --- 执行引擎 ---
 
 class ExecutionRequest(BaseModel):
-    test_case_id: int
+    test_case_id: Optional[int] = None  # 可选,用于完整场景执行
     environment: str = "test"
     base_url: str = "http://localhost:8000"
+    steps: Optional[List[Dict]] = None  # 可选,用于单步执行
 
 @app.post("/api/v1/executions")
 async def execute_case(req: ExecutionRequest):
     """链式执行引擎：支持变量动态映射和 HTTP 发送"""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+        # 如果直接提供了steps,则使用它(单步执行)
+        if req.steps:
+            steps = req.steps
+        else:
+            # 否则从数据库读取(完整场景执行)
+            if not req.test_case_id:
+                raise HTTPException(status_code=400, detail="必须提供 test_case_id 或 steps")
+            
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT * FROM test_cases WHERE id = ?", (req.test_case_id,))
+            case = cursor.fetchone()
+            if not case: 
+                conn.close()
+                raise HTTPException(status_code=404, detail="用例不存在")
+            
+            steps = json.loads(case["steps"])
+            conn.close()
         
-        cursor.execute("SELECT * FROM test_cases WHERE id = ?", (req.test_case_id,))
-        case = cursor.fetchone()
-        if not case: raise HTTPException(status_code=404, detail="用例不存在")
-        
-        steps = json.loads(case["steps"])
         context = {} # 存储运行时变量，如 {step1: {response: {...}}}
         step_results = []
         
-        async with httpx.AsyncClient() as client:
+        # 创建HTTP客户端,禁用SSL验证
+        async with httpx.AsyncClient(
+            verify=False,      # 禁用SSL验证
+            timeout=30.0,      # 30秒超时
+            follow_redirects=True  # 跟随重定向
+        ) as client:
             for step in steps:
                 step_order = step.get("step_order", 0)
                 start_time = datetime.now()
@@ -384,7 +402,8 @@ async def execute_case(req: ExecutionRequest):
                     "method": step.get("api_method", "GET").upper(),
                     "request_data": step.get("params", {}),
                     "success": False,
-                    "status_code": "Error"
+                    "status_code": "Error",
+                    "extractions": []  # 新增:提取记录
                 }
                 
                 try:
@@ -398,50 +417,241 @@ async def execute_case(req: ExecutionRequest):
                     method = step_data["method"]
                     step_data["url"] = url
                     
-                    # 处理参数映射
+                    # 处理headers
+                    headers = step.get("headers", {}).copy()
+                    
+                    # 处理参数映射(包括 headers中的变量替换)并记录提取过程
+                    extractions = []
                     for mapping in step.get("param_mappings", []):
                         from_step_idx = mapping.get("from_step")
                         from_field = mapping.get("from_field")
                         to_field = mapping.get("to_field")
                         
-                        if from_step_idx is None or to_field is None: continue
+                        # 初始化提取记录
+                        extraction = {
+                            "from_step": from_step_idx,
+                            "from_field": from_field,
+                            "to_field": to_field,
+                            "extracted_value": None,
+                            "success": False,
+                            "error_msg": ""
+                        }
+                        
+                        if from_step_idx is None or to_field is None:
+                            extraction["error_msg"] = "参数映射配置不完整"
+                            extractions.append(extraction)
+                            continue
                         
                         from_data = context.get(f"step_{from_step_idx}", {}).get("response")
                         if isinstance(from_data, dict):
                             field_val = from_data.get(from_field)
-                            if field_val: params[to_field] = field_val
+                            if field_val:
+                                extraction["extracted_value"] = field_val
+                                extraction["success"] = True
+                                # 支持headers中的变量替换
+                                if to_field.startswith("headers."):
+                                    header_key = to_field.replace("headers.", "")
+                                    headers[header_key] = field_val
+                                else:
+                                    params[to_field] = field_val
+                            else:
+                                extraction["error_msg"] = f"字段 {from_field} 不存在"
+                        else:
+                            extraction["error_msg"] = f"步骤 {from_step_idx} 的响应数据不是字典类型"
+                        
+                        extractions.append(extraction)
+                    
+                    step_data["extractions"] = extractions
+                    
+                    # 处理headers中的变量引用 ${stepX.field}
+                    print(f"   原始Headers: {json.dumps(headers, ensure_ascii=False)}")
+                    for key, value in list(headers.items()):  # 使用list()避免字典大小改变
+                        if isinstance(value, str) and "${" in value:
+                            print(f"   处理Header {key}: {value}")
+                            # 简单的变量替换
+                            import re
+                            matches = re.findall(r'\$\{step(\d+)\.(.+?)\}', value)
+                            print(f"   找到变量引用: {matches}")
+                            for step_idx, field_path in matches:
+                                step_data_ref = context.get(f"step_{step_idx}", {}).get("response", {})
+                                print(f"   从step_{step_idx}获取数据: {type(step_data_ref)}")
+                                # 支持嵌套字段如 data.token
+                                field_value = step_data_ref
+                                for part in field_path.split('.'):
+                                    if isinstance(field_value, dict):
+                                        field_value = field_value.get(part)
+                                    else:
+                                        field_value = None
+                                        break
+                                print(f"   字段{field_path}的值: {field_value}")
+                                if field_value:
+                                    value = value.replace(f"${{step{step_idx}.{field_path}}}", str(field_value))
+                                    print(f"   替换后: {value}")
+                            headers[key] = value
+                    print(f"   最终Headers: {json.dumps(headers, ensure_ascii=False)}")
 
                     step_data["request_data"] = params
                     
                     # 2. 发送请求
                     print(f"🚀 执行步骤 {step_order}: {method} {url}")
-                    res = await client.request(
-                        method, 
-                        url, 
-                        params=params if method == "GET" else None, 
-                        json=params if method != "GET" else None, 
-                        timeout=10.0
-                    )
-                    duration = (datetime.now() - start_time).total_seconds()
+                    print(f"   参数: {json.dumps(params, ensure_ascii=False)[:200]}")
                     
-                    # 3. 记录结果
-                    res_content = res.text
                     try:
-                        res_json = res.json()
-                        res_content = res_json
-                    except:
-                        pass
+                        res = await client.request(
+                            method, 
+                            url, 
+                            params=params if method == "GET" else None, 
+                            json=params if method != "GET" else None,
+                            headers=headers,  # 添加headers
+                            timeout=30.0,
+                            follow_redirects=True
+                        )
+                        duration = (datetime.now() - start_time).total_seconds()
                         
-                    step_data.update({
-                        "status_code": res.status_code,
-                        "duration": duration,
-                        "response": res_content,
-                        "success": res.status_code < 400
-                    })
-                    context[f"step_{step_order}"] = step_data
-                    step_results.append(step_data)
+                        print(f"   ✅ 响应: {res.status_code} ({duration:.2f}s)")
+                        
+                        # 3. 记录结果
+                        res_content = res.text
+                        try:
+                            res_json = res.json()
+                            res_content = res_json
+                        except:
+                            pass
+                        
+                        # 4. 执行断言验证
+                        assertions_config = step.get("assertions", [])
+                        assertion_results = []
+                        
+                        # 如果AI没有生成断言,添加默认断言
+                        if not assertions_config:
+                            assertions_config = [
+                                {
+                                    "type": "status_code",
+                                    "operator": "equals",
+                                    "expected_value": 200,
+                                    "description": "状态码应为200"
+                                },
+                                {
+                                    "type": "response_time",
+                                    "operator": "less_than",
+                                    "expected_value": 1000,
+                                    "description": "响应时间应小于1秒"
+                                }
+                            ]
+                        
+                        # 验证每个断言
+                        for assertion in assertions_config:
+                            assertion_type = assertion.get("type", "")
+                            # 支持expected和expected_value两种字段名
+                            expected = assertion.get("expected") or assertion.get("expected_value")
+                            description = assertion.get("description", "")
+                            
+                            result = {
+                                "type": assertion_type,
+                                "description": description,
+                                "expected": expected,
+                                "actual": None,
+                                "passed": False
+                            }
+                            
+                            try:
+                                if assertion_type == "status_code":
+                                    result["actual"] = res.status_code
+                                    result["passed"] = (res.status_code == expected)
+                                
+                                elif assertion_type == "response_time":
+                                    actual_ms = duration * 1000
+                                    result["actual"] = f"{actual_ms:.0f}ms"
+                                    result["passed"] = (actual_ms < expected)
+                                
+                                elif assertion_type == "field_exists":
+                                    field = assertion.get("field", "")
+                                    if isinstance(res_content, dict):
+                                        # 支持嵌套字段,如 "data.user.id"
+                                        field_exists = True
+                                        current = res_content
+                                        for part in field.split("."):
+                                            if isinstance(current, dict) and part in current:
+                                                current = current[part]
+                                            else:
+                                                field_exists = False
+                                                break
+                                        result["actual"] = field_exists
+                                        result["passed"] = field_exists
+                                    else:
+                                        result["actual"] = False
+                                        result["passed"] = False
+                                
+                                elif assertion_type == "field_value":
+                                    field = assertion.get("field", "")
+                                    if isinstance(res_content, dict):
+                                        current = res_content
+                                        for part in field.split("."):
+                                            if isinstance(current, dict) and part in current:
+                                                current = current[part]
+                                            else:
+                                                current = None
+                                                break
+                                        result["actual"] = current
+                                        result["passed"] = (current == expected)
+                                    else:
+                                        result["actual"] = None
+                                        result["passed"] = False
+                                
+                                elif assertion_type == "response_contains":
+                                    text = assertion.get("text", "")
+                                    contains = text in str(res_content)
+                                    result["actual"] = contains
+                                    result["passed"] = contains
+                                
+                            except Exception as e:
+                                result["error"] = str(e)
+                                result["passed"] = False
+                            
+                            assertion_results.append(result)
+                        
+                        # 判断步骤是否成功(所有断言都通过)
+                        all_assertions_passed = all(a["passed"] for a in assertion_results)
+                            
+                        step_data.update({
+                            "status_code": res.status_code,
+                            "duration": duration,
+                            "response": res_content,
+                            "response_headers": dict(res.headers),  # 新增:响应头
+                            "assertions": assertion_results,
+                            "success": res.status_code < 400 and all_assertions_passed
+                        })
+                        context[f"step_{step_order}"] = step_data
+                        step_results.append(step_data)
+                        
+                    except httpx.TimeoutException as e:
+                        error_msg = f"请求超时: {repr(e)}"
+                        print(f"   ❌ {error_msg}")
+                        step_data["error"] = error_msg
+                        step_results.append(step_data)
+                    except httpx.ConnectError as e:
+                        # ConnectError的str()可能为空,使用repr()获取详细信息
+                        error_detail = str(e) if str(e) else repr(e)
+                        error_msg = f"连接失败: {error_detail}"
+                        print(f"   ❌ {error_msg}")
+                        step_data["error"] = error_msg
+                        step_results.append(step_data)
+                    except httpx.HTTPStatusError as e:
+                        error_msg = f"HTTP错误 {e.response.status_code}: {str(e)}"
+                        print(f"   ❌ {error_msg}")
+                        step_data["error"] = error_msg
+                        step_results.append(step_data)
+                    except Exception as e:
+                        error_detail = str(e) if str(e) else repr(e)
+                        error_msg = f"请求异常: {type(e).__name__}: {error_detail}"
+                        print(f"   ❌ {error_msg}")
+                        import traceback
+                        traceback.print_exc()
+
+                        step_data["error"] = error_msg
+                        step_results.append(step_data)
                 except Exception as e:
-                    error_msg = str(e)
+                    error_msg = f"步骤准备异常: {type(e).__name__}: {str(e)}"
                     print(f"❌ 步骤 {step_order} 运行异常: {error_msg}")
                     step_data["error"] = error_msg
                     # 即使出错也返回已准备好的 URL 和 Method，方便前端展示
@@ -450,13 +660,20 @@ async def execute_case(req: ExecutionRequest):
         # 4. 保存执行记录并判定总状态
         final_status = "success" if all(s.get("success", False) for s in step_results) else "failed"
         
-        cursor.execute(
-            "INSERT INTO executions (test_case_id, status, results) VALUES (?, ?, ?)",
-            (req.test_case_id, final_status, json.dumps(step_results))
-        )
-        exec_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
+        # 只有完整场景执行才保存到数据库
+        if req.test_case_id:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO executions (test_case_id, status, results) VALUES (?, ?, ?)",
+                (req.test_case_id, final_status, json.dumps(step_results))
+            )
+            exec_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+        else:
+            # 单步执行使用临时ID
+            exec_id = 0
         
         return {"id": exec_id, "status": final_status, "results": step_results}
     except Exception as e:
@@ -553,6 +770,186 @@ async def list_apis():
         } for r in rows
     ]}
 
+@app.delete("/api/v1/apis/{api_id}")
+async def delete_api(api_id: str):
+    """删除单个API"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM apis WHERE id = ?", (api_id,))
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        
+        if deleted == 0:
+            raise HTTPException(status_code=404, detail="API不存在")
+        
+        return {"success": True, "message": "API删除成功"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/v1/apis/project/{project_id}")
+async def delete_apis_by_project(project_id: str):
+    """批量删除指定项目的所有API"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM apis WHERE project_id = ?", (project_id,))
+        deleted_count = cursor.rowcount
+        conn.commit()
+        conn.close()
+        
+        return {"success": True, "deleted": deleted_count, "message": f"已删除 {deleted_count} 个API"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/import/postman")
+async def import_postman(file: UploadFile = File(...), project_id: str = Form("default-project")):
+    """导入Postman Collection文件"""
+    import tempfile
+    
+    try:
+        # 1. 保存上传的文件
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.json', mode='wb') as tmp:
+            content = await file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+        
+        # 2. 读取并解析Collection
+        with open(tmp_path, 'r', encoding='utf-8') as f:
+            collection = json.load(f)
+        
+        # 3. 解析Collection中的API
+        apis = []
+        _parse_postman_items(collection.get('item', []), apis, project_id)
+        
+        # 4. 保存到数据库
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # 删除该项目的旧数据
+        cursor.execute("DELETE FROM apis WHERE project_id = ?", (project_id,))
+        
+        # 插入新数据
+        for api in apis:
+            cursor.execute("""
+                INSERT INTO apis (path, method, summary, description, base_url, parameters, request_body, headers, project_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                api['path'],
+                api['method'],
+                api['name'],
+                api.get('description', ''),
+                api.get('base_url', ''),
+                json.dumps(api.get('parameters', [])),
+                json.dumps(api.get('request_body', {})),
+                json.dumps(api.get('headers', {})),
+                project_id
+            ))
+        
+        conn.commit()
+        conn.close()
+        
+        # 5. 清理临时文件
+        os.remove(tmp_path)
+        
+        return {
+            "success": True,
+            "indexed": len(apis),
+            "total": len(apis),
+            "project_id": project_id
+        }
+        
+    except Exception as e:
+        print(f"❌ Postman导入失败: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "message": str(e)
+        }
+
+def _parse_postman_items(items: List, apis: List, project_id: str, folder_path: str = ""):
+    """递归解析Postman Collection项"""
+    for item in items:
+        if 'request' in item:
+            # 这是一个请求
+            api = _convert_postman_request(item, folder_path)
+            apis.append(api)
+        elif 'item' in item:
+            # 这是一个文件夹
+            new_path = f"{folder_path}/{item['name']}" if folder_path else item['name']
+            _parse_postman_items(item['item'], apis, project_id, new_path)
+
+def _convert_postman_request(item: dict, folder_path: str) -> dict:
+    """转换Postman请求为标准格式"""
+    request = item.get('request', {})
+    url = request.get('url', {})
+    
+    # 处理URL
+    if isinstance(url, str):
+        path = url
+        base_url = ""
+    else:
+        path = '/' + '/'.join(url.get('path', []))
+        # 提取base_url
+        protocol = url.get('protocol', 'http')
+        host = url.get('host', [])
+        if isinstance(host, list):
+            base_url = f"{protocol}://{'.'.join(host)}"
+        else:
+            base_url = f"{protocol}://{host}"
+    
+    # 解析参数和Headers
+    parameters = []
+    headers = {}
+    
+    # Query参数
+    if isinstance(url, dict):
+        for query in url.get('query', []):
+            if not query.get('disabled', False):
+                parameters.append({
+                    "name": query.get('key'),
+                    "in": "query",
+                    "type": "string",
+                    "required": True,
+                    "description": query.get('description', '')
+                })
+    
+    # Header参数 - 单独提取为headers字典
+    for header in request.get('header', []):
+        if not header.get('disabled', False):
+            headers[header.get('key')] = header.get('value', '')
+    
+    # 解析请求体
+    request_body = {}
+    body = request.get('body', {})
+    if body:
+        mode = body.get('mode', 'raw')
+        if mode == 'raw':
+            try:
+                raw_data = json.loads(body.get('raw', '{}'))
+                request_body = {"schema": raw_data}
+            except:
+                request_body = {}
+        elif mode == 'formdata':
+            request_body = {"schema": {"type": "formdata"}}
+    
+    return {
+        "name": item.get('name', ''),
+        "path": path,
+        "method": request.get('method', 'GET'),
+        "description": item.get('description', ''),
+        "base_url": base_url,
+        "parameters": parameters,
+        "request_body": request_body,
+        "headers": headers,
+        "tags": [folder_path] if folder_path else []
+    }
+
 if __name__ == "__main__":
     print(f"🚀 启动统一后端 (Unified Backend)... 数据库: {DB_PATH}")
     uvicorn.run(app, host="0.0.0.0", port=8000)
+

@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Database, Search, Tag, ChevronDown, ChevronUp, Info } from 'lucide-react'
+import { Database, Search, Tag, ChevronDown, ChevronUp, Info, Trash2 } from 'lucide-react'
 
 interface API {
     id: string
@@ -23,6 +23,8 @@ export default function APIsPage() {
     const [selectedMethod, setSelectedMethod] = useState<string>('all')
     const [selectedProject, setSelectedProject] = useState<string>('all')
     const [expandedApiIds, setExpandedApiIds] = useState<Set<string>>(new Set())
+    const [deletingId, setDeletingId] = useState<string | null>(null)
+    const [confirmDelete, setConfirmDelete] = useState<{ show: boolean, id: string, name: string }>({ show: false, id: '', name: '' })
 
     useEffect(() => {
         fetchAPIs()
@@ -50,6 +52,19 @@ export default function APIsPage() {
             else next.add(apiId)
             return next
         })
+    }
+
+    const deleteApi = async (id: string) => {
+        setDeletingId(id)
+        setConfirmDelete({ show: false, id: '', name: '' })
+        try {
+            await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/apis/${id}`, { method: 'DELETE' })
+            fetchAPIs()
+        } catch (err) {
+            console.error(err)
+        } finally {
+            setDeletingId(null)
+        }
     }
 
     const projects = Array.from(new Set(apis.map(api => api.project_id || 'default-project')))
@@ -205,6 +220,20 @@ export default function APIsPage() {
                                     <span style={{ fontSize: '0.75rem', color: '#6B7280', background: '#F3F4F6', padding: '0.2rem 0.6rem', borderRadius: '1rem' }}>
                                         {api.project_id || 'default-project'}
                                     </span>
+                                    <button
+                                        onClick={(e) => { e.stopPropagation(); setConfirmDelete({ show: true, id: api.id, name: api.name }); }}
+                                        disabled={deletingId === api.id}
+                                        style={{
+                                            padding: '0.5rem',
+                                            background: deletingId === api.id ? '#D1D5DB' : '#FEE2E2',
+                                            color: '#DC2626',
+                                            border: 'none',
+                                            borderRadius: '0.5rem',
+                                            cursor: deletingId === api.id ? 'not-allowed' : 'pointer'
+                                        }}
+                                    >
+                                        <Trash2 size={16} />
+                                    </button>
                                     {expandedApiIds.has(api.id) ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
                                 </div>
                             </div>
@@ -248,6 +277,61 @@ export default function APIsPage() {
                             )}
                         </div>
                     ))}
+                </div>
+            )}
+
+            {confirmDelete.show && (
+                <div style={{
+                    position: 'fixed',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    background: 'rgba(0,0,0,0.5)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    zIndex: 1000
+                }} onClick={() => setConfirmDelete({ show: false, id: '', name: '' })}>
+                    <div style={{
+                        background: 'white',
+                        padding: '2rem',
+                        borderRadius: '1rem',
+                        maxWidth: '400px',
+                        boxShadow: '0 20px 25px -5px rgba(0,0,0,0.3)'
+                    }} onClick={(e) => e.stopPropagation()}>
+                        <h3 style={{ fontSize: '1.25rem', fontWeight: '600', marginBottom: '1rem' }}>确认删除</h3>
+                        <p style={{ color: '#6B7280', marginBottom: '1.5rem' }}>
+                            确定要删除 <strong>{confirmDelete.name}</strong> 吗?此操作不可恢复。
+                        </p>
+                        <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end' }}>
+                            <button
+                                onClick={() => setConfirmDelete({ show: false, id: '', name: '' })}
+                                style={{
+                                    padding: '0.5rem 1rem',
+                                    border: '1px solid #E5E7EB',
+                                    borderRadius: '0.5rem',
+                                    background: 'white',
+                                    cursor: 'pointer'
+                                }}
+                            >
+                                取消
+                            </button>
+                            <button
+                                onClick={() => deleteApi(confirmDelete.id)}
+                                style={{
+                                    padding: '0.5rem 1rem',
+                                    border: 'none',
+                                    borderRadius: '0.5rem',
+                                    background: '#EF4444',
+                                    color: 'white',
+                                    cursor: 'pointer'
+                                }}
+                            >
+                                删除
+                            </button>
+                        </div>
+                    </div>
                 </div>
             )}
         </div>
