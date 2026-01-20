@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Database, Search, Tag, ChevronDown, ChevronUp, Info, Trash2 } from 'lucide-react'
+import { Database, Search, Tag, ChevronDown, ChevronUp, Info, Trash2, Play, CheckCircle, XCircle, Globe, Plus, Code, Edit2 } from 'lucide-react'
 
 interface API {
     id: string
@@ -12,6 +12,7 @@ interface API {
     base_url?: string
     parameters?: any[]
     request_body?: any
+    headers?: Record<string, string>  // 新增:headers字段
     tags: string[]
     project_id: string
 }
@@ -24,11 +25,49 @@ export default function APIsPage() {
     const [selectedProject, setSelectedProject] = useState<string>('all')
     const [expandedApiIds, setExpandedApiIds] = useState<Set<string>>(new Set())
     const [deletingId, setDeletingId] = useState<string | null>(null)
+    const [executingId, setExecutingId] = useState<string | null>(null)
+    const [executionResults, setExecutionResults] = useState<Record<string, any>>({})
+    const [activeResultTab, setActiveResultTab] = useState<Record<string, string>>({}) // key: apiId, value: tab name
+    const [environments, setEnvironments] = useState<any[]>([])
+    const [selectedEnvId, setSelectedEnvId] = useState<number | null>(null)
+    const [editableParams, setEditableParams] = useState<Record<string, string>>({}) // key: apiId, value: JSON string
+    const [editableHeaders, setEditableHeaders] = useState<Record<string, string>>({}) // key: apiId, value: JSON string
+    const [editableUrlParams, setEditableUrlParams] = useState<Record<string, string>>({}) // key: apiId, value: JSON string
+    const [activeApiTab, setActiveApiTab] = useState<Record<string, string>>({}) // key: apiId, value: tab name
+    const [allProjects, setAllProjects] = useState<string[]>([])
     const [confirmDelete, setConfirmDelete] = useState<{ show: boolean, id: string, name: string }>({ show: false, id: '', name: '' })
+    const [confirmClearProject, setConfirmClearProject] = useState<{ show: boolean, projectId: string }>({ show: false, projectId: '' })
+    const [clearingProject, setClearingProject] = useState(false)
+    const [showAddModal, setShowAddModal] = useState(false)
+    const [isEditing, setIsEditing] = useState(false)
+    const [editingApiId, setEditingApiId] = useState<string | null>(null)
+    const [curlInput, setCurlInput] = useState('')
+    const [parsingCurl, setParsingCurl] = useState(false)
+    const [newApi, setNewApi] = useState<Partial<API>>({
+        name: '',
+        method: 'POST',
+        path: '',
+        description: '',
+        project_id: selectedProject !== 'all' ? selectedProject : 'default-project',
+        base_url: '',
+        headers: {},
+        request_body: {},
+        parameters: []
+    })
+    const [saveLoading, setSaveLoading] = useState(false)
 
     useEffect(() => {
         fetchAPIs()
+        fetchProjects()
     }, [])
+
+    useEffect(() => {
+        if (selectedProject !== 'all') {
+            fetchEnvironments(selectedProject)
+        } else if (allProjects.length > 0) {
+            fetchAllEnvironments()
+        }
+    }, [selectedProject, allProjects])
 
     const fetchAPIs = async () => {
         setLoading(true)
@@ -59,12 +98,269 @@ export default function APIsPage() {
         setConfirmDelete({ show: false, id: '', name: '' })
         try {
             await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/apis/${id}`, { method: 'DELETE' })
+            // 清理编辑状态
+            setEditableParams(prev => { const n = { ...prev }; delete n[id]; return n; })
+            setEditableHeaders(prev => { const n = { ...prev }; delete n[id]; return n; })
+            setEditableUrlParams(prev => { const n = { ...prev }; delete n[id]; return n; })
             fetchAPIs()
         } catch (err) {
             console.error(err)
         } finally {
             setDeletingId(null)
         }
+    }
+
+    const deleteProjectApis = async (projectId: string) => {
+        setClearingProject(true)
+        setConfirmClearProject({ show: false, projectId: '' })
+        try {
+            const response = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/apis/project/${projectId}`, {
+                method: 'DELETE'
+            })
+            if (response.ok) {
+                // 清理所有编辑状态
+                setEditableParams({})
+                setEditableHeaders({})
+                setEditableUrlParams({})
+                fetchAPIs()
+                fetchProjects()
+            }
+        } catch (err) {
+            console.error('清除项目失败:', err)
+        } finally {
+            setClearingProject(false)
+        }
+    }
+
+    const fetchProjects = async () => {
+        try {
+            const response = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/projects`)
+            if (response.ok) {
+                const data = await response.json()
+                setAllProjects(data.projects || [])
+            }
+        } catch (error) {
+            console.error('获取项目列表失败:', error)
+        }
+    }
+
+    const fetchEnvironments = async (projectId: string) => {
+        try {
+            const response = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/projects/${projectId}/environments`)
+            if (response.ok) {
+                const data = await response.json()
+                setEnvironments(data)
+                const defaultEnv = data.find((e: any) => e.is_default) || data[0]
+                if (defaultEnv) setSelectedEnvId(defaultEnv.id)
+            }
+        } catch (error) {
+            console.error('获取环境配置失败:', error)
+        }
+    }
+
+    const fetchAllEnvironments = async () => {
+        try {
+            const promises = allProjects.map(async (project) => {
+                const response = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/projects/${project}/environments`)
+                if (response.ok) {
+                    const data = await response.json()
+                    return data.map((env: any) => ({ ...env, project_id: project }))
+                }
+                return []
+            })
+            const results = await Promise.all(promises)
+            const allEnvs = results.flat()
+            setEnvironments(allEnvs)
+
+            const defaultEnv = allEnvs.find((e: any) => e.is_default) || allEnvs[0]
+            if (defaultEnv) setSelectedEnvId(defaultEnv.id)
+        } catch (error) {
+            console.error('获取所有环境配置失败:', error)
+        }
+    }
+
+    const handleExecuteApi = async (api: API) => {
+        setExecutingId(api.id)
+        const env = environments.find(e => e.id === selectedEnvId)
+        const baseUrl = env ? env.base_url : (api.base_url || 'http://localhost:8000')
+
+        try {
+            // 获取参数:优先使用用户编辑的参数,否则使用API默认参数
+            let params = api.request_body || {}
+            if (editableParams[api.id]) {
+                try {
+                    params = JSON.parse(editableParams[api.id])
+                } catch (e) {
+                    throw new Error('请求体格式错误,请检查JSON格式')
+                }
+            }
+
+            // 获取Headers:优先使用用户编辑的Headers
+            let runtimeHeaders = api.headers || {}
+            if (editableHeaders[api.id]) {
+                try {
+                    runtimeHeaders = JSON.parse(editableHeaders[api.id])
+                } catch (e) {
+                    throw new Error('Headers格式错误,请检查JSON格式')
+                }
+            }
+
+            // 获取URL参数:优先使用用户编辑的Params
+            let runtimeUrlParams = api.parameters || []
+            if (editableUrlParams[api.id]) {
+                try {
+                    runtimeUrlParams = JSON.parse(editableUrlParams[api.id])
+                } catch (e) {
+                    throw new Error('URL参数格式错误,请检查JSON格式')
+                }
+            }
+
+            // 构造请求体
+            const requestBody = {
+                environment: env?.env_name || 'test',
+                base_url: baseUrl,
+                steps: [{
+                    step_order: 1,
+                    api_id: api.id,
+                    api_name: api.name,
+                    api_path: api.path,
+                    api_method: api.method,
+                    description: api.description,
+                    params: params,
+                    headers: runtimeHeaders,
+                    url_params: runtimeUrlParams,
+                    param_mappings: [],
+                    assertions: [],
+                    expected_status: 200,
+                    timeout: 30
+                }]
+            }
+
+            const response = await fetch(`${process.env.NEXT_PUBLIC_EXEC_API_URL}/api/v1/executions`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(requestBody),
+            })
+
+            if (response.ok) {
+                const execution = await response.json()
+                setExecutionResults(prev => ({ ...prev, [api.id]: execution.results[0] }))
+                setActiveResultTab(prev => ({ ...prev, [api.id]: '响应体' }))
+                // 自动展开该API
+                setExpandedApiIds(prev => new Set(prev).add(api.id))
+            } else {
+                const errData = await response.json().catch(() => ({}))
+                throw new Error(errData.detail || '接口执行失败')
+            }
+        } catch (error: any) {
+            setExecutionResults(prev => ({
+                ...prev,
+                [api.id]: {
+                    success: false,
+                    error: error.message || '执行失败',
+                    status_code: 'Error'
+                }
+            }))
+        } finally {
+            setExecutingId(null)
+        }
+    }
+
+    const parseCurl = async () => {
+        if (!curlInput.trim()) return
+        setParsingCurl(true)
+        try {
+            const response = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/parse/curl`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ curl: curlInput }),
+            })
+            if (response.ok) {
+                const result = await response.json()
+                setNewApi(prev => ({
+                    ...prev,
+                    method: result.method || 'GET',
+                    path: result.path || '',
+                    base_url: result.base_url || '',
+                    headers: result.headers || {},
+                    request_body: result.body || {},
+                    parameters: result.parameters || []
+                }))
+                alert('解析成功! 已自动填充表单内容。')
+            } else {
+                const err = await response.json()
+                alert(`解析 cURL 失败: ${err.detail || '格式不规范'}`)
+            }
+        } catch (err) {
+            console.error(err)
+            alert('解析 cURL 出错')
+        } finally {
+            setParsingCurl(false)
+        }
+    }
+
+    const saveApi = async () => {
+        if (!newApi.name || !newApi.path) {
+            alert('请填写接口名称和路径')
+            return
+        }
+        setSaveLoading(true)
+        try {
+            const url = isEditing
+                ? `${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/apis/${editingApiId}`
+                : `${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/apis`
+            const method = isEditing ? 'PUT' : 'POST'
+
+            const response = await fetch(url, {
+                method: method,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(newApi),
+            })
+
+            if (response.ok) {
+                setShowAddModal(false)
+                setIsEditing(false)
+                setEditingApiId(null)
+                setNewApi({
+                    name: '',
+                    method: 'POST',
+                    path: '',
+                    description: '',
+                    project_id: selectedProject !== 'all' ? selectedProject : 'default-project',
+                    base_url: '',
+                    headers: {},
+                    request_body: {},
+                    parameters: []
+                })
+                setCurlInput('')
+                fetchAPIs()
+            } else {
+                const err = await response.json()
+                alert(`保存失败: ${err.detail || '未知错误'}`)
+            }
+        } catch (err) {
+            console.error(err)
+            alert('保存出错')
+        } finally {
+            setSaveLoading(false)
+        }
+    }
+
+    const openEditModal = (api: API) => {
+        setIsEditing(true)
+        setEditingApiId(api.id)
+        setNewApi({
+            name: api.name,
+            method: api.method,
+            path: api.path,
+            description: api.description,
+            project_id: api.project_id,
+            base_url: api.base_url || '',
+            headers: api.headers || {},
+            request_body: api.request_body || {},
+            parameters: api.parameters || []
+        })
+        setShowAddModal(true)
     }
 
     const projects = Array.from(new Set(apis.map(api => api.project_id || 'default-project')))
@@ -160,6 +456,88 @@ export default function APIsPage() {
                             <option key={p} value={p}>{p}</option>
                         ))}
                     </select>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginLeft: 'auto' }}>
+                        {selectedProject !== 'all' && (
+                            <button
+                                onClick={() => setConfirmClearProject({ show: true, projectId: selectedProject })}
+                                disabled={clearingProject}
+                                style={{
+                                    padding: '0.75rem 1rem',
+                                    border: '1px solid #FECACA',
+                                    borderRadius: '0.75rem',
+                                    outline: 'none',
+                                    background: '#FEF2F2',
+                                    color: '#DC2626',
+                                    cursor: clearingProject ? 'not-allowed' : 'pointer',
+                                    fontSize: '0.875rem',
+                                    fontWeight: '500',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '0.5rem'
+                                }}
+                            >
+                                <Trash2 size={16} />
+                                {clearingProject ? '正在清除...' : '清除当前项目数据'}
+                            </button>
+                        )}
+                        <button
+                            onClick={() => {
+                                setIsEditing(false);
+                                setEditingApiId(null);
+                                setNewApi({
+                                    name: '',
+                                    method: 'POST',
+                                    path: '',
+                                    description: '',
+                                    project_id: selectedProject !== 'all' ? selectedProject : 'default-project',
+                                    base_url: '',
+                                    headers: {},
+                                    request_body: {},
+                                    parameters: []
+                                });
+                                setCurlInput('');
+                                setShowAddModal(true);
+                            }}
+                            style={{
+                                padding: '0.75rem 1rem',
+                                border: 'none',
+                                borderRadius: '0.75rem',
+                                background: '#3B82F6',
+                                color: 'white',
+                                cursor: 'pointer',
+                                fontSize: '0.875rem',
+                                fontWeight: '500',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '0.5rem'
+                            }}
+                        >
+                            <Plus size={18} />
+                            手动添加接口
+                        </button>
+                        <Globe size={18} style={{ color: '#6B7280' }} />
+                        <select
+                            value={selectedEnvId || ''}
+                            onChange={(e) => setSelectedEnvId(Number(e.target.value))}
+                            style={{
+                                padding: '0.75rem 1rem',
+                                border: '2px solid #E5E7EB',
+                                borderRadius: '0.75rem',
+                                outline: 'none',
+                                background: 'white',
+                                cursor: 'pointer',
+                                minWidth: '200px'
+                            }}
+                        >
+                            <option value="">使用默认域名</option>
+                            {environments.map(e => (
+                                <option key={e.id} value={e.id}>
+                                    {selectedProject === 'all' ? `[${e.project_id}] ${e.env_name} (${e.base_url})` : `${e.env_name} (${e.base_url})`}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
                 </div>
             </div>
 
@@ -221,6 +599,40 @@ export default function APIsPage() {
                                         {api.project_id || 'default-project'}
                                     </span>
                                     <button
+                                        onClick={(e) => { e.stopPropagation(); handleExecuteApi(api); }}
+                                        disabled={executingId === api.id}
+                                        style={{
+                                            padding: '0.5rem 0.75rem',
+                                            background: executingId === api.id ? '#D1D5DB' : '#DBEAFE',
+                                            color: executingId === api.id ? '#6B7280' : '#3B82F6',
+                                            border: 'none',
+                                            borderRadius: '0.5rem',
+                                            cursor: executingId === api.id ? 'not-allowed' : 'pointer',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '0.25rem',
+                                            fontSize: '0.75rem',
+                                            fontWeight: '500'
+                                        }}
+                                    >
+                                        <Play size={14} fill="currentColor" />
+                                        {executingId === api.id ? '执行中...' : '执行'}
+                                    </button>
+                                    <button
+                                        onClick={(e) => { e.stopPropagation(); openEditModal(api); }}
+                                        style={{
+                                            padding: '0.5rem',
+                                            background: '#F3F4F6',
+                                            color: '#374151',
+                                            border: 'none',
+                                            borderRadius: '0.5rem',
+                                            cursor: 'pointer'
+                                        }}
+                                        title="编辑接口定义"
+                                    >
+                                        <Edit2 size={16} />
+                                    </button>
+                                    <button
                                         onClick={(e) => { e.stopPropagation(); setConfirmDelete({ show: true, id: api.id, name: api.name }); }}
                                         disabled={deletingId === api.id}
                                         style={{
@@ -240,37 +652,286 @@ export default function APIsPage() {
 
                             {expandedApiIds.has(api.id) && (
                                 <div onClick={(e) => e.stopPropagation()} style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid #F3F4F6' }}>
-                                    {api.parameters && api.parameters.length > 0 && (
-                                        <div style={{ marginBottom: '1.5rem' }}>
-                                            <h4 style={{ fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.75rem' }}>请求参数</h4>
-                                            <div style={{ border: '1px solid #E5E7EB', borderRadius: '0.5rem', overflow: 'hidden' }}>
-                                                <table style={{ width: '100%', fontSize: '0.75rem', borderCollapse: 'collapse' }}>
-                                                    <thead style={{ background: '#F9FAFB' }}>
-                                                        <tr>
-                                                            <th style={{ textAlign: 'left', padding: '0.5rem 0.75rem' }}>参数名</th>
-                                                            <th style={{ textAlign: 'left', padding: '0.5rem 0.75rem' }}>位置</th>
-                                                            <th style={{ textAlign: 'left', padding: '0.5rem 0.75rem' }}>类型</th>
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody>
-                                                        {api.parameters.map((p, i) => (
-                                                            <tr key={i} style={{ borderTop: '1px solid #F3F4F6' }}>
-                                                                <td style={{ padding: '0.5rem 0.75rem', fontWeight: '500' }}>{p.name}</td>
-                                                                <td style={{ padding: '0.5rem 0.75rem' }}>{p.in}</td>
-                                                                <td style={{ padding: '0.5rem 0.75rem' }}>{p.schema?.type || 'string'}</td>
-                                                            </tr>
-                                                        ))}
-                                                    </tbody>
-                                                </table>
+                                    {/* 标签页导航 */}
+                                    <div style={{ display: 'flex', borderBottom: '2px solid #E5E7EB', marginBottom: '1.5rem' }}>
+                                        {['Headers', 'Body', 'Params', '执行结果'].map(tab => (
+                                            <button
+                                                key={tab}
+                                                onClick={() => setActiveApiTab(prev => ({ ...prev, [api.id]: tab }))}
+                                                style={{
+                                                    padding: '0.75rem 1.5rem',
+                                                    background: (activeApiTab[api.id] || 'Headers') === tab ? 'white' : 'transparent',
+                                                    color: (activeApiTab[api.id] || 'Headers') === tab ? '#3B82F6' : '#6B7280',
+                                                    border: 'none',
+                                                    borderBottom: (activeApiTab[api.id] || 'Headers') === tab ? '2px solid #3B82F6' : 'none',
+                                                    cursor: 'pointer',
+                                                    fontWeight: (activeApiTab[api.id] || 'Headers') === tab ? '600' : '400',
+                                                    fontSize: '0.875rem',
+                                                    transition: 'all 0.2s',
+                                                    marginBottom: '-2px'
+                                                }}
+                                            >
+                                                {tab}
+                                                {tab === 'Params' && api.parameters && api.parameters.length > 0 && (
+                                                    <span style={{ marginLeft: '0.5rem', background: '#E5E7EB', padding: '0.125rem 0.5rem', borderRadius: '1rem', fontSize: '0.7rem' }}>
+                                                        {api.parameters.length}
+                                                    </span>
+                                                )}
+                                            </button>
+                                        ))}
+                                    </div>
+
+                                    {/* Headers 标签页 */}
+                                    {(activeApiTab[api.id] || 'Headers') === 'Headers' && (
+                                        <div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                                                <h4 style={{ fontSize: '0.875rem', fontWeight: '600' }}>请求头 (可编辑)</h4>
+                                                <button
+                                                    onClick={() => {
+                                                        setEditableHeaders(prev => {
+                                                            const next = { ...prev }
+                                                            delete next[api.id]
+                                                            return next
+                                                        })
+                                                    }}
+                                                    style={{
+                                                        padding: '0.25rem 0.75rem',
+                                                        fontSize: '0.75rem',
+                                                        background: '#F3F4F6',
+                                                        border: '1px solid #E5E7EB',
+                                                        borderRadius: '0.375rem',
+                                                        cursor: 'pointer',
+                                                        color: '#374151'
+                                                    }}
+                                                >
+                                                    重置
+                                                </button>
                                             </div>
+                                            <textarea
+                                                value={editableHeaders[api.id] !== undefined ? editableHeaders[api.id] : JSON.stringify(api.headers || {}, null, 2)}
+                                                onChange={(e) => setEditableHeaders(prev => ({ ...prev, [api.id]: e.target.value }))}
+                                                style={{
+                                                    width: '100%',
+                                                    minHeight: '200px',
+                                                    background: '#F8FAFC',
+                                                    padding: '1rem',
+                                                    borderRadius: '0.5rem',
+                                                    fontSize: '0.75rem',
+                                                    border: '1px solid #E2E8F0',
+                                                    fontFamily: 'monospace',
+                                                    resize: 'vertical',
+                                                    outline: 'none'
+                                                }}
+                                                placeholder="输入JSON格式的请求头"
+                                            />
+                                            <p style={{ fontSize: '0.7rem', color: '#6B7280', marginTop: '0.5rem' }}>
+                                                💡 提示: 修改请求头后点击右上角"执行"按钮生效
+                                            </p>
                                         </div>
                                     )}
-                                    {api.request_body && Object.keys(api.request_body).length > 0 && (
+
+                                    {/* Body 标签页 */}
+                                    {(activeApiTab[api.id] || 'Headers') === 'Body' && (
                                         <div>
-                                            <h4 style={{ fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.75rem' }}>请求体 (RequestBody)</h4>
-                                            <pre style={{ background: '#F8FAFC', padding: '1rem', borderRadius: '0.5rem', fontSize: '0.75rem', border: '1px solid #E2E8F0' }}>
-                                                {JSON.stringify(api.request_body, null, 2)}
-                                            </pre>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                                                <h4 style={{ fontSize: '0.875rem', fontWeight: '600' }}>请求参数 (可编辑)</h4>
+                                                <button
+                                                    onClick={() => {
+                                                        setEditableParams(prev => {
+                                                            const next = { ...prev }
+                                                            delete next[api.id]
+                                                            return next
+                                                        })
+                                                    }}
+                                                    style={{
+                                                        padding: '0.25rem 0.75rem',
+                                                        fontSize: '0.75rem',
+                                                        background: '#F3F4F6',
+                                                        border: '1px solid #E5E7EB',
+                                                        borderRadius: '0.375rem',
+                                                        cursor: 'pointer',
+                                                        color: '#374151'
+                                                    }}
+                                                >
+                                                    重置
+                                                </button>
+                                            </div>
+                                            <textarea
+                                                value={editableParams[api.id] !== undefined ? editableParams[api.id] : JSON.stringify(api.request_body || {}, null, 2)}
+                                                onChange={(e) => setEditableParams(prev => ({ ...prev, [api.id]: e.target.value }))}
+                                                style={{
+                                                    width: '100%',
+                                                    minHeight: '300px',
+                                                    background: '#F8FAFC',
+                                                    padding: '1rem',
+                                                    borderRadius: '0.5rem',
+                                                    fontSize: '0.75rem',
+                                                    border: '1px solid #E2E8F0',
+                                                    fontFamily: 'monospace',
+                                                    resize: 'vertical',
+                                                    outline: 'none'
+                                                }}
+                                                placeholder="输入JSON格式的请求参数"
+                                            />
+                                            <p style={{ fontSize: '0.7rem', color: '#6B7280', marginTop: '0.5rem' }}>
+                                                💡 提示: 修改参数后点击右上角"执行"按钮,将使用修改后的参数进行请求
+                                            </p>
+                                        </div>
+                                    )}
+
+                                    {/* Params 标签页 */}
+                                    {(activeApiTab[api.id] || 'Headers') === 'Params' && (
+                                        <div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                                                <h4 style={{ fontSize: '0.875rem', fontWeight: '600' }}>URL参数 (可编辑)</h4>
+                                                <button
+                                                    onClick={() => {
+                                                        setEditableUrlParams(prev => {
+                                                            const next = { ...prev }
+                                                            delete next[api.id]
+                                                            return next
+                                                        })
+                                                    }}
+                                                    style={{
+                                                        padding: '0.25rem 0.75rem',
+                                                        fontSize: '0.75rem',
+                                                        background: '#F3F4F6',
+                                                        border: '1px solid #E5E7EB',
+                                                        borderRadius: '0.375rem',
+                                                        cursor: 'pointer',
+                                                        color: '#374151'
+                                                    }}
+                                                >
+                                                    重置
+                                                </button>
+                                            </div>
+                                            <textarea
+                                                value={editableUrlParams[api.id] !== undefined ? editableUrlParams[api.id] : JSON.stringify(api.parameters || [], null, 2)}
+                                                onChange={(e) => setEditableUrlParams(prev => ({ ...prev, [api.id]: e.target.value }))}
+                                                style={{
+                                                    width: '100%',
+                                                    minHeight: '200px',
+                                                    background: '#F8FAFC',
+                                                    padding: '1rem',
+                                                    borderRadius: '0.5rem',
+                                                    fontSize: '0.75rem',
+                                                    border: '1px solid #E2E8F0',
+                                                    fontFamily: 'monospace',
+                                                    resize: 'vertical',
+                                                    outline: 'none'
+                                                }}
+                                                placeholder="输入JSON格式的URL参数 (即Swagger中的parameters)"
+                                            />
+                                            <p style={{ fontSize: '0.7rem', color: '#6B7280', marginTop: '0.5rem' }}>
+                                                💡 提示: 数组格式,包含 name, in (query/path), required 等字段
+                                            </p>
+                                        </div>
+                                    )}
+
+                                    {/* 执行结果 */}
+                                    {(activeApiTab[api.id] || 'Headers') === '执行结果' && executionResults[api.id] && (
+                                        <div style={{ marginTop: '1.5rem', paddingTop: '1.5rem', borderTop: '2px solid #E5E7EB' }}>
+                                            <div style={{
+                                                padding: '0.75rem 1rem',
+                                                borderRadius: '0.5rem',
+                                                fontSize: '0.875rem',
+                                                marginBottom: '1rem',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: '0.5rem',
+                                                background: executionResults[api.id].error || !executionResults[api.id].success ? '#FEF2F2' : '#F0FDF4',
+                                                color: executionResults[api.id].error || !executionResults[api.id].success ? '#B91C1C' : '#166534',
+                                                border: `1px solid ${executionResults[api.id].error || !executionResults[api.id].success ? '#FECACA' : '#BBF7D0'}`
+                                            }}>
+                                                {executionResults[api.id].error || !executionResults[api.id].success ? <XCircle size={18} /> : <CheckCircle size={18} />}
+                                                <span style={{ fontWeight: '600' }}>
+                                                    {executionResults[api.id].error || (executionResults[api.id].success ? `执行成功: ${executionResults[api.id].status_code}` : `执行失败: ${executionResults[api.id].status_code}`)}
+                                                </span>
+                                            </div>
+
+                                            {/* 标签页 */}
+                                            <div style={{ display: 'flex', borderBottom: '2px solid #E5E7EB', marginBottom: '1rem' }}>
+                                                {['响应体', '响应头', '断言', '请求内容'].map(tab => (
+                                                    <button
+                                                        key={tab}
+                                                        onClick={() => setActiveResultTab(prev => ({ ...prev, [api.id]: tab }))}
+                                                        style={{
+                                                            padding: '0.75rem 1.5rem',
+                                                            background: (activeResultTab[api.id] || '响应体') === tab ? '#3B82F6' : 'transparent',
+                                                            color: (activeResultTab[api.id] || '响应体') === tab ? 'white' : '#6B7280',
+                                                            border: 'none',
+                                                            cursor: 'pointer',
+                                                            fontWeight: (activeResultTab[api.id] || '响应体') === tab ? '600' : '400',
+                                                            fontSize: '0.875rem',
+                                                            transition: 'all 0.2s',
+                                                            borderRadius: '0.5rem 0.5rem 0 0'
+                                                        }}
+                                                    >
+                                                        {tab}
+                                                    </button>
+                                                ))}
+                                            </div>
+
+                                            {/* 标签页内容 */}
+                                            <div>
+                                                {(activeResultTab[api.id] || '响应体') === '响应体' && (
+                                                    <pre style={{ background: '#F8FAFC', padding: '1rem', borderRadius: '0.5rem', overflow: 'auto', maxHeight: '400px', fontSize: '0.75rem', margin: 0, border: '1px solid #E2E8F0' }}>
+                                                        {typeof executionResults[api.id].response === 'string' ? executionResults[api.id].response : JSON.stringify(executionResults[api.id].response, null, 2)}
+                                                    </pre>
+                                                )}
+                                                {(activeResultTab[api.id] || '响应体') === '响应头' && executionResults[api.id].response_headers && (
+                                                    <div style={{ fontSize: '0.8125rem', border: '1px solid #E2E8F0', borderRadius: '0.5rem', overflow: 'hidden' }}>
+                                                        {Object.entries(executionResults[api.id].response_headers).map(([key, value]: [string, any]) => (
+                                                            <div key={key} style={{ padding: '0.75rem', borderBottom: '1px solid #F3F4F6', display: 'flex', gap: '1rem' }}>
+                                                                <span style={{ fontWeight: '600', minWidth: '200px', color: '#374151' }}>{key}:</span>
+                                                                <span style={{ color: '#6B7280' }}>{Array.isArray(value) ? value.join(', ') : String(value)}</span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                                {(activeResultTab[api.id] || '响应体') === '断言' && (
+                                                    <div style={{ fontSize: '0.8125rem' }}>
+                                                        {executionResults[api.id].assertions && executionResults[api.id].assertions.length > 0 ? (
+                                                            executionResults[api.id].assertions.map((assertion: any, idx: number) => (
+                                                                <div key={idx} style={{ padding: '1rem', marginBottom: '0.75rem', background: assertion.passed ? '#F0FDF4' : '#FEF2F2', border: `1px solid ${assertion.passed ? '#BBF7D0' : '#FECACA'}`, borderRadius: '0.625rem' }}>
+                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                                                        <div style={{ color: assertion.passed ? '#10B981' : '#EF4444', display: 'flex', alignItems: 'center' }}>
+                                                                            {assertion.passed ? <CheckCircle size={18} /> : <XCircle size={18} />}
+                                                                        </div>
+                                                                        <div style={{ flex: 1 }}>
+                                                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem' }}>
+                                                                                <span style={{ fontWeight: '700', color: assertion.passed ? '#065F46' : '#991B1B' }}>
+                                                                                    {assertion.description || `${assertion.field || assertion.type} ${assertion.operator || '校验'}`}
+                                                                                </span>
+                                                                                <span style={{ fontSize: '0.7rem', color: assertion.passed ? '#059669' : '#DC2626', background: 'white', padding: '0.125rem 0.5rem', borderRadius: '1rem', border: '1px solid currentColor' }}>
+                                                                                    {assertion.type}
+                                                                                </span>
+                                                                            </div>
+                                                                            <div style={{ display: 'flex', gap: '2rem', fontSize: '0.875rem' }}>
+                                                                                <div>
+                                                                                    <span style={{ color: '#6B7280', fontSize: '0.75rem' }}>期望结果: </span>
+                                                                                    <span style={{ fontFamily: 'monospace', fontWeight: '600' }}>{JSON.stringify(assertion.expected)}</span>
+                                                                                </div>
+                                                                                <div>
+                                                                                    <span style={{ color: '#6B7280', fontSize: '0.75rem' }}>实际结果: </span>
+                                                                                    <span style={{ fontFamily: 'monospace', fontWeight: '600', color: assertion.passed ? '#059669' : '#DC2626' }}>{JSON.stringify(assertion.actual)}</span>
+                                                                                </div>
+                                                                            </div>
+                                                                        </div>
+                                                                    </div>
+                                                                </div>
+                                                            ))
+                                                        ) : (
+                                                            <p style={{ textAlign: 'center', color: '#9CA3AF', padding: '2rem' }}>暂无断言</p>
+                                                        )}
+                                                    </div>
+                                                )}
+                                                {(activeResultTab[api.id] || '响应体') === '请求内容' && (
+                                                    <pre style={{ background: '#F8FAFC', padding: '1rem', borderRadius: '0.5rem', overflow: 'auto', maxHeight: '400px', fontSize: '0.75rem', margin: 0, border: '1px solid #E2E8F0' }}>
+                                                        {JSON.stringify(executionResults[api.id].request_data || {}, null, 2)}
+                                                    </pre>
+                                                )}
+                                            </div>
                                         </div>
                                     )}
                                 </div>
@@ -329,6 +990,248 @@ export default function APIsPage() {
                                 }}
                             >
                                 删除
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+            {confirmClearProject.show && (
+                <div style={{
+                    position: 'fixed',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    background: 'rgba(0,0,0,0.5)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    zIndex: 1000
+                }} onClick={() => setConfirmClearProject({ show: false, projectId: '' })}>
+                    <div style={{
+                        background: 'white',
+                        padding: '2rem',
+                        borderRadius: '1rem',
+                        maxWidth: '400px',
+                        boxShadow: '0 20px 25px -5px rgba(0,0,0,0.3)'
+                    }} onClick={(e) => e.stopPropagation()}>
+                        <h3 style={{ fontSize: '1.25rem', fontWeight: '600', marginBottom: '1rem' }}>清除项目数据</h3>
+                        <p style={{ color: '#6B7280', marginBottom: '1.5rem' }}>
+                            确定要清除项目 <strong>{confirmClearProject.projectId}</strong> 下的所有 API 吗?此操作不可恢复。
+                        </p>
+                        <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end' }}>
+                            <button
+                                onClick={() => setConfirmClearProject({ show: false, projectId: '' })}
+                                style={{
+                                    padding: '0.5rem 1rem',
+                                    border: '1px solid #E5E7EB',
+                                    borderRadius: '0.5rem',
+                                    background: 'white',
+                                    cursor: 'pointer'
+                                }}
+                            >
+                                取消
+                            </button>
+                            <button
+                                onClick={() => deleteProjectApis(confirmClearProject.projectId)}
+                                style={{
+                                    padding: '0.5rem 1rem',
+                                    border: 'none',
+                                    borderRadius: '0.5rem',
+                                    background: '#EF4444',
+                                    color: 'white',
+                                    cursor: 'pointer'
+                                }}
+                            >
+                                确认清除
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* 手动添加/编辑接口 Modal */}
+            {showAddModal && (
+                <div style={{
+                    position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                    background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    zIndex: 1000, padding: '20px'
+                }} onClick={() => setShowAddModal(false)}>
+                    <div style={{
+                        background: 'white', borderRadius: '1.25rem', width: '100%', maxWidth: '900px',
+                        maxHeight: '90vh', overflowY: 'auto', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
+                        display: 'flex', flexDirection: 'column'
+                    }} onClick={(e) => e.stopPropagation()}>
+                        {/* Header */}
+                        <div style={{ padding: '1.5rem', borderBottom: '1px solid #E5E7EB', display: 'flex', justifyContent: 'space-between', alignItems: 'center', position: 'sticky', top: 0, background: 'white', zIndex: 10 }}>
+                            <h2 style={{ fontSize: '1.5rem', fontWeight: '700', color: '#111827', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                <Database size={24} style={{ color: '#3B82F6' }} />
+                                {isEditing ? '编辑接口定义' : '手动添加接口'}
+                            </h2>
+                            <button onClick={() => setShowAddModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6B7280' }}>
+                                <XCircle size={28} />
+                            </button>
+                        </div>
+
+                        <div style={{ padding: '2rem' }}>
+                            {/* cURL 解析区 */}
+                            {!isEditing && (
+                                <div style={{ marginBottom: '2rem', padding: '1.5rem', background: '#F0F9FF', borderRadius: '1rem', border: '1px dashed #7DD3FC' }}>
+                                    <h3 style={{ fontSize: '1rem', fontWeight: '600', color: '#0369A1', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                        <Code size={18} /> 通过 cURL 快速导入 (可选)
+                                    </h3>
+                                    <div style={{ display: 'flex', gap: '1rem' }}>
+                                        <textarea
+                                            value={curlInput}
+                                            onChange={(e) => setCurlInput(e.target.value)}
+                                            placeholder="粘贴 cURL 命令，如: curl -X POST http://api.com -H 'Content-Type: application/json' -d '{&quot;id&quot;:1}'"
+                                            style={{
+                                                flex: 1, height: '80px', padding: '0.75rem', borderRadius: '0.5rem',
+                                                border: '1px solid #BAE6FD', fontSize: '0.8125rem', fontFamily: 'monospace', outline: 'none'
+                                            }}
+                                        />
+                                        <button
+                                            onClick={parseCurl}
+                                            disabled={parsingCurl || !curlInput.trim()}
+                                            style={{
+                                                padding: '0 1.5rem', background: parsingCurl || !curlInput.trim() ? '#CBD5E1' : '#0EA5E9',
+                                                color: 'white', borderRadius: '0.5rem', border: 'none', fontWeight: '600', cursor: 'pointer'
+                                            }}
+                                        >
+                                            {parsingCurl ? '解析中...' : '解析'}
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* 基本信息 */}
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1.5rem', marginBottom: '1.5rem' }}>
+                                <div style={{ gridColumn: 'span 2' }}>
+                                    <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', color: '#374151', marginBottom: '0.5rem' }}>接口名称 *</label>
+                                    <input
+                                        type="text"
+                                        value={newApi.name}
+                                        onChange={(e) => setNewApi({ ...newApi, name: e.target.value })}
+                                        placeholder="如: 歌曲下单接口"
+                                        style={{ width: '100%', padding: '0.75rem', borderRadius: '0.5rem', border: '1px solid #D1D5DB', outline: 'none' }}
+                                    />
+                                </div>
+                                <div>
+                                    <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', color: '#374151', marginBottom: '0.5rem' }}>请求方法 *</label>
+                                    <select
+                                        value={newApi.method}
+                                        onChange={(e) => setNewApi({ ...newApi, method: e.target.value })}
+                                        style={{ width: '100%', padding: '0.75rem', borderRadius: '0.5rem', border: '1px solid #D1D5DB', outline: 'none', background: 'white' }}
+                                    >
+                                        <option value="GET">GET</option>
+                                        <option value="POST">POST</option>
+                                        <option value="PUT">PUT</option>
+                                        <option value="DELETE">DELETE</option>
+                                        <option value="PATCH">PATCH</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', color: '#374151', marginBottom: '0.5rem' }}>所属项目</label>
+                                    <input
+                                        type="text"
+                                        value={newApi.project_id}
+                                        onChange={(e) => setNewApi({ ...newApi, project_id: e.target.value })}
+                                        placeholder="default-project"
+                                        style={{ width: '100%', padding: '0.75rem', borderRadius: '0.5rem', border: '1px solid #D1D5DB', outline: 'none' }}
+                                    />
+                                </div>
+                                <div style={{ gridColumn: 'span 2' }}>
+                                    <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', color: '#374151', marginBottom: '0.5rem' }}>接口路径 (Path) *</label>
+                                    <input
+                                        type="text"
+                                        value={newApi.path}
+                                        onChange={(e) => setNewApi({ ...newApi, path: e.target.value })}
+                                        placeholder="如: /api/v1/user/login"
+                                        style={{ width: '100%', padding: '0.75rem', borderRadius: '0.5rem', border: '1px solid #D1D5DB', outline: 'none' }}
+                                    />
+                                </div>
+                                <div style={{ gridColumn: 'span 2' }}>
+                                    <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', color: '#374151', marginBottom: '0.5rem' }}>默认域名 (Base URL)</label>
+                                    <input
+                                        type="text"
+                                        value={newApi.base_url}
+                                        onChange={(e) => setNewApi({ ...newApi, base_url: e.target.value })}
+                                        placeholder="如: http://api.example.com"
+                                        style={{ width: '100%', padding: '0.75rem', borderRadius: '0.5rem', border: '1px solid #D1D5DB', outline: 'none' }}
+                                    />
+                                </div>
+                            </div>
+
+                            {/* 详细配置 */}
+                            <div style={{ display: 'grid', gap: '1.5rem' }}>
+                                <div>
+                                    <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', color: '#374151', marginBottom: '0.5rem' }}>请求头 (Headers JSON)</label>
+                                    <textarea
+                                        value={typeof newApi.headers === 'string' ? newApi.headers : JSON.stringify(newApi.headers, null, 2)}
+                                        onChange={(e) => {
+                                            try {
+                                                const parsed = JSON.parse(e.target.value)
+                                                setNewApi({ ...newApi, headers: parsed })
+                                            } catch (err) {
+                                                setNewApi({ ...newApi, headers: e.target.value as any })
+                                            }
+                                        }}
+                                        placeholder="{}"
+                                        style={{ width: '100%', height: '120px', padding: '0.75rem', borderRadius: '0.5rem', border: '1px solid #D1D5DB', outline: 'none', fontFamily: 'monospace', fontSize: '0.8125rem' }}
+                                    />
+                                </div>
+                                <div>
+                                    <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', color: '#374151', marginBottom: '0.5rem' }}>请求体 (RequestBody JSON)</label>
+                                    <textarea
+                                        value={typeof newApi.request_body === 'string' ? newApi.request_body : JSON.stringify(newApi.request_body, null, 2)}
+                                        onChange={(e) => {
+                                            try {
+                                                const parsed = JSON.parse(e.target.value)
+                                                setNewApi({ ...newApi, request_body: parsed })
+                                            } catch (err) {
+                                                setNewApi({ ...newApi, request_body: e.target.value as any })
+                                            }
+                                        }}
+                                        placeholder="{}"
+                                        style={{ width: '100%', height: '200px', padding: '0.75rem', borderRadius: '0.5rem', border: '1px solid #D1D5DB', outline: 'none', fontFamily: 'monospace', fontSize: '0.8125rem' }}
+                                    />
+                                </div>
+                                <div>
+                                    <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', color: '#374151', marginBottom: '0.5rem' }}>URL参数定义 (Parameters JSON Array)</label>
+                                    <textarea
+                                        value={typeof newApi.parameters === 'string' ? newApi.parameters : JSON.stringify(newApi.parameters, null, 2)}
+                                        onChange={(e) => {
+                                            try {
+                                                const parsed = JSON.parse(e.target.value)
+                                                setNewApi({ ...newApi, parameters: parsed })
+                                            } catch (err) {
+                                                setNewApi({ ...newApi, parameters: e.target.value as any })
+                                            }
+                                        }}
+                                        placeholder="[]"
+                                        style={{ width: '100%', height: '120px', padding: '0.75rem', borderRadius: '0.5rem', border: '1px solid #D1D5DB', outline: 'none', fontFamily: 'monospace', fontSize: '0.8125rem' }}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Footer */}
+                        <div style={{ padding: '1.5rem', borderTop: '1px solid #E5E7EB', display: 'flex', gap: '1rem', justifyContent: 'flex-end', position: 'sticky', bottom: 0, background: 'white' }}>
+                            <button
+                                onClick={() => setShowAddModal(false)}
+                                style={{ padding: '0.75rem 2rem', borderRadius: '0.5rem', border: '1px solid #D1D5DB', background: 'white', cursor: 'pointer', fontWeight: '600' }}
+                            >
+                                取消
+                            </button>
+                            <button
+                                onClick={saveApi}
+                                disabled={saveLoading}
+                                style={{
+                                    padding: '0.75rem 3rem', borderRadius: '0.5rem', border: 'none', background: '#3B82F6',
+                                    color: 'white', fontWeight: '700', cursor: saveLoading ? 'not-allowed' : 'pointer'
+                                }}
+                            >
+                                {saveLoading ? '保存中...' : (isEditing ? '更新接口' : '立即保存')}
                             </button>
                         </div>
                     </div>

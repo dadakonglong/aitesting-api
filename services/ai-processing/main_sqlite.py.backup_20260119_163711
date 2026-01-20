@@ -306,7 +306,7 @@ async def generate_case(scenario_id: int):
         
         # 2. RAG: 简易语义检索 (包含完整参数和请求体以供 AI 精准识别)
         cursor.execute("""
-            SELECT path, method, summary, description, base_url, parameters, request_body, headers 
+            SELECT path, method, summary, description, base_url, parameters, request_body 
             FROM apis 
             WHERE project_id = ?
         """, (scenario["project_id"],))
@@ -318,36 +318,14 @@ async def generate_case(scenario_id: int):
         任务：根据给出的【业务意图】和【可用 API 列表】，自动识别出正确的调用链，并以 JSON 格式返回。
         要求：
         1. 识别参数依赖（如 A 接口返回的 id 是 B 接口的输入）。
-        2. 生成完整的测试数据：
-           - `params` 必须包含该 API 定义中 `request_body` 的所有字段。
-           - 严禁返回空对象或仅包含映射字段。
-           - 使用合理且真实的测试数据（如果是查询，使用典型值；如果是创建，使用随机但合理的姓名/手机号等）。
-        3. 参数映射 (param_mappings)：
-           - 即使字段值将从前序步骤提取，也必须在 `params` 中保留该字段，并填充占位符数据。
-           - 映射关系必须准确指向前序步骤的 `from_field` 和当前步骤的 `to_field`。
-        4. **Headers 继承 (重要!)**：
-           - 如果 API 定义中有 `headers` 字段,必须在生成的步骤中包含相同的 headers。
-           - 特别是 `Content-Type` 头,必须严格按照 API 定义设置。
-        5. 自动生成逻辑断言：
+        2. 生成真实的测试数据（如果是查询，使用典型值；如果是创建，使用随机但合理的姓名/手机号等）。
+        3. 自动生成逻辑断言。请遵循以下断言规范：
            - 类型 (type) 必须是以下之一：'status_code', 'field_value', 'response_contains', 'field_exists', 'json_path'。
-           - 'json_path' 和 'field_value'作用相同，都使用点记号表示路径。
+           - 'json_path' 和 'field_value' 作用相同，都使用点记号（如 'data.list.0.id'）访问字段。
+           - 对于业务成功校验，请优先使用 'field_value' (如校验 code=0) 或 'response_contains' (如包含 "成功")。
+           - 严禁使用自定义中文作为 type。
         请务必返回合法的 JSON 对象。
-        格式示例：
-        { 
-          "scenario_name": "名称", 
-          "steps": [
-            { 
-              "step_order": 1, 
-              "api_path": "/path", 
-              "api_method": "POST", 
-              "description": "...", 
-              "params": {"field1": "val1", "field2": "val2"}, 
-              "headers": {"Content-Type": "application/x-www-form-urlencoded"}, 
-              "assertions": [{"type": "status_code", "expected": 200}], 
-              "param_mappings": [] 
-            }
-          ] 
-        }"""
+        格式：{ "scenario_name": "名称", "steps": [{ "step_order": 1, "api_path": "/path", "api_method": "POST", "description": "...", "params": {}, "headers": {}, "assertions": [{"type": "status_code", "expected": 200}, {"type": "field_value", "field": "code", "expected": 0}], "param_mappings": [] }] }"""
         
         user_prompt = f"意图: {scenario['nlu_result']}\n可用 API: {json.dumps(all_apis[:50])}" # 限制上下文
         case_result = await ai_client.chat(system_prompt, user_prompt)
@@ -372,45 +350,6 @@ async def generate_case(scenario_id: int):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.delete("/api/v1/test_cases/{test_case_id}/steps/{step_order}")
-async def delete_test_step(test_case_id: int, step_order: int):
-    """从测试用例中删除指定步骤并重新编排序号"""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        # 1. 获取当前步骤
-        cursor.execute("SELECT steps FROM test_cases WHERE id = ?", (test_case_id,))
-        row = cursor.fetchone()
-        if not row:
-            conn.close()
-            raise HTTPException(status_code=404, detail="测试用例不存在")
-        
-        steps = json.loads(row["steps"])
-        
-        # 2. 过滤掉目标步骤
-        new_steps = [s for s in steps if s.get("step_order") != step_order]
-        
-        if len(new_steps) == len(steps):
-            conn.close()
-            raise HTTPException(status_code=404, detail="指定步骤不存在")
-            
-        # 3. 重新编排序号
-        for i, step in enumerate(new_steps, 1):
-            step["step_order"] = i
-            
-        # 4. 写回数据库
-        cursor.execute("UPDATE test_cases SET steps = ? WHERE id = ?", (json.dumps(new_steps), test_case_id))
-        conn.commit()
-        conn.close()
-        
-        return {"success": True, "message": f"已删除第 {step_order} 步，剩余 {len(new_steps)} 步", "steps": new_steps}
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
 # --- 执行引擎 ---
 
 class ExecutionRequest(BaseModel):
@@ -419,188 +358,50 @@ class ExecutionRequest(BaseModel):
     base_url: str = "http://localhost:8000"
     steps: Optional[List[Dict]] = None  # 可选,用于单步执行
 
-class APICreateRequest(BaseModel):
-    name: str
-    method: str
-    path: str
-    description: Optional[str] = ""
-    project_id: str = "default-project"
-    base_url: Optional[str] = ""
-    headers: Optional[Dict] = {}
-    request_body: Optional[Dict] = {}
-    parameters: Optional[List] = []
-
-class CurlParseRequest(BaseModel):
-    curl: str
-
-def parse_curl_command(curl_command: str) -> Dict[str, Any]:
-    import shlex
-    try:
-        # 预处理：去掉换行符和反斜杠连接
-        curl_command = curl_command.replace('\\\n', ' ').replace('\\\r\n', ' ').strip()
-        tokens = shlex.split(curl_command)
-    except Exception as e:
-        raise ValueError(f"cURL 解析失败 (shlex): {str(e)}")
-
-    result = {
-        "method": "GET",
-        "url": "",
-        "path": "",
-        "base_url": "",
-        "headers": {},
-        "body": {},
-        "parameters": [] # 新增：解析查询参数
-    }
-
-    i = 0
-    is_get_mode = False
-    while i < len(tokens):
-        token = tokens[i]
-        if token == "curl":
-            i += 1
-            continue
-        if token in ["-X", "--request"]:
-            if i + 1 < len(tokens):
-                result["method"] = tokens[i+1].upper()
-                i += 2
-                continue
-        if token in ["-G", "--get"]:
-            is_get_mode = True
-            i += 1
-            continue
-        if token in ["-u", "--user"]:
-            if i + 1 < len(tokens):
-                import base64
-                auth_val = base64.b64encode(tokens[i+1].encode()).decode()
-                result["headers"]["Authorization"] = f"Basic {auth_val}"
-                i += 2
-                continue
-        if token in ["-H", "--header"]:
-            if i + 1 < len(tokens):
-                header_str = tokens[i+1]
-                if ":" in header_str:
-                    key, val = header_str.split(":", 1)
-                    # 某些 header 不需要保留在定义中（如缓存头），但在解析阶段我们先保留，由执行引擎清洗
-                    result["headers"][key.strip()] = val.strip()
-                i += 2
-                continue
-        if token in ["-d", "--data", "--data-raw", "--data-binary", "--data-urlencoded", "--data-urlencode"]:
-            if i + 1 < len(tokens):
-                body_str = tokens[i + 1]
-                if result["method"] == "GET" and not is_get_mode:
-                    result["method"] = "POST"
-                
-                # 尝试解析 JSON
-                try:
-                    parsed_body = json.loads(body_str)
-                    if isinstance(result["body"], dict):
-                        result["body"].update(parsed_body)
-                    else:
-                        result["body"] = parsed_body
-                except:
-                    # 如果不是 JSON，尝试按 key=value 解析
-                    if "=" in body_str:
-                        params = urllib.parse.parse_qs(body_str)
-                        body_params = {k: v[0] for k, v in params.items()}
-                        if isinstance(result["body"], dict):
-                            result["body"].update(body_params)
-                        else:
-                            result["body"] = body_params
-                    else:
-                        result["body"] = body_str
-                i += 2
-                continue
-        if token in ["-F", "--form"]:
-            if i + 1 < len(tokens):
-                form_str = tokens[i + 1]
-                if "=" in form_str:
-                    parts = form_str.split("=", 1)
-                    k, v = parts[0], parts[1]
-                    if isinstance(result["body"], dict):
-                        result["body"][k] = v
-                result["method"] = "POST"
-                i += 2
-                continue
-        if not token.startswith("-") and not result["url"]:
-            full_url = token
-            # 兼容不带 http 的写法
-            if not re.match(r'https?://', full_url):
-                full_url = "http://" + full_url
-            
-            result["url"] = full_url
-            try:
-                parsed = urllib.parse.urlparse(full_url)
-                result["base_url"] = f"{parsed.scheme}://{parsed.netloc}"
-                result["path"] = parsed.path
-                # 解析 URL 中的查询参数
-                if parsed.query:
-                    qs = urllib.parse.parse_qs(parsed.query)
-                    for k, v in qs.items():
-                        result["parameters"].append({
-                            "name": k,
-                            "value": v[0],
-                            "in": "query",
-                            "required": False
-                        })
-            except:
-                result["path"] = full_url
-            i += 1
-            continue
-        i += 1
-    
-    # 如果是 GET 模式，将 body 合并到 parameters
-    if is_get_mode and isinstance(result["body"], dict):
-        for k, v in result["body"].items():
-            result["parameters"].append({
-                "name": k,
-                "value": str(v),
-                "in": "query",
-                "required": False
-            })
-        result["body"] = {}
-        result["method"] = "GET"
-
-    return result
-
 @app.post("/api/v1/executions")
 async def execute_case(req: ExecutionRequest):
     """链式执行引擎：支持变量动态映射和 HTTP 发送"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
     try:
-        # 1. 确定运行时的步骤数据
-        case_info = None
+        # 如果直接提供了steps,则使用它(单步执行)
         if req.steps:
             steps = req.steps
         else:
+            # 否则从数据库读取(完整场景执行)
             if not req.test_case_id:
                 raise HTTPException(status_code=400, detail="必须提供 test_case_id 或 steps")
+            
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
             cursor.execute("SELECT * FROM test_cases WHERE id = ?", (req.test_case_id,))
-            case_info = cursor.fetchone()
-            if not case_info: 
+            case = cursor.fetchone()
+            if not case: 
+                conn.close()
                 raise HTTPException(status_code=404, detail="用例不存在")
-            steps = json.loads(case_info["steps"])
+            
+            steps = json.loads(case["steps"])
+            conn.close()
         
-        context = {} # 存储运行时变量
+        context = {} # 存储运行时变量，如 {step1: {response: {...}}}
         step_results = []
         
-        async with httpx.AsyncClient(verify=False, timeout=30.0, follow_redirects=True) as client:
+        # 创建HTTP客户端,禁用SSL验证
+        async with httpx.AsyncClient(
+            verify=False,      # 禁用SSL验证
+            timeout=30.0,      # 30秒超时
+            follow_redirects=True  # 跟随重定向
+        ) as client:
             for step in steps:
                 step_order = step.get("step_order", 0)
                 start_time = datetime.now()
-                # 确定 Base URL: 环境选择器优先于接口定义的 base_url
+                # 1. 确定 Base URL
                 current_base_url = req.base_url.strip() if req.base_url else ""
-                
-                # 如果没有选环境，或者环境是默认的 localhost，则尝试取接口定义里的
-                if not current_base_url or "localhost:8000" in current_base_url:
+                if not current_base_url or current_base_url == "http://localhost:8000":
                     if step.get("base_url"):
                         current_base_url = step.get("base_url").strip()
-                
-                # 如果最终还是空的，给个默认
-                if not current_base_url:
-                    current_base_url = "http://localhost:8000"
 
+                # 定义预期的步骤数据（即使失败也要记录）
                 step_data = {
                     "step_order": step_order,
                     "url": "",
@@ -608,140 +409,47 @@ async def execute_case(req: ExecutionRequest):
                     "request_data": step.get("params", {}),
                     "success": False,
                     "status_code": "Error",
-                    "extractions": []
+                    "extractions": []  # 新增:提取记录
                 }
                 
                 try:
-                    # 变量替换与参数准备
-                    api_path = step.get('api_path', '').strip()
-                    
-                    # 路径清洗：如果 api_path 里不小心带了域名（某些 cURL 导入或手动输入的误操作），尝试剥离它
-                    if re.match(r'https?://', api_path):
-                        parsed_path = urllib.parse.urlparse(api_path)
-                        api_path = parsed_path.path
-                        if parsed_path.query and not step.get("url_params"):
-                            # 如果路径里有 query 且没定义参数，则保留（通过 safe_path 处理）
-                            api_path = f"{parsed_path.path}?{parsed_path.query}"
-
-                    normalized_api_path = api_path.split('?')[0].strip("/")
-                    
-                    # 确保 path 不带开头的斜杠，方便拼接
-                    clean_path = api_path.lstrip('/')
-                    safe_path = urllib.parse.quote(clean_path, safe="/?=&")
+                    # 1. 变量替换与参数准备
+                    api_path = step.get('api_path', '')
+                    # 强转码路径部分，防止非 ASCII 字符抛出 Invalid non-printable ASCII character
+                    safe_path = urllib.parse.quote(api_path.lstrip('/'), safe="/?=&")
                     url = f"{current_base_url.rstrip('/')}/{safe_path}"
                     
                     params = step.get("params", {}).copy()
                     method = step_data["method"]
                     
-                    # --- 参数自动补全逻辑 ---
-                    # 如果 params 字段较少（可能是 AI 生成场景时丢失了字段），尝试从数据库拉取完整定义
-                    if method.upper() == "POST" and len(params) < 5:
-                        try:
-                            proj_id = case_info["project_id"] if case_info else step.get("project_id", "")
-                            cursor.execute("""
-                                SELECT request_body FROM apis 
-                                WHERE (path = ? OR path = ?) AND method = ? AND project_id = ?
-                                LIMIT 1
-                            """, (normalized_api_path, f"/{normalized_api_path}", method, proj_id))
-                            api_row = cursor.fetchone()
-                            if api_row and api_row["request_body"]:
-                                rb_def = json.loads(api_row["request_body"])
-                                if "content" in rb_def:
-                                    for ct, content in rb_def["content"].items():
-                                        props = content.get("schema", {}).get("properties", {})
-                                        if props:
-                                            full_params = {}
-                                            for f_name, f_def in props.items():
-                                                full_params[f_name] = f_def.get("example") if f_def.get("example") is not None else f_def.get("default", "")
-                                            full_params.update(params) # 覆盖提取的值
-                                            params = full_params
-                                            print(f"📋 步骤 {step_order}: 已从数据库补全完整请求参数 (原始字段数: {len(step.get('params', {}))}, 补全后: {len(params)})")
-                                            break
-                        except Exception as e:
-                            print(f"⚠️ 补齐参数失败: {e}")
-                    # ----------------------
-
-                    # 智能路径搜索与提取工具函数 (注入到 step 作用域)
-                    def find_field_paths(data, target_field, current_path="", max_depth=5):
-                        if max_depth <= 0: return []
-                        paths = []
-                        if isinstance(data, dict):
-                            if target_field in data:
-                                path = f"{current_path}.{target_field}" if current_path else target_field
-                                paths.append(path)
-                            for k, v in data.items():
-                                new_path = f"{current_path}.{k}" if current_path else k
-                                paths.extend(find_field_paths(v, target_field, new_path, max_depth - 1))
-                        elif isinstance(data, list) and len(data) > 0:
-                            new_path = f"{current_path}[0]" if current_path else "[0]"
-                            paths.extend(find_field_paths(data[0], target_field, new_path, max_depth - 1))
-                        return paths
-
-                    def try_extract_with_path(data, path):
-                        try:
-                            curr = data
-                            for part in path.replace('[', '.[').split('.'):
-                                if not part: continue
-                                if part.startswith('[') and part.endswith(']'):
-                                    curr = curr[int(part[1:-1])]
-                                elif part.isdigit():
-                                    curr = curr[int(part)] if isinstance(curr, list) else curr.get(part)
-                                else:
-                                    curr = curr.get(part)
-                                if curr is None: break
-                            return curr
-                        except: return None
-                    
                     # 处理 URL 参数 (query 和 path)
                     query_params = {}
                     url_params_list = step.get("url_params", [])
-                    print(f"   [DEBUG] 原始 params: {json.dumps(params, ensure_ascii=False)[:200]}")
-                    print(f"   [DEBUG] 原始 url_params: {json.dumps(url_params_list, ensure_ascii=False)[:200]}")
                     if isinstance(url_params_list, list):
                         for p in url_params_list:
                             p_name = p.get("name")
-                            p_in = p.get("in", "query")  # 默认为 query,防止 AI 生成时遗漏
+                            p_in = p.get("in")
                             p_val = p.get("value")
                             if p_val is None:
                                 # 尝试获取默认值
                                 schema = p.get("schema", {})
                                 p_val = schema.get("default") if isinstance(schema, dict) else None
                             
-                            if p_val is not None and p_name:
+                            if p_val is not None:
                                 if p_in == "path":
                                     # 替换路径参数 {name} 或 :name
                                     url = url.replace(f"{{{p_name}}}", str(p_val))
                                     url = url.replace(f":{p_name}", str(p_val))
-                                else:
-                                    # 其他所有情况(query、空值、未定义等)都作为查询参数
+                                elif p_in == "query":
                                     query_params[p_name] = p_val
                     elif isinstance(url_params_list, dict):
                         # 如果是字典,直接作为 query 参数
                         query_params.update(url_params_list)
-                    print(f"   [DEBUG] 处理后 query_params: {json.dumps(query_params, ensure_ascii=False)}")
 
                     step_data["url"] = url
                     
-                    # 处理headers (深度清洗系统干扰项)
+                    # 处理headers
                     headers = step.get("headers", {}).copy()
-                    
-                    # 核心清洗逻辑：剔除可能引发 304, 403, 411 或损坏响应的 Header
-                    black_list = [
-                        'host',                    # 必须剔除，否则跨环境执行会 403 (Host 不匹配)
-                        'if-none-match',           # 必须剔除，否则会报 304 Not Modified
-                        'if-modified-since',       # 必须剔除，同上
-                        'content-length',          # 必须剔除，防止 Body 修改后长度校验失败
-                        'connection',              # 交给 httpx
-                        'accept-encoding',         # 交给 httpx (支持自动解压)
-                        # 'content-type',          # [FIX] 不再剔除，允许表单等非 JSON 格式通过
-                    ]
-                    
-                    # 转换为小写进行匹配并剔除
-                    headers = {k: v for k, v in headers.items() if k.lower() not in black_list}
-                    
-                    # 强制注入非缓存头，确保获取实时数据
-                    headers["Cache-Control"] = "no-cache"
-                    headers["Pragma"] = "no-cache"
                     
                     # 处理参数映射(包括 headers中的变量替换)并记录提取过程
                     extractions = []
@@ -765,50 +473,111 @@ async def execute_case(req: ExecutionRequest):
                             extractions.append(extraction)
                             continue
                         
+                        
                         from_data = context.get(f"step_{from_step_idx}", {}).get("response")
-                        field_val = None
-                        if from_data:
-                            # 1. 尝试原始路径提取
-                            field_val = try_extract_with_path(from_data, from_field)
-                            
-                            # 2. 如果失败，启动智能修复
-                            if field_val is None:
-                                print(f"🔧 智能修复 - 步骤 {step_order}: 路径 '{from_field}' 提取失败，开始智能搜索...")
-                                target_node = from_field.split('.')[-1].replace('[', '').replace(']', '')
-                                possible_paths = find_field_paths(from_data, target_node)
+                        
+                        # 调试日志：输出原始响应数据
+                        print(f"🔍 提取调试 - 步骤 {from_step_idx} 的响应数据类型: {type(from_data)}")
+                        print(f"🔍 提取调试 - 响应数据keys: {list(from_data.keys()) if isinstance(from_data, dict) else 'N/A'}")
+                        print(f"🔍 提取调试 - 提取路径: {from_field}")
+                        
+                        if isinstance(from_data, dict):
+                            # 支持嵌套路径提取，如 data.list[0].singer
+                            field_val = None
+                            try:
+                                # 解析路径，支持点号和数组索引
+                                current = from_data
+                                parts = from_field.split('.')
                                 
-                                # 评估并选择最优路径 (深度优先, 原始类型优先)
-                                candidates = []
-                                for p in possible_paths:
-                                    v = try_extract_with_path(from_data, p)
-                                    if v is not None:
-                                        candidates.append({
-                                            'path': p, 'val': v, 
-                                            'depth': p.count('.') + p.count('['),
-                                            'is_prim': isinstance(v, (str, int, float, bool))
-                                        })
-                                candidates.sort(key=lambda x: (not x['is_prim'], -x['depth']))
+                                print(f"🔍 提取调试 - 路径分割: {parts}")
                                 
-                                if candidates:
-                                    best = candidates[0]
-                                    field_val = best['val']
-                                    extraction["fixed_path"] = best['path']
-                                    extraction["auto_fixed"] = True
-                                    print(f"✅ 智能修复成功: 使用了路径 '{best['path']}'，提取到值: {field_val}")
-                                else:
-                                    extraction["error_msg"] = f"未能在响应中找到目标字段 '{target_node}'"
-                                    print(f"❌ 智能修复失败: 无法找到字段 '{target_node}'")
+                                for i, part in enumerate(parts):
+                                    if current is None:
+                                        print(f"🔍 提取调试 - 步骤 {i}: current 为 None，停止解析")
+                                        break
+                                    
+                                    print(f"🔍 提取调试 - 步骤 {i}: 处理部分 '{part}', 当前类型: {type(current)}")
+                                    
+                                    # 处理数组索引，如 list[0]
+                                    if '[' in part and ']' in part:
+                                        key = part[:part.index('[')]
+                                        index_str = part[part.index('[')+1:part.index(']')]
+                                        
+                                        print(f"🔍 提取调试 - 步骤 {i}: 数组访问 key='{key}', index='{index_str}'")
+                                        
+                                        # 先获取数组
+                                        if isinstance(current, dict):
+                                            current = current.get(key)
+                                            print(f"🔍 提取调试 - 步骤 {i}: 获取字段 '{key}', 结果类型: {type(current)}")
+                                        
+                                        # 再获取索引
+                                        if isinstance(current, list):
+                                            try:
+                                                index = int(index_str)
+                                                if 0 <= index < len(current):
+                                                    current = current[index]
+                                                    print(f"🔍 提取调试 - 步骤 {i}: 获取索引 [{index}], 结果类型: {type(current)}")
+                                                else:
+                                                    current = None
+                                                    print(f"🔍 提取调试 - 步骤 {i}: 索引越界 [{index}], 数组长度: {len(current)}")
+                                            except (ValueError, IndexError) as e:
+                                                current = None
+                                                print(f"🔍 提取调试 - 步骤 {i}: 索引解析失败: {e}")
+                                        else:
+                                            current = None
+                                            print(f"🔍 提取调试 - 步骤 {i}: 不是数组，无法获取索引")
+                                    # 处理纯数字（点号格式的数组索引，如 list.0）
+                                    elif part.isdigit():
+                                        print(f"🔍 提取调试 - 步骤 {i}: 检测到纯数字 '{part}'，作为数组索引")
+                                        if isinstance(current, list):
+                                            try:
+                                                index = int(part)
+                                                if 0 <= index < len(current):
+                                                    current = current[index]
+                                                    print(f"🔍 提取调试 - 步骤 {i}: 获取索引 [{index}], 结果类型: {type(current)}")
+                                                else:
+                                                    current = None
+                                                    print(f"🔍 提取调试 - 步骤 {i}: 索引越界 [{index}], 数组长度: {len(current)}")
+                                            except (ValueError, IndexError) as e:
+                                                current = None
+                                                print(f"🔍 提取调试 - 步骤 {i}: 索引解析失败: {e}")
+                                        else:
+                                            # 不是数组，尝试作为字段名
+                                            if isinstance(current, dict):
+                                                current = current.get(part)
+                                                print(f"🔍 提取调试 - 步骤 {i}: 作为字段名获取 '{part}', 结果: {current}")
+                                            else:
+                                                current = None
+                                                print(f"🔍 提取调试 - 步骤 {i}: 既不是数组也不是字典")
+                                    else:
+                                        # 普通字段访问
+                                        if isinstance(current, dict):
+                                            current = current.get(part)
+                                            print(f"🔍 提取调试 - 步骤 {i}: 获取字段 '{part}', 结果: {current}")
+                                        else:
+                                            current = None
+                                            print(f"🔍 提取调试 - 步骤 {i}: 不是字典，无法获取字段 '{part}'")
+                                
+                                field_val = current
+                                print(f"🔍 提取调试 - 最终提取值: {field_val}")
+                            except Exception as e:
+                                extraction["error_msg"] = f"路径解析失败: {str(e)}"
+                                print(f"🔍 提取调试 - 异常: {e}")
                             
                             if field_val is not None:
                                 extraction["extracted_value"] = field_val
                                 extraction["success"] = True
-                                # 填充到请求参数或 Headers
+                                # 支持headers中的变量替换
                                 if to_field.startswith("headers."):
-                                    headers[to_field.replace("headers.", "")] = field_val
+                                    header_key = to_field.replace("headers.", "")
+                                    headers[header_key] = field_val
                                 else:
                                     params[to_field] = field_val
+                            else:
+                                if not extraction["error_msg"]:
+                                    extraction["error_msg"] = f"字段 {from_field} 不存在或值为 null"
                         else:
-                            extraction["error_msg"] = f"前序步骤 {from_step_idx} 的响应不存在"
+                            extraction["error_msg"] = f"步骤 {from_step_idx} 的响应数据不是字典类型"
                         
                         extractions.append(extraction)
                     
@@ -835,39 +604,20 @@ async def execute_case(req: ExecutionRequest):
                     
                     # 2. 发送请求
                     print(f"🚀 执行步骤 {step_order}: {method} {url}")
-                    print(f"   [DEBUG] Content-Type: {next((v for k, v in headers.items() if k.lower() == 'content-type'), 'None')}")
                     if query_params:
                         print(f"   查询参数: {json.dumps(query_params, ensure_ascii=False)}")
-                    
-                    # 智能判断发送模式 (JSON, Form, Data)
-                    ct = next((v for k, v in headers.items() if k.lower() == 'content-type'), "").lower()
-                    req_kwargs = {
-                        "method": method,
-                        "url": url,
-                        "headers": headers,
-                        "timeout": 30.0,
-                        "follow_redirects": True,
-                        # 修复: GET 请求合并 query 和 body 参数; 非 GET 请求只传 query 参数到 URL
-                        "params": {**query_params, **params} if method == "GET" else query_params
-                    }
-                    print(f"   [DEBUG] 最终传给 httpx 的 params: {json.dumps(req_kwargs['params'], ensure_ascii=False)}")
-
-                    if method != "GET":
-                        if "application/x-www-form-urlencoded" in ct or "multipart/form-data" in ct:
-                            # 表单模式
-                            req_kwargs["data"] = params
-                            print(f"   请求体 (Form): {json.dumps(params, ensure_ascii=False)[:200]}")
-                        elif isinstance(params, (dict, list)):
-                            # JSON 模式 (默认)
-                            req_kwargs["json"] = params
-                            print(f"   请求体 (JSON): {json.dumps(params, ensure_ascii=False)[:200]}")
-                        else:
-                            # 原始文本/字节
-                            req_kwargs["content"] = str(params)
-                            print(f"   请求体 (RAW): {str(params)[:200]}")
+                    print(f"   请求体: {json.dumps(params, ensure_ascii=False)[:200]}")
                     
                     try:
-                        res = await client.request(**req_kwargs)
+                        res = await client.request(
+                            method, 
+                            url, 
+                            params=query_params if method != "GET" else {**query_params, **params}, 
+                            json=params if method != "GET" and params else None,
+                            headers=headers,
+                            timeout=30.0,
+                            follow_redirects=True
+                        )
                         duration = (datetime.now() - start_time).total_seconds()
                         
                         print(f"   ✅ 响应: {res.status_code} ({duration:.2f}s)")
@@ -918,23 +668,13 @@ async def execute_case(req: ExecutionRequest):
                             
                             try:
                                 if assertion_type == "status_code":
-                                    result["field"] = "HTTP状态码"
-                                    result["operator"] = "等于"
                                     result["actual"] = res.status_code
-                                    try:
-                                        result["passed"] = (int(res.status_code) == int(expected))
-                                    except:
-                                        result["passed"] = (str(res.status_code) == str(expected))
+                                    result["passed"] = (res.status_code == expected)
                                 
                                 elif assertion_type == "response_time":
-                                    result["field"] = "响应时间"
-                                    result["operator"] = "小于"
-                                    actual_ms = int(duration * 1000)
-                                    result["actual"] = f"{actual_ms}ms"
-                                    try:
-                                        result["passed"] = (actual_ms <= int(expected))
-                                    except:
-                                        result["passed"] = False
+                                    actual_ms = duration * 1000
+                                    result["actual"] = f"{actual_ms:.0f}ms"
+                                    result["passed"] = (actual_ms < expected)
                                 
                                 elif assertion_type == "field_exists":
                                     field = assertion.get("field", "")
@@ -1103,12 +843,15 @@ async def execute_case(req: ExecutionRequest):
         
         # 只有完整场景执行才保存到数据库
         if req.test_case_id:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO executions (test_case_id, status, results) VALUES (?, ?, ?)",
                 (req.test_case_id, final_status, json.dumps(step_results))
             )
             exec_id = cursor.lastrowid
             conn.commit()
+            conn.close()
         else:
             # 单步执行使用临时ID
             exec_id = 0
@@ -1118,8 +861,6 @@ async def execute_case(req: ExecutionRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        conn.close()
 
 # --- 导入与列表 (保持原有逻辑) ---
 
@@ -1163,27 +904,11 @@ async def import_swagger(project_id: str = Form("default-project"), source: str 
                     # 合并路径级参数和方法级参数
                     all_params = path_params + details.get("parameters", [])
                     
-                    # 1. 初始化 headers，添加标准 HTTP headers
-                    headers = {
-                        "Accept": "*/*",
-                        "Accept-Encoding": "gzip, deflate, br",
-                        "Connection": "keep-alive",
-                        "User-Agent": "API-Testing-Platform/1.0"
-                    }
-                    
-                    # 如果有 base_url，添加 Host header
-                    if base_url:
-                        try:
-                            from urllib.parse import urlparse
-                            parsed = urlparse(base_url)
-                            if parsed.netloc:
-                                headers["Host"] = parsed.netloc
-                        except:
-                            pass
-                    
+                    # 初始化 headers（只存储 Swagger 中定义的）
+                    headers = {}
                     url_params = []
                     
-                    # 2. 处理 Swagger 中定义的 header parameters（会覆盖默认值）
+                    # 处理 Swagger 中定义的 header parameters
                     for param in all_params:
                         param_in = param.get("in", "")
                         if param_in == "header":
@@ -1197,11 +922,8 @@ async def import_swagger(project_id: str = Form("default-project"), source: str 
                                 "description": param.get("description", "")
                             })
 
-                    # 3. 针对写操作自动补全 Content-Type
+                    # 针对写操作自动补全 Content-Type（基于 requestBody）
                     if method.lower() in ["post", "put", "patch"]:
-                        # 默认值
-                        headers["Content-Type"] = "application/json"
-                        
                         request_body = details.get("requestBody", {})
                         if request_body:
                             content_types = request_body.get("content", {})
@@ -1211,6 +933,9 @@ async def import_swagger(project_id: str = Form("default-project"), source: str 
                                     if ct and str(ct).lower() != "null":
                                         headers["Content-Type"] = ct
                                         break
+                                # 如果没有找到有效的 content-type，使用默认值
+                                if "Content-Type" not in headers:
+                                    headers["Content-Type"] = "application/json"
                     
                     apis.append((
                         path, 
@@ -1237,68 +962,6 @@ async def import_swagger(project_id: str = Form("default-project"), source: str 
         return {"success": True, "indexed": len(apis), "total": len(apis), "project_id": project_id}
     except Exception as e:
         return {"success": False, "message": str(e)}
-
-@app.post("/api/v1/parse/curl")
-async def api_parse_curl(req: CurlParseRequest):
-    """解析 cURL 命令为 API 定义"""
-    try:
-        result = parse_curl_command(req.curl)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.post("/api/v1/apis")
-async def create_api(api: APICreateRequest):
-    """手动创建 API 接口定义"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("""
-            INSERT INTO apis (path, method, summary, description, base_url, parameters, request_body, headers, project_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            api.path, 
-            api.method, 
-            api.name, 
-            api.description, 
-            api.base_url,
-            json.dumps(api.parameters),
-            json.dumps(api.request_body),
-            json.dumps(api.headers),
-            api.project_id
-        ))
-        new_api_id = cursor.lastrowid
-        conn.commit()
-        return {"id": new_api_id, "success": True}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        conn.close()
-
-@app.put("/api/v1/apis/{api_id}")
-async def update_api(api_id: int, api: APICreateRequest):
-    """手动修改 API 接口定义"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("""
-            UPDATE apis SET 
-                path = ?, method = ?, summary = ?, description = ?, 
-                base_url = ?, parameters = ?, request_body = ?, 
-                headers = ?, project_id = ?
-            WHERE id = ?
-        """, (
-            api.path, api.method, api.name, api.description, 
-            api.base_url, json.dumps(api.parameters), 
-            json.dumps(api.request_body), json.dumps(api.headers),
-            api.project_id, api_id
-        ))
-        conn.commit()
-        return {"success": True}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        conn.close()
 
 @app.get("/api/v1/apis")
 async def list_apis():

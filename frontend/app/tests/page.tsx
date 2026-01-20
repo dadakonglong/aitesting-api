@@ -53,10 +53,10 @@ export default function TestsPage() {
     useEffect(() => {
         if (selectedProject !== 'all') {
             fetchEnvironments(selectedProject)
-        } else {
+        } else if (allProjects.length > 0) {
             fetchAllEnvironments()
         }
-    }, [selectedProject])
+    }, [selectedProject, allProjects])
 
     const fetchProjects = async () => {
         try {
@@ -101,19 +101,18 @@ export default function TestsPage() {
 
     const fetchAllEnvironments = async () => {
         try {
-            // 获取所有项目的环境配置
-            const allEnvs: any[] = []
-            for (const project of allProjects) {
+            const promises = allProjects.map(async (project) => {
                 const response = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/projects/${project}/environments`)
                 if (response.ok) {
                     const data = await response.json()
-                    // 为每个环境添加项目信息
-                    const envsWithProject = data.map((env: any) => ({ ...env, project_id: project }))
-                    allEnvs.push(...envsWithProject)
+                    return data.map((env: any) => ({ ...env, project_id: project }))
                 }
-            }
+                return []
+            })
+            const results = await Promise.all(promises)
+            const allEnvs = results.flat()
             setEnvironments(allEnvs)
-            // 查找第一个默认环境
+
             const defaultEnv = allEnvs.find((e: any) => e.is_default) || allEnvs[0]
             if (defaultEnv) setSelectedEnvId(defaultEnv.id)
         } catch (error) {
@@ -244,6 +243,30 @@ export default function TestsPage() {
                 next.delete(scenarioId)
                 return next
             })
+        }
+    }
+
+    const handleDeleteStep = async (scenarioId: number, testCaseId: number, stepOrder: number) => {
+        if (!confirm(`确定要删除第 ${stepOrder} 步吗？`)) return
+
+        try {
+            const response = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/test_cases/${testCaseId}/steps/${stepOrder}`, {
+                method: 'DELETE'
+            })
+            if (response.ok) {
+                const data = await response.json()
+                // 更新本地状态：找到对应场景并更新其 test_case_steps
+                setScenarios(prev => prev.map(s => {
+                    if (s.id === scenarioId) {
+                        return { ...s, test_case_steps: JSON.stringify(data.steps) }
+                    }
+                    return s
+                }))
+            } else {
+                alert('删除步骤失败，请稍后重试')
+            }
+        } catch (error) {
+            console.error('删除步骤出错:', error)
         }
     }
 
@@ -685,6 +708,27 @@ export default function TestsPage() {
                                                                 >
                                                                     <Play size={12} fill="currentColor" />
                                                                     {isExecuting ? '执行中...' : '执行'}
+                                                                </button>
+                                                                <button
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation()
+                                                                        handleDeleteStep(scenario.id, scenario.test_case_id, step.step_order)
+                                                                    }}
+                                                                    style={{
+                                                                        padding: '0.25rem',
+                                                                        color: '#EF4444',
+                                                                        background: 'none',
+                                                                        border: 'none',
+                                                                        cursor: 'pointer',
+                                                                        display: 'flex',
+                                                                        alignItems: 'center',
+                                                                        justifyContent: 'center',
+                                                                        borderRadius: '0.25rem',
+                                                                        transition: 'all 0.2s'
+                                                                    }}
+                                                                    title="删除此步骤"
+                                                                >
+                                                                    <Trash2 size={14} />
                                                                 </button>
                                                             </div>
 
