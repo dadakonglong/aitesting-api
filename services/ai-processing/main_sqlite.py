@@ -328,29 +328,107 @@ async def generate_case(scenario_id: int):
         4. **Headers 继承 (重要!)**：
            - 如果 API 定义中有 `headers` 字段,必须在生成的步骤中包含相同的 headers。
            - 特别是 `Content-Type` 头,必须严格按照 API 定义设置。
-        5. 自动生成逻辑断言：
+        5. **自动生成逻辑断言 (关键!)**：
            - 类型 (type) 必须是以下之一：'status_code', 'field_value', 'response_contains', 'field_exists', 'json_path'。
-           - 'json_path' 和 'field_value'作用相同，都使用点记号表示路径。
+           - **必需字段规则**：
+             * 'status_code': 只需 type 和 expected
+             * 'field_exists': 必须包含 type, field (字段路径), expected (通常为 true)
+             * 'field_value' / 'json_path': 必须包含 type, field (字段路径), expected (期望值)
+             * 'response_contains': 必须包含 type, text 或 expected (包含的文本)
+           - **字段路径格式 (field)**：
+             * 使用点记号表示嵌套路径，如 "data.user.id"
+             * 数组索引用数字，如 "data.list.0.name"
+             * 常见响应结构: {"code": 0, "message": "success", "data": {...}}
+           - **断言示例**：
+             * 状态码: {"type": "status_code", "expected": 200, "description": "HTTP状态码应为200"}
+             * 业务码: {"type": "field_value", "field": "code", "expected": 0, "description": "业务状态码应为0"}
+             * 字段存在: {"type": "field_exists", "field": "data.user_id", "expected": true, "description": "响应应包含用户ID"}
+             * 消息验证: {"type": "field_value", "field": "message", "expected": "success", "description": "消息应为success"}
+             * 包含文本: {"type": "response_contains", "text": "成功", "description": "响应应包含成功字样"}
+           - **每个步骤至少包含3个断言**: HTTP状态码 + 业务状态码 + 关键字段验证
         请务必返回合法的 JSON 对象。
         格式示例：
         { 
-          "scenario_name": "名称", 
+          "scenario_name": "用户登录并查询信息", 
           "steps": [
             { 
               "step_order": 1, 
-              "api_path": "/path", 
+              "api_path": "/user/login", 
               "api_method": "POST", 
-              "description": "...", 
-              "params": {"field1": "val1", "field2": "val2"}, 
-              "headers": {"Content-Type": "application/x-www-form-urlencoded"}, 
-              "assertions": [{"type": "status_code", "expected": 200}], 
+              "description": "用户登录", 
+              "params": {"username": "test_user", "password": "123456"}, 
+              "headers": {"Content-Type": "application/json"}, 
+              "assertions": [
+                {"type": "status_code", "expected": 200, "description": "HTTP状态码应为200"},
+                {"type": "field_value", "field": "code", "expected": 0, "description": "业务状态码应为0"},
+                {"type": "field_exists", "field": "data.token", "expected": true, "description": "应返回token"},
+                {"type": "field_value", "field": "message", "expected": "success", "description": "消息应为success"}
+              ], 
               "param_mappings": [] 
             }
           ] 
         }"""
         
+        
         user_prompt = f"意图: {scenario['nlu_result']}\n可用 API: {json.dumps(all_apis[:50])}" # 限制上下文
         case_result = await ai_client.chat(system_prompt, user_prompt)
+        
+        # 3.5 验证并修复断言配置
+        def validate_and_fix_assertions(steps):
+            """验证并修复断言配置,确保包含必需字段"""
+            fixed_count = 0
+            for step in steps:
+                assertions = step.get("assertions", [])
+                fixed_assertions = []
+                
+                for assertion in assertions:
+                    assertion_type = assertion.get("type", "")
+                    
+                    # 检查必需字段
+                    if assertion_type in ["field_exists", "field_value", "json_path"]:
+                        if not assertion.get("field"):
+                            print(f"⚠️ 警告: 步骤 {step.get('step_order')} 的 {assertion_type} 断言缺少 field 字段")
+                            print(f"   断言配置: {assertion}")
+                            
+                            # 尝试自动修复: 根据API响应结构推测常见字段
+                            if assertion_type == "field_value":
+                                # 如果期望值是0或"success",很可能是验证业务状态码或消息
+                                expected = assertion.get("expected") or assertion.get("expected_value")
+                                if expected == 0 or expected == "0":
+                                    assertion["field"] = "code"
+                                    print(f"   ✅ 自动修复: 设置 field='code'")
+                                    fixed_count += 1
+                                elif expected in ["success", "成功", "ok", "OK"]:
+                                    assertion["field"] = "message"
+                                    print(f"   ✅ 自动修复: 设置 field='message'")
+                                    fixed_count += 1
+                                else:
+                                    # 无法自动修复,添加默认值避免执行失败
+                                    assertion["field"] = "data"
+                                    print(f"   ⚠️ 使用默认值: field='data'")
+                                    fixed_count += 1
+                            elif assertion_type == "field_exists":
+                                # 字段存在断言,使用通用的data字段
+                                assertion["field"] = "data"
+                                print(f"   ⚠️ 使用默认值: field='data'")
+                                fixed_count += 1
+                    
+                    # 确保expected字段存在
+                    if "expected" not in assertion and "expected_value" in assertion:
+                        assertion["expected"] = assertion["expected_value"]
+                    
+                    fixed_assertions.append(assertion)
+                
+                step["assertions"] = fixed_assertions
+            
+            if fixed_count > 0:
+                print(f"📋 断言验证完成: 共修复 {fixed_count} 个不完整的断言配置")
+            
+            return steps
+        
+        # 验证并修复生成的步骤
+        if "steps" in case_result:
+            case_result["steps"] = validate_and_fix_assertions(case_result["steps"])
         
         # 4. 保存测试用例
         cursor.execute(
