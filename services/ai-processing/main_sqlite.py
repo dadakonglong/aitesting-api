@@ -11,9 +11,18 @@ from datetime import datetime
 import re
 from pydantic import BaseModel
 from dotenv import load_dotenv
+import numpy as np
 
 # 加载环境变量
 load_dotenv()
+
+# 导入轻量级服务
+try:
+    from lightweight_services import LightweightKnowledgeGraph, LightweightVectorSearch
+    SERVICES_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️ 轻量级服务导入失败: {e}")
+    SERVICES_AVAILABLE = False
 
 app = FastAPI(title="AI Testing API - Unified Edition")
 
@@ -29,6 +38,12 @@ app.add_middleware(
 # 路径配置
 BASE_DIR = "D:/testc/aitesting-api"
 DB_PATH = os.path.join(BASE_DIR, "data/apis.db")
+KG_PATH = os.path.join(BASE_DIR, "data/knowledge_graph.pkl")
+VECTOR_DB_PATH = os.path.join(BASE_DIR, "data/vectors.db")
+
+# 功能开关配置
+ENABLE_KNOWLEDGE_GRAPH = os.getenv("ENABLE_KNOWLEDGE_GRAPH", "true").lower() == "true"
+ENABLE_VECTOR_SEARCH = os.getenv("ENABLE_VECTOR_SEARCH", "true").lower() == "true"
 
 # ============= 模型适配层 =============
 
@@ -88,6 +103,31 @@ class AIProvider:
             raise Exception(f"AI 服务不可用: {str(e)}")
 
 ai_client = AIProvider()
+
+# ============= 初始化知识图谱和向量检索服务 =============
+
+kg_service = None
+vector_service = None
+
+if SERVICES_AVAILABLE:
+    try:
+        if ENABLE_KNOWLEDGE_GRAPH:
+            kg_service = LightweightKnowledgeGraph(KG_PATH)
+            print(f"✅ 知识图谱服务已启用: {kg_service.get_stats()}")
+        else:
+            print("ℹ️ 知识图谱服务已禁用")
+        
+        if ENABLE_VECTOR_SEARCH:
+            vector_service = LightweightVectorSearch(VECTOR_DB_PATH)
+            print(f"✅ 向量检索服务已启用: {vector_service.get_stats()}")
+        else:
+            print("ℹ️ 向量检索服务已禁用")
+    except Exception as e:
+        print(f"⚠️ 服务初始化失败: {e}")
+        kg_service = None
+        vector_service = None
+else:
+    print("ℹ️ 轻量级服务不可用,请安装依赖: pip install networkx faiss-cpu")
 
 # ============= 数据库初始化 =============
 
@@ -165,6 +205,64 @@ def init_database():
     print(f"✅ 数据库架构已就绪: {DB_PATH}")
 
 init_database()
+
+# ============= 向量生成辅助函数 =============
+
+async def generate_embedding(text: str) -> Optional[np.ndarray]:
+    """使用OpenAI Embedding API生成文本向量"""
+    if not vector_service:
+        return None
+    
+    try:
+        client = ai_client.get_client(ai_client.default_provider)
+        response = await client.embeddings.create(
+            model="text-embedding-ada-002",
+            input=text
+        )
+        embedding = np.array(response.data[0].embedding, dtype=np.float32)
+        return embedding
+    except Exception as e:
+        print(f"⚠️ 向量生成失败: {e}")
+        return None
+
+async def index_api_to_vector(api_id: str, api_info: dict):
+    """将API信息向量化并索引"""
+    if not vector_service:
+        return
+    
+    try:
+        # 构建API描述文本
+        text_parts = [
+            api_info.get('path', ''),
+            api_info.get('method', ''),
+            api_info.get('summary', ''),
+            api_info.get('description', '')
+        ]
+        text = ' '.join([p for p in text_parts if p])
+        
+        # 生成向量
+        embedding = await generate_embedding(text)
+        if embedding is not None:
+            vector_service.add_vector(api_id, embedding, api_info)
+            print(f"📊 API已向量化: {api_info.get('path')}")
+    except Exception as e:
+        print(f"⚠️ API向量化失败: {e}")
+
+def add_api_to_kg(api_id: str, api_info: dict):
+    """将API添加到知识图谱"""
+    if not kg_service:
+        return
+    
+    try:
+        kg_service.add_api(
+            api_id,
+            path=api_info.get('path'),
+            method=api_info.get('method'),
+            name=api_info.get('summary') or api_info.get('path'),
+            project_id=api_info.get('project_id')
+        )
+    except Exception as e:
+        print(f"⚠️ 添加到知识图谱失败: {e}")
 
 # ============= 核心业务路由 =============
 
@@ -1310,6 +1408,28 @@ async def import_swagger(project_id: str = Form("default-project"), source: str 
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, apis)
         conn.commit()
+        
+        # 新增: 将导入的API添加到向量索引和知识图谱
+        if vector_service or kg_service:
+            cursor.execute("SELECT id, path, method, summary, description, project_id FROM apis WHERE project_id = ?", (project_id,))
+            imported_apis = cursor.fetchall()
+            
+            for api_row in imported_apis:
+                api_id = str(api_row[0])
+                api_info = {
+                    'path': api_row[1],
+                    'method': api_row[2],
+                    'summary': api_row[3],
+                    'description': api_row[4],
+                    'project_id': api_row[5]
+                }
+                
+                # 添加到知识图谱
+                add_api_to_kg(api_id, api_info)
+                
+                # 添加到向量索引
+                await index_api_to_vector(api_id, api_info)
+        
         conn.close()
         
         return {"success": True, "indexed": len(apis), "total": len(apis), "project_id": project_id}
