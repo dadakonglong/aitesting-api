@@ -481,35 +481,52 @@ async def generate_case(scenario_id: int):
                 
                 for assertion in assertions:
                     assertion_type = assertion.get("type", "")
+                    description = assertion.get("description", "").lower()
                     
                     # 检查必需字段
                     if assertion_type in ["field_exists", "field_value", "json_path"]:
                         if not assertion.get("field"):
                             print(f"⚠️ 警告: 步骤 {step.get('step_order')} 的 {assertion_type} 断言缺少 field 字段")
                             print(f"   断言配置: {assertion}")
+                            print(f"   描述: {description}")
                             
-                            # 尝试自动修复: 根据API响应结构推测常见字段
+                            field = None
+                            
+                            # 方法1: 根据期望值推测
                             if assertion_type == "field_value":
-                                # 如果期望值是0或"success",很可能是验证业务状态码或消息
                                 expected = assertion.get("expected") or assertion.get("expected_value")
                                 if expected == 0 or expected == "0":
-                                    assertion["field"] = "code"
-                                    print(f"   ✅ 自动修复: 设置 field='code'")
-                                    fixed_count += 1
+                                    field = "code"
+                                    print(f"   ✅ 根据期望值推测: field='code'")
                                 elif expected in ["success", "成功", "ok", "OK"]:
-                                    assertion["field"] = "message"
-                                    print(f"   ✅ 自动修复: 设置 field='message'")
-                                    fixed_count += 1
-                                else:
-                                    # 无法自动修复,添加默认值避免执行失败
-                                    assertion["field"] = "data"
-                                    print(f"   ⚠️ 使用默认值: field='data'")
-                                    fixed_count += 1
-                            elif assertion_type == "field_exists":
-                                # 字段存在断言,使用通用的data字段
-                                assertion["field"] = "data"
-                                print(f"   ⚠️ 使用默认值: field='data'")
-                                fixed_count += 1
+                                    field = "message"
+                                    print(f"   ✅ 根据期望值推测: field='message'")
+                            
+                            # 方法2: 根据描述推测
+                            if not field and description:
+                                if "code" in description or "状态码" in description or "业务码" in description:
+                                    field = "code"
+                                    print(f"   ✅ 根据描述推测: field='code'")
+                                elif "message" in description or "消息" in description or "msg" in description:
+                                    field = "message"
+                                    print(f"   ✅ 根据描述推测: field='message'")
+                                elif "list" in description or "列表" in description or "数组" in description:
+                                    field = "data.list"
+                                    print(f"   ✅ 根据描述推测: field='data.list'")
+                                elif "data" in description or "数据" in description:
+                                    field = "data"
+                                    print(f"   ✅ 根据描述推测: field='data'")
+                                elif "token" in description or "令牌" in description:
+                                    field = "data.token"
+                                    print(f"   ✅ 根据描述推测: field='data.token'")
+                            
+                            # 方法3: 使用默认值
+                            if not field:
+                                field = "data"
+                                print(f"   ⚠️ 无法推测,使用默认值: field='data'")
+                            
+                            assertion["field"] = field
+                            fixed_count += 1
                     
                     # 确保expected字段存在
                     if "expected" not in assertion and "expected_value" in assertion:
@@ -1076,10 +1093,48 @@ async def execute_case(req: ExecutionRequest):
                                     "description": "响应时间应小于1秒"
                                 }
                             ]
-                        
-                        # 验证每个断言
-                        for assertion in assertions_config:
+                        # 3. 执行断言
+                        assertion_results = []
+                        for assertion in assertions_config: # Changed from step.get("assertions", []) to assertions_config
+                            # 动态修复断言配置(执行时修复,确保旧场景也能正常工作)
                             assertion_type = assertion.get("type", "")
+                            description = assertion.get("description", "").lower()
+                            
+                            # 如果断言需要field字段但缺失,自动修复
+                            if assertion_type in ["field_exists", "field_value", "json_path"]:
+                                if not assertion.get("field"):
+                                    field = None
+                                    
+                                    # 方法1: 根据期望值推测
+                                    if assertion_type == "field_value":
+                                        expected_val = assertion.get("expected") or assertion.get("expected_value")
+                                        if expected_val == 0 or expected_val == "0":
+                                            field = "code"
+                                        elif expected_val in ["success", "成功", "ok", "OK"]:
+                                            field = "message"
+                                    
+                                    # 方法2: 根据描述推测
+                                    if not field and description:
+                                        if "code" in description or "状态码" in description or "业务码" in description:
+                                            field = "code"
+                                        elif "message" in description or "消息" in description or "msg" in description:
+                                            field = "message"
+                                        elif "list" in description or "列表" in description or "数组" in description:
+                                            field = "data.list"
+                                        elif "订单" in description or "id" in description:
+                                            field = "data.id"
+                                        elif "data" in description or "数据" in description:
+                                            field = "data"
+                                        elif "token" in description or "令牌" in description:
+                                            field = "data.token"
+                                    
+                                    # 方法3: 默认值
+                                    if not field:
+                                        field = "data"
+                                    
+                                    assertion["field"] = field
+                                    print(f"   ⚙️ 运行时修复断言: {description} → field='{field}'")
+                            
                             # 支持expected和expected_value两种字段名
                             expected = assertion.get("expected") or assertion.get("expected_value")
                             description = assertion.get("description", "")
