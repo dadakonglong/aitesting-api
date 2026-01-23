@@ -427,12 +427,9 @@ async def generate_case(scenario_id: int):
            - 如果 API 定义中有 `headers` 字段,必须在生成的步骤中包含相同的 headers。
            - 特别是 `Content-Type` 头,必须严格按照 API 定义设置。
         5. **自动生成逻辑断言 (关键!)**：
-           - 类型 (type) 必须是以下之一：'status_code', 'field_value', 'response_contains', 'field_exists', 'json_path'。
+           - 类型 (type) 必须是以下之一：'status_code', 'field_value'。
            - **必需字段规则**：
              * 'status_code': 只需 type 和 expected
-             * 'field_exists': 必须包含 type, field (字段路径), expected (通常为 true)
-             * 'field_value' / 'json_path': 必须包含 type, field (字段路径), expected (期望值)
-             * 'response_contains': 必须包含 type, text 或 expected (包含的文本)
            - **字段路径格式 (field)**：
              * 使用点记号表示嵌套路径，如 "data.user.id"
              * 数组索引用数字，如 "data.list.0.name"
@@ -443,7 +440,12 @@ async def generate_case(scenario_id: int):
              * 字段存在: {"type": "field_exists", "field": "data.user_id", "expected": true, "description": "响应应包含用户ID"}
              * 消息验证: {"type": "field_value", "field": "message", "expected": "success", "description": "消息应为success"}
              * 包含文本: {"type": "response_contains", "text": "成功", "description": "响应应包含成功字样"}
-           - **每个步骤至少包含3个断言**: HTTP状态码 + 业务状态码 + 关键字段验证
+            - **断言准确性要求 (重要!)**：
+              * 断言必须符合API的实际功能,不要臆测不存在的字段
+              * 例如: 点歌接口验证"点歌成功"而非"订单ID",搜索接口验证"歌曲列表"而非"订单列表"
+              * 优先验证通用字段(code/message),避免验证不确定的业务字段
+              * 如果不确定响应结构,只验证HTTP状态码和业务状态码
+            - **每个步骤建议2-3个断言**: HTTP状态码(必需) + 业务状态码(推荐) + 消息验证(可选)
         请务必返回合法的 JSON 对象。
         格式示例：
         { 
@@ -458,9 +460,7 @@ async def generate_case(scenario_id: int):
               "headers": {"Content-Type": "application/json"}, 
               "assertions": [
                 {"type": "status_code", "expected": 200, "description": "HTTP状态码应为200"},
-                {"type": "field_value", "field": "code", "expected": 0, "description": "业务状态码应为0"},
-                {"type": "field_exists", "field": "data.token", "expected": true, "description": "应返回token"},
-                {"type": "field_value", "field": "message", "expected": "success", "description": "消息应为success"}
+                {"type": "field_value", "field": "code", "expected": 0, "description": "业务状态码应为0"}
               ], 
               "param_mappings": [] 
             }
@@ -1135,6 +1135,28 @@ async def execute_case(req: ExecutionRequest):
                                     assertion["field"] = field
                                     print(f"   ⚙️ 运行时修复断言: {description} → field='{field}'")
                             
+                            # ---------------------------------------------------------
+                            # [新增] 智能字段映射 (Smart Field Mapping)
+                            # 解决 API 字段不统一问题 (如 code vs errcode, message vs errmsg)
+                            # ---------------------------------------------------------
+                            current_field = assertion.get("field", "")
+                            if isinstance(res_content, dict) and "." not in current_field:
+                                # 只有当原字段在响应中不存在时才尝试映射
+                                if current_field not in res_content:
+                                    mapping = {
+                                        "code": ["errcode", "RetCode", "status", "ret", "error_code"],
+                                        "message": ["errmsg", "msg", "info", "error", "message", "desc"],
+                                        "data": ["result", "content", "body", "list"]
+                                    }
+                                    
+                                    if current_field in mapping:
+                                        for alt in mapping[current_field]:
+                                            if alt in res_content:
+                                                assertion["field"] = alt
+                                                print(f"   🔄 字段自动映射: {current_field} -> {alt}")
+                                                break
+                            # ---------------------------------------------------------
+                            
                             # 支持expected和expected_value两种字段名
                             expected = assertion.get("expected") or assertion.get("expected_value")
                             description = assertion.get("description", "")
@@ -1236,7 +1258,25 @@ async def execute_case(req: ExecutionRequest):
                                             result["description"] = f"校验字段 {field_raw} 是否存在且不为空"
                                         else:
                                             # 统一转为字串比较，增强兼容性
-                                            result["passed"] = (str(current) == str(expected))
+                                            is_match = str(current) == str(expected)
+                                            
+                                            # [新增] 语义化宽松匹配 (针对 message 类字段)
+                                            if not is_match and field in ["message", "msg", "errmsg", "error", "info", "desc"]:
+                                                # 如果期望是 success 但实际是 "点歌成功" / "OK" 等
+                                                expected_lower = str(expected).lower()
+                                                current_str = str(current)
+                                                
+                                                if expected_lower in ["success", "ok"]:
+                                                    if "成功" in current_str or "ok" in current_str.lower() or "success" in current_str.lower():
+                                                        is_match = True
+                                                        result["actual"] = f"{current_str} (语义匹配 Success)"
+                                                
+                                                # 如果实际值包含期望值 (如 "操作成功" 包含 "成功")
+                                                elif str(expected) in current_str:
+                                                    is_match = True
+                                                    result["actual"] = f"{current_str} (包含期望值)"
+
+                                            result["passed"] = is_match
                                     else:
                                         result["actual"] = None
                                         result["passed"] = False
