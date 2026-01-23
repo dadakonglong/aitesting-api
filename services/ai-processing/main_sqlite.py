@@ -420,9 +420,12 @@ async def generate_case(scenario_id: int):
            - `params` 必须包含该 API 定义中 `request_body` 的所有字段。
            - 严禁返回空对象或仅包含映射字段。
            - 使用合理且真实的测试数据（如果是查询，使用典型值；如果是创建，使用随机但合理的姓名/手机号等）。
-        3. 参数映射 (param_mappings)：
+        3. **参数映射 (param_mappings) - 必须生成!**：
+           - **每个步骤都必须包含 param_mappings 字段**(即使为空数组 [])
+           - 识别参数依赖: 如果后续步骤需要前序步骤的返回值,必须配置映射
            - 即使字段值将从前序步骤提取，也必须在 `params` 中保留该字段，并填充占位符数据。
            - 映射关系必须准确指向前序步骤的 `from_field` 和当前步骤的 `to_field`。
+           - 常见映射场景: 登录返回token → 后续请求使用token, 创建订单返回orderId → 查询订单使用orderId
         4. **Headers 继承 (重要!)**：
            - 如果 API 定义中有 `headers` 字段,必须在生成的步骤中包含相同的 headers。
            - 特别是 `Content-Type` 头,必须严格按照 API 定义设置。
@@ -437,9 +440,7 @@ async def generate_case(scenario_id: int):
            - **断言示例**：
              * 状态码: {"type": "status_code", "expected": 200, "description": "HTTP状态码应为200"}
              * 业务码: {"type": "field_value", "field": "code", "expected": 0, "description": "业务状态码应为0"}
-             * 字段存在: {"type": "field_exists", "field": "data.user_id", "expected": true, "description": "响应应包含用户ID"}
              * 消息验证: {"type": "field_value", "field": "message", "expected": "success", "description": "消息应为success"}
-             * 包含文本: {"type": "response_contains", "text": "成功", "description": "响应应包含成功字样"}
             - **断言准确性要求 (重要!)**：
               * 断言必须符合API的实际功能,不要臆测不存在的字段
               * 例如: 点歌接口验证"点歌成功"而非"订单ID",搜索接口验证"歌曲列表"而非"订单列表"
@@ -998,6 +999,9 @@ async def execute_case(req: ExecutionRequest):
                                 # 填充到请求参数或 Headers
                                 if to_field.startswith("headers."):
                                     headers[to_field.replace("headers.", "")] = field_val
+                                elif to_field.startswith("params."):
+                                    # 去掉 params. 前缀,直接填充到 params 字典
+                                    params[to_field.replace("params.", "")] = field_val
                                 else:
                                     params[to_field] = field_val
                         else:
