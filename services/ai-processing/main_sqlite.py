@@ -428,44 +428,73 @@ async def generate_case(scenario_id: int):
            - 即使字段值将从前序步骤提取，也必须在 `params` 中保留该字段，并填充占位符数据。
            - 映射关系必须准确指向前序步骤的 `from_field` 和当前步骤的 `to_field`。
            - 常见映射场景: 登录返回token → 后续请求使用token, 创建订单返回orderId → 查询订单使用orderId
+           - **映射格式**: {"from_step": 步骤序号, "from_field": "响应字段路径", "to_field": "目标字段路径"}
+           - **重要**: 仔细分析每个步骤的API定义,识别所有需要的参数映射,不要遗漏!
         4. **Headers 继承 (重要!)**：
            - 如果 API 定义中有 `headers` 字段,必须在生成的步骤中包含相同的 headers。
            - 特别是 `Content-Type` 头,必须严格按照 API 定义设置。
         5. **自动生成逻辑断言 (关键!)**：
-           - 类型 (type) 必须是以下之一：'status_code', 'field_value'。
-           - **必需字段规则**：
-             * 'status_code': 只需 type 和 expected
+           - **只生成基础断言，不要臆测业务字段**
+           - **必须生成的断言**：
+             * HTTP状态码断言（必需）: {"type": "status_code", "expected": 200, "description": "HTTP状态码应为200"}
+             * 业务状态码断言（强烈推荐）: {"type": "field_value", "field": "code", "expected": 0, "description": "业务状态码应为0"}
+           - **禁止生成的断言**：
+             * 不要断言具体的业务字段值（如sessionId、orderId、userId等）
+             * 不要断言不确定的响应字段
+             * 不要使用占位符作为期望值（如"placeholder_xxx"）
+           - **每个步骤只生成1-2个断言**: HTTP状态码(必需) + 业务状态码(推荐)
            - **字段路径格式 (field)**：
              * 使用点记号表示嵌套路径，如 "data.user.id"
              * 数组索引用数字，如 "data.list.0.name"
              * 常见响应结构: {"code": 0, "message": "success", "data": {...}}
-           - **断言示例**：
-             * 状态码: {"type": "status_code", "expected": 200, "description": "HTTP状态码应为200"}
-             * 业务码: {"type": "field_value", "field": "code", "expected": 0, "description": "业务状态码应为0"}
-             * 消息验证: {"type": "field_value", "field": "message", "expected": "success", "description": "消息应为success"}
-            - **断言准确性要求 (重要!)**：
-              * 断言必须符合API的实际功能,不要臆测不存在的字段
-              * 例如: 点歌接口验证"点歌成功"而非"订单ID",搜索接口验证"歌曲列表"而非"订单列表"
-              * 优先验证通用字段(code/message),避免验证不确定的业务字段
-              * 如果不确定响应结构,只验证HTTP状态码和业务状态码
-            - **每个步骤建议2-3个断言**: HTTP状态码(必需) + 业务状态码(推荐) + 消息验证(可选)
         请务必返回合法的 JSON 对象。
-        格式示例：
+        格式示例（包含完整的参数映射）：
         { 
-          "scenario_name": "用户登录并查询信息", 
+          "scenario_name": "用户登录并创建订单", 
           "steps": [
             { 
               "step_order": 1, 
               "api_path": "/user/login", 
               "api_method": "POST", 
-              "description": "用户登录", 
-              "params": {"username": "test_user", "password": "123456"}, 
+              "description": "用户登录获取token", 
+              "params": {"phone": "13800138000", "password": "123456"}, 
               "headers": {"Content-Type": "application/json"}, 
               "assertions": [
                 {"type": "status_code", "expected": 200, "description": "HTTP状态码应为200"},
                 {"type": "field_value", "field": "code", "expected": 0, "description": "业务状态码应为0"}
               ], 
-              "param_mappings": [] 
+              "param_mappings": []
+            },
+            { 
+              "step_order": 2, 
+              "api_path": "/order/create", 
+              "api_method": "POST", 
+              "description": "创建订单", 
+              "params": {"productId": "123", "quantity": 1}, 
+              "headers": {"Content-Type": "application/json", "Authorization": "placeholder_token"}, 
+              "assertions": [
+                {"type": "status_code", "expected": 200, "description": "HTTP状态码应为200"},
+                {"type": "field_value", "field": "code", "expected": 0, "description": "业务状态码应为0"}
+              ], 
+              "param_mappings": [
+                {"from_step": 1, "from_field": "data.token", "to_field": "headers.Authorization"}
+              ]
+            },
+            { 
+              "step_order": 3, 
+              "api_path": "/order/query", 
+              "api_method": "GET", 
+              "description": "查询订单详情", 
+              "params": {"orderId": "placeholder_order_id"}, 
+              "headers": {"Content-Type": "application/json", "Authorization": "placeholder_token"}, 
+              "assertions": [
+                {"type": "status_code", "expected": 200, "description": "HTTP状态码应为200"},
+                {"type": "field_value", "field": "code", "expected": 0, "description": "业务状态码应为0"}
+              ], 
+              "param_mappings": [
+                {"from_step": 1, "from_field": "data.token", "to_field": "headers.Authorization"},
+                {"from_step": 2, "from_field": "data.orderId", "to_field": "params.orderId"}
+              ]
             }
           ] 
         }"""
