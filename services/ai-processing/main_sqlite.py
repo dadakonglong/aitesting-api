@@ -6,6 +6,8 @@ import sqlite3
 import os
 import httpx
 import urllib.parse
+import time
+import asyncio
 from typing import List, Dict, Optional, Any
 from datetime import datetime
 import re
@@ -1397,6 +1399,218 @@ async def execute_case(req: ExecutionRequest):
         conn.close()
 
 # --- 导入与列表 (保持原有逻辑) ---
+
+class StressTestRequest(BaseModel):
+    """压测请求参数"""
+    api_id: int
+    test_count: int = 10
+    expected_debounce_time: int = 500
+    request_interval: int = 100
+
+@app.post("/api/v1/test/stress-test")
+async def stress_test_api(req: StressTestRequest):
+    """
+    API压测接口
+    
+    对指定的API进行压力测试，分析是否存在防抖逻辑
+    """
+    try:
+        # 1. 获取API信息
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM apis WHERE id = ?", (req.api_id,))
+        api_row = cursor.fetchone()
+        conn.close()
+        
+        if not api_row:
+            raise HTTPException(status_code=404, detail="API不存在")
+        
+        # 2. 构建请求信息
+        api_info = {
+            "id": api_row["id"],
+            "path": api_row["path"],
+            "method": api_row["method"],
+            "base_url": api_row["base_url"],
+            "headers": json.loads(api_row["headers"] or "{}"),
+            "request_body": json.loads(api_row["request_body"] or "{}")
+        }
+        
+        # 3. 构建完整URL
+        base_url = api_info["base_url"] or "http://localhost:8000"
+        full_url = base_url + api_info["path"]
+        
+        # 4. 准备请求数据
+        headers = api_info["headers"]
+        
+        # 获取请求体：优先使用schema字段，如果没有则使用整个request_body
+        request_body_data = api_info["request_body"]
+        if isinstance(request_body_data, dict) and "schema" in request_body_data:
+            request_body_json = request_body_data["schema"]
+        else:
+            request_body_json = request_body_data
+        
+        # 5. 执行压测
+        test_results = []
+        start_time = time.time()
+        
+        async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
+            for i in range(1, req.test_count + 1):
+                request_start = time.time()
+                
+                try:
+                    if api_info["method"].upper() == "GET":
+                        response = await client.get(full_url, headers=headers)
+                    elif api_info["method"].upper() == "POST":
+                        response = await client.post(full_url, headers=headers, json=request_body_json)
+                    elif api_info["method"].upper() == "PUT":
+                        response = await client.put(full_url, headers=headers, json=request_body_json)
+                    elif api_info["method"].upper() == "DELETE":
+                        response = await client.delete(full_url, headers=headers)
+                    else:
+                        raise ValueError(f"不支持的HTTP方法: {api_info['method']}")
+                    
+                    request_end = time.time()
+                    duration = request_end - request_start
+                    
+                    # 先读取响应文本
+                    response_text = response.text
+                    
+                    # 尝试解析为JSON
+                    try:
+                        response_data = json.loads(response_text) if response_text else {}
+                    except Exception as json_error:
+                        # 如果无法解析为JSON，保存原始文本
+                        if response_text:
+                            response_data = {"raw_text": response_text[:1000]}  # 保存更多内容
+                        else:
+                            response_data = {"raw_text": "(空响应)", "status_code": response.status_code}
+                    
+                    test_results.append({
+                        "request_id": i,
+                        "duration": round(duration, 3),
+                        "status_code": response.status_code,
+                        "success": True,
+                        "response": response_data
+                    })
+                    
+                except Exception as e:
+                    request_end = time.time()
+                    duration = request_end - request_start
+                    
+                    test_results.append({
+                        "request_id": i,
+                        "duration": round(duration, 3),
+                        "status_code": None,
+                        "success": False,
+                        "error": str(e)
+                    })
+                
+                # 等待间隔
+                if i < req.test_count:
+                    await asyncio.sleep(req.request_interval / 1000)
+        
+        total_time = time.time() - start_time
+        
+        # 6. 分析结果
+        successful_results = [r for r in test_results if r["success"]]
+        failed_count = len(test_results) - len(successful_results)
+        
+        # 分析防抖
+        analysis = {
+            "has_debounce": False,
+            "confidence": 0,
+            "reasons": []
+        }
+        
+        if successful_results:
+            # 检查是否有429状态码或限流错误
+            rate_limit_count = 0
+            for r in test_results:
+                # 检查HTTP状态码429
+                if r.get("status_code") == 429:
+                    rate_limit_count += 1
+                # 检查响应体中的code字段
+                elif r.get("success") and isinstance(r.get("response"), dict):
+                    response_code = r["response"].get("code")
+                    response_msg = str(r["response"].get("message", "")).lower()
+                    if response_code == 429 or "请求频繁" in response_msg or "稍后再试" in response_msg or "too many" in response_msg:
+                        rate_limit_count += 1
+            
+            # 如果有限流响应，直接判定为有防抖
+            if rate_limit_count > 0:
+                analysis["reasons"].append(f"检测到{rate_limit_count}个请求被限流（429状态码或限流错误）")
+                analysis["confidence"] += 60
+                analysis["has_debounce"] = True
+            
+            # 检查响应内容是否相同
+            response_contents = [json.dumps(r["response"], sort_keys=True) for r in successful_results]
+            unique_responses = len(set(response_contents))
+            
+            # 检查响应时间
+            durations = [r["duration"] for r in successful_results]
+            avg_duration = sum(durations) / len(durations)
+            max_duration = max(durations)
+            min_duration = min(durations)
+            
+            # 快速响应数量
+            fast_responses = [d for d in durations if d < avg_duration * 0.5]
+            
+            # 判断逻辑
+            confidence = analysis["confidence"]  # 继承之前的置信度
+            
+            if unique_responses == 1 and len(successful_results) > 1:
+                analysis["reasons"].append(f"所有{len(successful_results)}个成功请求返回了相同的内容")
+                confidence += 30
+            
+            if len(fast_responses) > len(durations) * 0.5:
+                analysis["reasons"].append(f"{len(fast_responses)}/{len(durations)}个请求响应特别快（可能被防抖拦截）")
+                confidence += 40
+            
+            if len(durations) > 1 and max_duration > min_duration * 3:
+                analysis["reasons"].append(f"响应时间差异大（最快{min_duration:.3f}s，最慢{max_duration:.3f}s）")
+                confidence += 20
+            
+            if failed_count > len(test_results) * 0.3:
+                analysis["reasons"].append(f"{failed_count}/{len(test_results)}个请求失败（可能被防抖拒绝）")
+                confidence += 30
+            
+            analysis["confidence"] = min(confidence, 100)
+            analysis["has_debounce"] = confidence >= 50
+        
+        # 7. 返回结果
+        return {
+            "success": True,
+            "api_info": {
+                "id": api_info["id"],
+                "path": api_info["path"],
+                "method": api_info["method"],
+                "url": full_url
+            },
+            "test_config": {
+                "test_count": req.test_count,
+                "expected_debounce_time": req.expected_debounce_time,
+                "request_interval": req.request_interval
+            },
+            "test_results": test_results,
+            "analysis": analysis,
+            "stats": {
+                "total_requests": len(test_results),
+                "successful_requests": len(successful_results),
+                "failed_requests": failed_count,
+                "total_time": round(total_time, 2),
+                "avg_duration": round(avg_duration, 3) if successful_results else 0,
+                "min_duration": round(min_duration, 3) if successful_results else 0,
+                "max_duration": round(max_duration, 3) if successful_results else 0
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/v1/projects")
 async def list_projects():

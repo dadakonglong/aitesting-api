@@ -56,6 +56,18 @@ export default function APIsPage() {
     })
     const [saveLoading, setSaveLoading] = useState(false)
 
+    // 压测相关状态
+    const [showStressTestModal, setShowStressTestModal] = useState(false)
+    const [stressTestApiId, setStressTestApiId] = useState<string | null>(null)
+    const [stressTestConfig, setStressTestConfig] = useState({
+        test_count: 10,
+        expected_debounce_time: 500,
+        request_interval: 100
+    })
+    const [stressTestRunning, setStressTestRunning] = useState(false)
+    const [stressTestResult, setStressTestResult] = useState<any>(null)
+    const [expandedRequests, setExpandedRequests] = useState<Set<number>>(new Set())
+
     useEffect(() => {
         fetchAPIs()
         fetchProjects()
@@ -363,6 +375,38 @@ export default function APIsPage() {
         setShowAddModal(true)
     }
 
+    const handleStressTest = async () => {
+        if (!stressTestApiId) return
+
+        setStressTestRunning(true)
+        setStressTestResult(null)
+
+        try {
+            const response = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/test/stress-test`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    api_id: parseInt(stressTestApiId),
+                    test_count: stressTestConfig.test_count,
+                    expected_debounce_time: stressTestConfig.expected_debounce_time,
+                    request_interval: stressTestConfig.request_interval
+                })
+            })
+
+            if (response.ok) {
+                const result = await response.json()
+                setStressTestResult(result)
+            } else {
+                const error = await response.json()
+                alert(`压测失败: ${error.detail || '未知错误'}`)
+            }
+        } catch (error: any) {
+            alert(`压测出错: ${error.message}`)
+        } finally {
+            setStressTestRunning(false)
+        }
+    }
+
     const projects = Array.from(new Set(apis.map(api => api.project_id || 'default-project')))
 
     const filteredAPIs = apis.filter(api => {
@@ -617,6 +661,27 @@ export default function APIsPage() {
                                     >
                                         <Play size={14} fill="currentColor" />
                                         {executingId === api.id ? '执行中...' : '执行'}
+                                    </button>
+                                    <button
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            setStressTestApiId(api.id);
+                                            setStressTestResult(null);
+                                            setShowStressTestModal(true);
+                                        }}
+                                        style={{
+                                            padding: '0.5rem 0.75rem',
+                                            background: '#FEF3C7',
+                                            color: '#D97706',
+                                            border: 'none',
+                                            borderRadius: '0.5rem',
+                                            cursor: 'pointer',
+                                            fontSize: '0.75rem',
+                                            fontWeight: '500'
+                                        }}
+                                        title="压力测试"
+                                    >
+                                        压测
                                     </button>
                                     <button
                                         onClick={(e) => { e.stopPropagation(); openEditModal(api); }}
@@ -1233,6 +1298,245 @@ export default function APIsPage() {
                             >
                                 {saveLoading ? '保存中...' : (isEditing ? '更新接口' : '立即保存')}
                             </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* 压测对话框 */}
+            {showStressTestModal && (
+                <div style={{
+                    position: 'fixed',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    background: 'rgba(0, 0, 0, 0.5)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    zIndex: 1000
+                }}>
+                    <div style={{
+                        background: 'white',
+                        borderRadius: '1rem',
+                        width: '90%',
+                        maxWidth: '800px',
+                        maxHeight: '90vh',
+                        overflow: 'auto'
+                    }}>
+                        {/* Header */}
+                        <div style={{ padding: '1.5rem', borderBottom: '1px solid #E5E7EB' }}>
+                            <h2 style={{ fontSize: '1.5rem', fontWeight: '700' }}>⚡ API 压测</h2>
+                            <p style={{ color: '#6B7280', fontSize: '0.875rem', marginTop: '0.5rem' }}>
+                                对选中的API进行压力测试，分析是否存在防抖逻辑
+                            </p>
+                        </div>
+
+                        {/* Body */}
+                        <div style={{ padding: '1.5rem' }}>
+                            {!stressTestResult ? (
+                                <div>
+                                    <div style={{ marginBottom: '1.5rem' }}>
+                                        <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>测试次数</label>
+                                        <input
+                                            type="number"
+                                            value={stressTestConfig.test_count}
+                                            onChange={(e) => setStressTestConfig({ ...stressTestConfig, test_count: parseInt(e.target.value) })}
+                                            style={{ width: '100%', padding: '0.75rem', borderRadius: '0.5rem', border: '1px solid #D1D5DB' }}
+                                        />
+                                    </div>
+                                    <div style={{ marginBottom: '1.5rem' }}>
+                                        <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>预期防抖时间 (ms)</label>
+                                        <input
+                                            type="number"
+                                            value={stressTestConfig.expected_debounce_time}
+                                            onChange={(e) => setStressTestConfig({ ...stressTestConfig, expected_debounce_time: parseInt(e.target.value) })}
+                                            style={{ width: '100%', padding: '0.75rem', borderRadius: '0.5rem', border: '1px solid #D1D5DB' }}
+                                        />
+                                    </div>
+                                    <div style={{ marginBottom: '1.5rem' }}>
+                                        <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>请求间隔 (ms)</label>
+                                        <input
+                                            type="number"
+                                            value={stressTestConfig.request_interval}
+                                            onChange={(e) => setStressTestConfig({ ...stressTestConfig, request_interval: parseInt(e.target.value) })}
+                                            style={{ width: '100%', padding: '0.75rem', borderRadius: '0.5rem', border: '1px solid #D1D5DB' }}
+                                        />
+                                    </div>
+                                </div>
+                            ) : (
+                                <div>
+                                    {/* 测试结果 */}
+                                    <div style={{ marginBottom: '1.5rem', padding: '1rem', background: stressTestResult.analysis.has_debounce ? '#ECFDF5' : '#FEF2F2', borderRadius: '0.5rem' }}>
+                                        <h3 style={{ fontSize: '1.125rem', fontWeight: '600', marginBottom: '0.5rem' }}>
+                                            {stressTestResult.analysis.has_debounce ? '✅ 检测到防抖' : '❌ 未检测到防抖'}
+                                        </h3>
+                                        <p style={{ fontSize: '0.875rem', color: '#6B7280' }}>置信度: {stressTestResult.analysis.confidence}%</p>
+                                    </div>
+
+                                    {stressTestResult.analysis.reasons.length > 0 && (
+                                        <div style={{ marginBottom: '1.5rem' }}>
+                                            <h4 style={{ fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>判断依据:</h4>
+                                            <ul style={{ paddingLeft: '1.5rem' }}>
+                                                {stressTestResult.analysis.reasons.map((reason: string, i: number) => (
+                                                    <li key={i} style={{ fontSize: '0.875rem', color: '#6B7280', marginBottom: '0.25rem' }}>{reason}</li>
+                                                ))}
+                                            </ul>
+                                        </div>
+                                    )}
+
+                                    <div style={{ marginBottom: '1.5rem' }}>
+                                        <h4 style={{ fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>统计信息:</h4>
+                                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem' }}>
+                                            <div style={{ padding: '0.75rem', background: '#F3F4F6', borderRadius: '0.5rem' }}>
+                                                <div style={{ fontSize: '0.75rem', color: '#6B7280' }}>总请求数</div>
+                                                <div style={{ fontSize: '1.5rem', fontWeight: '700' }}>{stressTestResult.stats.total_requests}</div>
+                                            </div>
+                                            <div style={{ padding: '0.75rem', background: '#F3F4F6', borderRadius: '0.5rem' }}>
+                                                <div style={{ fontSize: '0.75rem', color: '#6B7280' }}>成功请求</div>
+                                                <div style={{ fontSize: '1.5rem', fontWeight: '700', color: '#10B981' }}>{stressTestResult.stats.successful_requests}</div>
+                                            </div>
+                                            <div style={{ padding: '0.75rem', background: '#F3F4F6', borderRadius: '0.5rem' }}>
+                                                <div style={{ fontSize: '0.75rem', color: '#6B7280' }}>平均耗时</div>
+                                                <div style={{ fontSize: '1.5rem', fontWeight: '700' }}>{stressTestResult.stats.avg_duration}s</div>
+                                            </div>
+                                            <div style={{ padding: '0.75rem', background: '#F3F4F6', borderRadius: '0.5rem' }}>
+                                                <div style={{ fontSize: '0.75rem', color: '#6B7280' }}>总耗时</div>
+                                                <div style={{ fontSize: '1.5rem', fontWeight: '700' }}>{stressTestResult.stats.total_time}s</div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <h4 style={{ fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>请求详情:</h4>
+                                        <div style={{ maxHeight: '400px', overflow: 'auto' }}>
+                                            {stressTestResult.test_results.map((result: any) => {
+                                                const isExpanded = expandedRequests.has(result.request_id);
+                                                return (
+                                                    <div key={result.request_id} style={{ marginBottom: '0.75rem', border: '1px solid #E5E7EB', borderRadius: '0.5rem', overflow: 'hidden' }}>
+                                                        <div
+                                                            onClick={() => {
+                                                                setExpandedRequests(prev => {
+                                                                    const next = new Set(prev);
+                                                                    if (next.has(result.request_id)) {
+                                                                        next.delete(result.request_id);
+                                                                    } else {
+                                                                        next.add(result.request_id);
+                                                                    }
+                                                                    return next;
+                                                                });
+                                                            }}
+                                                            style={{
+                                                                padding: '0.75rem',
+                                                                background: result.success ? '#F0FDF4' : '#FEF2F2',
+                                                                cursor: 'pointer',
+                                                                fontSize: '0.875rem',
+                                                                fontWeight: '500',
+                                                                display: 'flex',
+                                                                alignItems: 'center',
+                                                                gap: '0.5rem'
+                                                            }}
+                                                        >
+                                                            <span style={{ fontWeight: '600' }}>#{result.request_id}</span>
+                                                            <span style={{
+                                                                padding: '0.125rem 0.5rem',
+                                                                borderRadius: '0.25rem',
+                                                                fontSize: '0.75rem',
+                                                                background: result.success ? '#10B981' : '#EF4444',
+                                                                color: 'white'
+                                                            }}>
+                                                                {result.success ? '成功' : '失败'}
+                                                            </span>
+                                                            <span style={{ color: '#6B7280' }}>耗时: {result.duration}s</span>
+                                                            {result.status_code && (
+                                                                <span style={{
+                                                                    padding: '0.125rem 0.5rem',
+                                                                    borderRadius: '0.25rem',
+                                                                    fontSize: '0.75rem',
+                                                                    background: result.status_code === 200 ? '#DBEAFE' : result.status_code === 429 ? '#FEF3C7' : '#FEE2E2',
+                                                                    color: result.status_code === 200 ? '#1E40AF' : result.status_code === 429 ? '#D97706' : '#DC2626'
+                                                                }}>
+                                                                    状态码: {result.status_code}
+                                                                </span>
+                                                            )}
+                                                            <span style={{ marginLeft: 'auto', fontSize: '0.75rem', color: '#6B7280' }}>
+                                                                {isExpanded ? '▼ 收起' : '▶ 展开'}
+                                                            </span>
+                                                        </div>
+                                                        {isExpanded && (
+                                                            <div style={{ padding: '1rem', background: '#F9FAFB', borderTop: '1px solid #E5E7EB' }}>
+                                                                {result.success ? (
+                                                                    <div>
+                                                                        <h5 style={{ fontSize: '0.75rem', fontWeight: '600', marginBottom: '0.5rem', color: '#374151' }}>响应内容:</h5>
+                                                                        <pre style={{
+                                                                            background: '#1F2937',
+                                                                            color: '#F3F4F6',
+                                                                            padding: '0.75rem',
+                                                                            borderRadius: '0.375rem',
+                                                                            fontSize: '0.75rem',
+                                                                            overflow: 'auto',
+                                                                            maxHeight: '300px',
+                                                                            margin: 0,
+                                                                            whiteSpace: 'pre-wrap',
+                                                                            wordBreak: 'break-word'
+                                                                        }}>
+                                                                            {JSON.stringify(result.response, null, 2)}
+                                                                        </pre>
+                                                                    </div>
+                                                                ) : (
+                                                                    <div>
+                                                                        <h5 style={{ fontSize: '0.75rem', fontWeight: '600', marginBottom: '0.5rem', color: '#DC2626' }}>错误信息:</h5>
+                                                                        <div style={{
+                                                                            background: '#FEE2E2',
+                                                                            color: '#991B1B',
+                                                                            padding: '0.75rem',
+                                                                            borderRadius: '0.375rem',
+                                                                            fontSize: '0.75rem'
+                                                                        }}>
+                                                                            {result.error || '未知错误'}
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Footer */}
+                        <div style={{ padding: '1.5rem', borderTop: '1px solid #E5E7EB', display: 'flex', gap: '1rem', justifyContent: 'flex-end' }}>
+                            <button
+                                onClick={() => {
+                                    setShowStressTestModal(false)
+                                    setStressTestResult(null)
+                                }}
+                                style={{ padding: '0.75rem 2rem', borderRadius: '0.5rem', border: '1px solid #D1D5DB', background: 'white', cursor: 'pointer', fontWeight: '600' }}
+                            >
+                                关闭
+                            </button>
+                            {!stressTestResult && (
+                                <button
+                                    onClick={handleStressTest}
+                                    disabled={stressTestRunning}
+                                    style={{
+                                        padding: '0.75rem 3rem',
+                                        borderRadius: '0.5rem',
+                                        border: 'none',
+                                        background: stressTestRunning ? '#D1D5DB' : '#D97706',
+                                        color: 'white',
+                                        fontWeight: '700',
+                                        cursor: stressTestRunning ? 'not-allowed' : 'pointer'
+                                    }}
+                                >
+                                    {stressTestRunning ? '测试中...' : '开始压测'}
+                                </button>
+                            )}
                         </div>
                     </div>
                 </div>
