@@ -457,7 +457,7 @@ async def generate_case(scenario_id: int):
               "api_path": "/user/login", 
               "api_method": "POST", 
               "description": "用户登录获取token", 
-              "params": {"phone": "13800138000", "password": "123456"}, 
+              "params": {"phone": "<从API定义获取>", "password": "<从API定义获取>"}, 
               "headers": {"Content-Type": "application/json"}, 
               "assertions": [
                 {"type": "status_code", "expected": 200, "description": "HTTP状态码应为200"},
@@ -470,7 +470,7 @@ async def generate_case(scenario_id: int):
               "api_path": "/order/create", 
               "api_method": "POST", 
               "description": "创建订单", 
-              "params": {"productId": "123", "quantity": 1}, 
+              "params": {"productId": "<从API定义获取>", "quantity": 1}, 
               "headers": {"Content-Type": "application/json", "Authorization": "placeholder_token"}, 
               "assertions": [
                 {"type": "status_code", "expected": 200, "description": "HTTP状态码应为200"},
@@ -497,7 +497,12 @@ async def generate_case(scenario_id: int):
               ]
             }
           ] 
-        }"""
+        }
+        
+        **重要提示**: 
+        - params中的值必须从API定义的request_body中获取,不要使用示例中的具体值
+        - 保持API定义中的原始测试数据,不要随意修改
+        - 只有在API定义中没有提供默认值时,才使用合理的测试数据"""
         
         
         user_prompt = f"意图: {scenario['nlu_result']}\n可用 API: {json.dumps(all_apis[:50])}" # 限制上下文
@@ -2042,6 +2047,283 @@ def _convert_postman_request(item: dict, folder_path: str) -> dict:
         "headers": headers,
         "tags": [folder_path] if folder_path else []
     }
+
+# ============= 数据导入导出功能 =============
+
+from fastapi.responses import StreamingResponse
+import io
+
+@app.get("/api/v1/data/export")
+async def export_data(
+    project_id: Optional[str] = None,
+    include_executions: bool = False
+):
+    """导出数据为 JSON 文件"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        export_data = {
+            "export_time": datetime.now().isoformat(),
+            "version": "1.0",
+            "data": {}
+        }
+        
+        # 导出 APIs
+        if project_id:
+            cursor.execute("SELECT * FROM apis WHERE project_id = ?", (project_id,))
+        else:
+            cursor.execute("SELECT * FROM apis")
+        export_data["data"]["apis"] = [dict(row) for row in cursor.fetchall()]
+        
+        # 导出 Scenarios
+        if project_id:
+            cursor.execute("SELECT * FROM scenarios WHERE project_id = ?", (project_id,))
+        else:
+            cursor.execute("SELECT * FROM scenarios")
+        export_data["data"]["scenarios"] = [dict(row) for row in cursor.fetchall()]
+        
+        # 导出 Test Cases
+        if project_id:
+            cursor.execute("SELECT * FROM test_cases WHERE project_id = ?", (project_id,))
+        else:
+            cursor.execute("SELECT * FROM test_cases")
+        export_data["data"]["test_cases"] = [dict(row) for row in cursor.fetchall()]
+        
+        # 导出 Project Environments
+        if project_id:
+            cursor.execute("SELECT * FROM project_environments WHERE project_id = ?", (project_id,))
+        else:
+            cursor.execute("SELECT * FROM project_environments")
+        export_data["data"]["project_environments"] = [dict(row) for row in cursor.fetchall()]
+        
+        # 可选：导出执行记录
+        if include_executions:
+            cursor.execute("SELECT * FROM executions")
+            export_data["data"]["executions"] = [dict(row) for row in cursor.fetchall()]
+        
+        conn.close()
+        
+        # 生成文件名
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"aitesting-export-{timestamp}.json"
+        
+        # 转换为 JSON 字符串
+        json_str = json.dumps(export_data, ensure_ascii=False, indent=2)
+        
+        # 创建字节流
+        json_bytes = io.BytesIO(json_str.encode('utf-8'))
+        
+        # 返回文件下载响应
+        return StreamingResponse(
+            json_bytes,
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"导出失败: {str(e)}")
+
+@app.post("/api/v1/data/import")
+async def import_data(
+    file: UploadFile = File(...),
+    mode: str = Form("merge")
+):
+    """
+    导入数据从 JSON 文件
+    mode: merge (合并), replace (替换), skip_duplicates (跳过重复)
+    """
+    try:
+        # 读取上传的文件
+        content = await file.read()
+        import_data = json.loads(content.decode('utf-8'))
+        
+        # 验证数据格式
+        if "data" not in import_data:
+            raise HTTPException(status_code=400, detail="无效的数据格式")
+        
+        data = import_data["data"]
+        
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        stats = {
+            "apis": 0,
+            "scenarios": 0,
+            "test_cases": 0,
+            "project_environments": 0,
+            "executions": 0
+        }
+        skipped = 0
+        errors = []
+        
+        try:
+            # 如果是替换模式，先清空数据
+            if mode == "replace":
+                cursor.execute("DELETE FROM executions")
+                cursor.execute("DELETE FROM test_cases")
+                cursor.execute("DELETE FROM scenarios")
+                cursor.execute("DELETE FROM apis")
+                cursor.execute("DELETE FROM project_environments")
+                print("🗑️ 已清空现有数据")
+            
+            # 导入 APIs
+            if "apis" in data:
+                for api in data["apis"]:
+                    try:
+                        # 跳过重复模式：检查是否已存在
+                        if mode == "skip_duplicates":
+                            cursor.execute(
+                                "SELECT id FROM apis WHERE path = ? AND method = ? AND project_id = ?",
+                                (api.get("path"), api.get("method"), api.get("project_id", "default-project"))
+                            )
+                            if cursor.fetchone():
+                                skipped += 1
+                                continue
+                        
+                        # 插入数据（不包含 id，让数据库自动生成）
+                        cursor.execute("""
+                            INSERT INTO apis (path, method, summary, description, base_url, parameters, request_body, headers, project_id, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            api.get("path"),
+                            api.get("method"),
+                            api.get("summary"),
+                            api.get("description"),
+                            api.get("base_url"),
+                            api.get("parameters"),
+                            api.get("request_body"),
+                            api.get("headers"),
+                            api.get("project_id", "default-project"),
+                            api.get("created_at")
+                        ))
+                        stats["apis"] += 1
+                    except Exception as e:
+                        errors.append(f"API导入错误: {str(e)}")
+            
+            # 导入 Test Cases（需要先导入，因为 scenarios 依赖它）
+            old_to_new_test_case_ids = {}
+            if "test_cases" in data:
+                for test_case in data["test_cases"]:
+                    try:
+                        old_id = test_case.get("id")
+                        cursor.execute("""
+                            INSERT INTO test_cases (name, steps, project_id, created_at)
+                            VALUES (?, ?, ?, ?)
+                        """, (
+                            test_case.get("name"),
+                            test_case.get("steps"),
+                            test_case.get("project_id", "default-project"),
+                            test_case.get("created_at")
+                        ))
+                        new_id = cursor.lastrowid
+                        old_to_new_test_case_ids[old_id] = new_id
+                        stats["test_cases"] += 1
+                    except Exception as e:
+                        errors.append(f"测试用例导入错误: {str(e)}")
+            
+            # 导入 Scenarios
+            if "scenarios" in data:
+                for scenario in data["scenarios"]:
+                    try:
+                        # 更新 test_case_id 映射
+                        old_test_case_id = scenario.get("test_case_id")
+                        new_test_case_id = old_to_new_test_case_ids.get(old_test_case_id) if old_test_case_id else None
+                        
+                        cursor.execute("""
+                            INSERT INTO scenarios (name, description, natural_language_input, project_id, nlu_result, test_case_id, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            scenario.get("name"),
+                            scenario.get("description"),
+                            scenario.get("natural_language_input"),
+                            scenario.get("project_id", "default-project"),
+                            scenario.get("nlu_result"),
+                            new_test_case_id,
+                            scenario.get("created_at")
+                        ))
+                        stats["scenarios"] += 1
+                    except Exception as e:
+                        errors.append(f"场景导入错误: {str(e)}")
+            
+            # 导入 Project Environments
+            if "project_environments" in data:
+                for env in data["project_environments"]:
+                    try:
+                        # 跳过重复模式：检查是否已存在
+                        if mode == "skip_duplicates":
+                            cursor.execute(
+                                "SELECT id FROM project_environments WHERE project_id = ? AND env_name = ?",
+                                (env.get("project_id"), env.get("env_name"))
+                            )
+                            if cursor.fetchone():
+                                skipped += 1
+                                continue
+                        
+                        cursor.execute("""
+                            INSERT INTO project_environments (project_id, env_name, base_url, is_default, created_at)
+                            VALUES (?, ?, ?, ?, ?)
+                            ON CONFLICT(project_id, env_name) DO UPDATE SET
+                                base_url = excluded.base_url,
+                                is_default = excluded.is_default
+                        """, (
+                            env.get("project_id"),
+                            env.get("env_name"),
+                            env.get("base_url"),
+                            env.get("is_default", 0),
+                            env.get("created_at")
+                        ))
+                        stats["project_environments"] += 1
+                    except Exception as e:
+                        errors.append(f"环境配置导入错误: {str(e)}")
+            
+            # 可选：导入执行记录
+            if "executions" in data:
+                for execution in data["executions"]:
+                    try:
+                        # 更新 test_case_id 映射
+                        old_test_case_id = execution.get("test_case_id")
+                        new_test_case_id = old_to_new_test_case_ids.get(old_test_case_id) if old_test_case_id else None
+                        
+                        cursor.execute("""
+                            INSERT INTO executions (test_case_id, status, results, created_at)
+                            VALUES (?, ?, ?, ?)
+                        """, (
+                            new_test_case_id,
+                            execution.get("status"),
+                            execution.get("results"),
+                            execution.get("created_at")
+                        ))
+                        stats["executions"] += 1
+                    except Exception as e:
+                        errors.append(f"执行记录导入错误: {str(e)}")
+            
+            conn.commit()
+            print(f"✅ 数据导入成功: {stats}")
+            
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            conn.close()
+        
+        return {
+            "success": True,
+            "imported": stats,
+            "skipped": skipped,
+            "errors": errors
+        }
+        
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="无效的 JSON 文件")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"导入失败: {str(e)}")
 
 if __name__ == "__main__":
     print(f"🚀 启动统一后端 (Unified Backend)... 数据库: {DB_PATH}")

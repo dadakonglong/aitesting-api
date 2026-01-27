@@ -1,0 +1,14 @@
+# 最小化依赖 - 分步安装以避免卡顿
+# 第一步：安装核心框架
+fastapi==0.115.0
+uvicorn[standard]==0.27.0
+pydantic>=2.10.0
+pydantic-settings>=2.6.0
+
+# 第二步：HTTP客户端
+httpx==0.26.0
+
+# 第三步：工具库
+python-dotenv==1.0.0
+python-multipart==0.0.6
+faker==22.6.0

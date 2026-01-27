@@ -1,7 +1,7 @@
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
-pydantic==2.5.3
-pydantic-settings==2.1.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.10.0
+pydantic-settings>=2.6.0
 
 # AI相关
 openai
@@ -9,16 +9,17 @@ langchain
 langchain-openai
 langchain-community
 
-# 向量数据库
-qdrant-client==1.7.0
+# 向量数据库（可选，用于轻量级向量搜索）
+qdrant-client==1.7.1
 
-# 数据库
-psycopg2-binary==2.9.9
-sqlalchemy==2.0.25
-alembic==1.13.1
+# SQLite 是 Python 内置的，不需要额外安装
+# 如果需要 PostgreSQL 支持，请取消注释以下行：
+# psycopg2-binary==2.9.9
+# sqlalchemy==2.0.25
+# alembic==1.13.1
 
-# Redis
-redis==5.0.1
+# 如果需要 Redis 支持，请取消注释以下行：
+# redis==5.0.1
 
 # HTTP客户端
 httpx==0.26.0

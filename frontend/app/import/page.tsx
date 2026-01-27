@@ -107,17 +107,22 @@ export default function ImportPage() {
                         选择导入方式
                     </h2>
 
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem', marginBottom: '2rem' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem', marginBottom: '2rem' }}>
                         {[
                             { type: 'swagger' as const, icon: <LinkIcon size={24} />, label: 'Swagger URL', desc: '在线Swagger文档' },
                             { type: 'postman' as const, icon: <FileJson size={24} />, label: 'Postman', desc: 'Collection文件' },
-                            { type: 'har' as const, icon: <FileCode size={24} />, label: 'HAR文件', desc: '浏览器导出' }
+                            { type: 'har' as const, icon: <FileCode size={24} />, label: 'HAR文件', desc: '浏览器导出' },
+                            { type: 'migration' as const, icon: <Upload size={24} />, label: '数据迁移', desc: '备份与恢复' }
                         ].map((item) => (
                             <button
                                 key={item.type}
-                                onClick={() => setImportType(item.type)}
+                                onClick={() => {
+                                    setImportType(item.type as any)
+                                    setFile(null)
+                                    setResult(null)
+                                }}
                                 style={{
-                                    padding: '1.5rem',
+                                    padding: '1.25rem 1rem',
                                     background: importType === item.type ? 'linear-gradient(to right, #2563EB, #4F46E5)' : 'white',
                                     color: importType === item.type ? 'white' : '#374151',
                                     border: importType === item.type ? 'none' : '2px solid #E5E7EB',
@@ -130,32 +135,86 @@ export default function ImportPage() {
                                 <div style={{ marginBottom: '0.5rem', display: 'flex', justifyContent: 'center' }}>
                                     {item.icon}
                                 </div>
-                                <div style={{ fontWeight: '600', marginBottom: '0.25rem' }}>{item.label}</div>
+                                <div style={{ fontWeight: '600', fontSize: '0.875rem', marginBottom: '0.25rem' }}>{item.label}</div>
                                 <div style={{ fontSize: '0.75rem', opacity: 0.8 }}>{item.desc}</div>
                             </button>
                         ))}
                     </div>
 
-                    {/* 项目ID */}
-                    <div style={{ marginBottom: '1.5rem' }}>
-                        <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', color: '#374151', marginBottom: '0.75rem' }}>
-                            📁 项目ID
-                        </label>
-                        <input
-                            type="text"
-                            value={projectId}
-                            onChange={(e) => setProjectId(e.target.value)}
-                            style={{
-                                width: '100%',
-                                padding: '0.75rem 1rem',
-                                background: 'rgba(255, 255, 255, 0.9)',
-                                border: '2px solid #E5E7EB',
-                                borderRadius: '0.75rem',
-                                outline: 'none'
-                            }}
-                            placeholder="default-project"
-                        />
-                    </div>
+                    {/* 项目ID (非数据迁移模式显示) */}
+                    {importType !== ('migration' as any) && (
+                        <div style={{ marginBottom: '1.5rem' }}>
+                            <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', color: '#374151', marginBottom: '0.75rem' }}>
+                                📁 项目ID
+                            </label>
+                            <input
+                                type="text"
+                                value={projectId}
+                                onChange={(e) => setProjectId(e.target.value)}
+                                style={{
+                                    width: '100%',
+                                    padding: '0.75rem 1rem',
+                                    background: 'rgba(255, 255, 255, 0.9)',
+                                    border: '2px solid #E5E7EB',
+                                    borderRadius: '0.75rem',
+                                    outline: 'none'
+                                }}
+                                placeholder="default-project"
+                            />
+                        </div>
+                    )}
+
+                    {/* 数据备份与迁移 (导出) */}
+                    {importType === ('migration' as any) && (
+                        <div style={{
+                            background: '#F0F9FF',
+                            padding: '1.5rem',
+                            borderRadius: '0.75rem',
+                            marginBottom: '2rem',
+                            border: '1px solid #BAE6FD'
+                        }}>
+                            <h3 style={{ fontSize: '1rem', fontWeight: '600', color: '#0369A1', marginBottom: '1rem', display: 'flex', alignItems: 'center' }}>
+                                <FileCode size={20} style={{ marginRight: '0.5rem' }} /> 导出备份 (用于迁移到新电脑)
+                            </h3>
+                            <p style={{ fontSize: '0.875rem', color: '#0C4A6E', marginBottom: '1rem' }}>
+                                将当前电脑的所有 API 列表、测试场景、测试用例和环境配置导出为一个 JSON 文件。
+                            </p>
+                            <button
+                                onClick={async () => {
+                                    setLoading(true)
+                                    try {
+                                        const response = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL || 'http://localhost:8000'}/api/v1/data/export`)
+                                        if (!response.ok) throw new Error('导出失败')
+                                        const blob = await response.blob()
+                                        const url = window.URL.createObjectURL(blob)
+                                        const a = document.createElement('a')
+                                        a.href = url
+                                        a.download = `aitesting-backup-${new Date().toISOString().split('T')[0]}.json`
+                                        document.body.appendChild(a)
+                                        a.click()
+                                        window.URL.revokeObjectURL(url)
+                                        document.body.removeChild(a)
+                                    } catch (err: any) {
+                                        alert('导出失败: ' + err.message)
+                                    } finally {
+                                        setLoading(false)
+                                    }
+                                }}
+                                disabled={loading}
+                                style={{
+                                    padding: '0.625rem 1.25rem',
+                                    background: '#0284C7',
+                                    color: 'white',
+                                    border: 'none',
+                                    borderRadius: '0.5rem',
+                                    fontWeight: '600',
+                                    cursor: 'pointer'
+                                }}
+                            >
+                                {loading ? '准备中...' : '📥 立即导出备份文件'}
+                            </button>
+                        </div>
+                    )}
 
                     {/* Swagger 导入 */}
                     {importType === 'swagger' && (
@@ -276,11 +335,35 @@ export default function ImportPage() {
                         </div>
                     )}
 
-                    {/* 文件上传 */}
-                    {(importType === 'postman' || importType === 'har') && (
+                    {/* 文件上传 (Postman, HAR, Migration) */}
+                    {(importType === 'postman' || importType === 'har' || importType === ('migration' as any)) && (
                         <div style={{ marginBottom: '1.5rem' }}>
+                            {importType === ('migration' as any) && (
+                                <div style={{ marginBottom: '1.5rem' }}>
+                                    <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', color: '#374151', marginBottom: '0.75rem' }}>
+                                        🔄 导入模式
+                                    </label>
+                                    <select
+                                        id="import-mode"
+                                        style={{
+                                            width: '100%',
+                                            padding: '0.75rem 1rem',
+                                            background: 'white',
+                                            border: '2px solid #E5E7EB',
+                                            borderRadius: '0.75rem',
+                                            outline: 'none',
+                                            cursor: 'pointer'
+                                        }}
+                                    >
+                                        <option value="merge">合并模式 (保留现有数据，追加新数据)</option>
+                                        <option value="skip_duplicates">跳过重复 (基于路径和方法智能合并)</option>
+                                        <option value="replace">替换模式 (⚠️ 清空当前电脑所有数据后导入)</option>
+                                    </select>
+                                </div>
+                            )}
+
                             <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', color: '#374151', marginBottom: '0.75rem' }}>
-                                📄 选择文件
+                                📄 选择 {importType === ('migration' as any) ? '备份 JSON 文件' : '导入文件'}
                             </label>
                             <div style={{
                                 border: '2px dashed #D1D5DB',
@@ -292,7 +375,7 @@ export default function ImportPage() {
                                 <Upload size={48} style={{ margin: '0 auto 1rem', color: '#9CA3AF' }} />
                                 <input
                                     type="file"
-                                    accept={importType === 'postman' ? '.json' : '.har'}
+                                    accept=".json,.har"
                                     onChange={(e) => setFile(e.target.files?.[0] || null)}
                                     style={{ display: 'none' }}
                                     id="file-upload"
@@ -319,7 +402,41 @@ export default function ImportPage() {
                                 )}
                             </div>
                             <button
-                                onClick={handleFileImport}
+                                onClick={async () => {
+                                    if (!file) {
+                                        alert('请选择文件')
+                                        return
+                                    }
+                                    if (importType === ('migration' as any)) {
+                                        const mode = (document.getElementById('import-mode') as HTMLSelectElement).value
+                                        if (mode === 'replace' && !confirm('⚠️ 替换模式将删除当前电脑上的所有 API 和测试数据，确认继续吗？')) {
+                                            return
+                                        }
+                                        setLoading(true)
+                                        setResult(null)
+                                        try {
+                                            const formData = new FormData()
+                                            formData.append('file', file)
+                                            formData.append('mode', mode)
+                                            const response = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL || 'http://localhost:8000'}/api/v1/data/import`, {
+                                                method: 'POST',
+                                                body: formData
+                                            })
+                                            if (!response.ok) throw new Error('恢复失败')
+                                            const data = await response.json()
+                                            setResult({
+                                                type: 'migration',
+                                                ...data
+                                            })
+                                        } catch (err: any) {
+                                            alert('恢复失败: ' + err.message)
+                                        } finally {
+                                            setLoading(false)
+                                        }
+                                    } else {
+                                        handleFileImport()
+                                    }
+                                }}
                                 disabled={loading || !file}
                                 style={{
                                     width: '100%',
@@ -334,10 +451,11 @@ export default function ImportPage() {
                                     transition: 'all 0.2s'
                                 }}
                             >
-                                {loading ? '导入中...' : '开始导入'}
+                                {loading ? '处理中...' : (importType === ('migration' as any) ? '🚀 开始恢复数据' : '开始导入')}
                             </button>
                         </div>
                     )}
+
                 </div>
 
                 {/* 导入结果 */}
@@ -357,16 +475,45 @@ export default function ImportPage() {
                             </h3>
                         </div>
                         <div style={{ background: '#F9FAFB', padding: '1rem', borderRadius: '0.5rem' }}>
-                            <p style={{ fontSize: '0.875rem', color: '#6B7280', marginBottom: '0.5rem' }}>
-                                <span style={{ fontWeight: '500' }}>项目ID：</span>{result.project_id}
-                            </p>
-                            <p style={{ fontSize: '0.875rem', color: '#6B7280', marginBottom: '0.5rem' }}>
-                                <span style={{ fontWeight: '500' }}>导入接口数：</span>{result.indexed || result.total || 0} 个
-                            </p>
-                            <p style={{ fontSize: '0.875rem', color: '#6B7280' }}>
-                                <span style={{ fontWeight: '500' }}>状态：</span>
-                                <span style={{ color: '#10B981' }}>✓ 已索引到向量数据库</span>
-                            </p>
+                            {result.type === 'migration' ? (
+                                <>
+                                    <p style={{ fontSize: '0.875rem', color: '#6B7280', marginBottom: '0.5rem' }}>
+                                        <span style={{ fontWeight: '500' }}>导入统计：</span>
+                                    </p>
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '0.5rem', fontSize: '0.875rem', color: '#374151' }}>
+                                        <div>接口 (APIs): <span style={{ fontWeight: '600' }}>{result.imported?.apis || 0}</span></div>
+                                        <div>场景 (Scenarios): <span style={{ fontWeight: '600' }}>{result.imported?.scenarios || 0}</span></div>
+                                        <div>用例 (Test Cases): <span style={{ fontWeight: '600' }}>{result.imported?.test_cases || 0}</span></div>
+                                        <div>环境 (Envs): <span style={{ fontWeight: '600' }}>{result.imported?.project_environments || 0}</span></div>
+                                    </div>
+                                    {result.skipped > 0 && (
+                                        <p style={{ fontSize: '0.875rem', color: '#F59E0B', marginTop: '0.5rem' }}>
+                                            ⚠️ 跳过重复项目: {result.skipped} 个
+                                        </p>
+                                    )}
+                                    {result.errors?.length > 0 && (
+                                        <div style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: '#EF4444' }}>
+                                            <p style={{ fontWeight: '600' }}>错误信息:</p>
+                                            <ul style={{ paddingLeft: '1.25rem', marginTop: '0.25rem' }}>
+                                                {result.errors.map((err: any, i: number) => <li key={i}>{err}</li>)}
+                                            </ul>
+                                        </div>
+                                    )}
+                                </>
+                            ) : (
+                                <>
+                                    <p style={{ fontSize: '0.875rem', color: '#6B7280', marginBottom: '0.5rem' }}>
+                                        <span style={{ fontWeight: '500' }}>项目ID：</span>{result.project_id}
+                                    </p>
+                                    <p style={{ fontSize: '0.875rem', color: '#6B7280', marginBottom: '0.5rem' }}>
+                                        <span style={{ fontWeight: '500' }}>导入接口数：</span>{result.indexed || result.total || 0} 个
+                                    </p>
+                                    <p style={{ fontSize: '0.875rem', color: '#6B7280' }}>
+                                        <span style={{ fontWeight: '500' }}>状态：</span>
+                                        <span style={{ color: '#10B981' }}>✓ 已索引到向量数据库</span>
+                                    </p>
+                                </>
+                            )}
                         </div>
                         <div style={{ marginTop: '1rem', textAlign: 'center' }}>
                             <a

@@ -1,0 +1,9 @@
+# AI相关依赖 - 可选安装
+# 这些包比较大，建议单独安装
+openai
+langchain
+langchain-openai
+langchain-community
+
+# 向量数据库（可选）
+qdrant-client==1.7.1
