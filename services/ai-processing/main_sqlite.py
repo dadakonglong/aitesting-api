@@ -38,10 +38,12 @@ app.add_middleware(
 )
 
 # 路径配置
-BASE_DIR = "D:/testc/aitesting-api"
-DB_PATH = os.path.join(BASE_DIR, "data/apis.db")
-KG_PATH = os.path.join(BASE_DIR, "data/knowledge_graph.pkl")
-VECTOR_DB_PATH = os.path.join(BASE_DIR, "data/vectors.db")
+# 动态获取项目根目录 (适配不同电脑路径)
+CURRENT_FILE_DIR = os.path.dirname(os.path.abspath(__file__)) # services/ai-processing
+BASE_DIR = os.path.dirname(os.path.dirname(CURRENT_FILE_DIR))   # aitesting-api
+DB_PATH = os.path.join(BASE_DIR, "data", "apis.db")
+KG_PATH = os.path.join(BASE_DIR, "data", "knowledge_graph.pkl")
+VECTOR_DB_PATH = os.path.join(BASE_DIR, "data", "vectors.db")
 
 # 功能开关配置
 ENABLE_KNOWLEDGE_GRAPH = os.getenv("ENABLE_KNOWLEDGE_GRAPH", "true").lower() == "true"
@@ -152,14 +154,22 @@ def init_database():
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
     
-    # 自动迁移旧库：增加缺失的列
-    try:
-        cursor.execute("ALTER TABLE apis ADD COLUMN base_url TEXT")
-        cursor.execute("ALTER TABLE apis ADD COLUMN parameters TEXT")
-        cursor.execute("ALTER TABLE apis ADD COLUMN request_body TEXT")
-        cursor.execute("ALTER TABLE apis ADD COLUMN headers TEXT")  # 新增headers字段
-    except:
-        pass # 列已存在
+    # 自动迁移旧库：增加缺失的列 (独立捕获异常以确保后续列能被添加)
+    alter_queries = [
+        "ALTER TABLE apis ADD COLUMN base_url TEXT",
+        "ALTER TABLE apis ADD COLUMN parameters TEXT",
+        "ALTER TABLE apis ADD COLUMN request_body TEXT",
+        "ALTER TABLE apis ADD COLUMN headers TEXT"
+    ]
+    for q in alter_queries:
+        try:
+            cursor.execute(q)
+            print(f"📊 数据库迁移: 执行成功 {q}")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                pass # 列已存在
+            else:
+                print(f"⚠️ 数据库迁移提醒: {e} ({q})")
     
     # 场景表
     cursor.execute('''CREATE TABLE IF NOT EXISTS scenarios (
@@ -1853,6 +1863,7 @@ async def list_apis():
     cursor.execute("SELECT * FROM apis ORDER BY created_at DESC")
     rows = cursor.fetchall()
     conn.close()
+    print(f"📋 获取 API 列表: 发现 {len(rows)} 条数据")
     return {"apis": [
         {
             "id": r["id"], 
