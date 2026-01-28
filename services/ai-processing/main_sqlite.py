@@ -212,6 +212,18 @@ def init_database():
         UNIQUE(project_id, env_name)
     )''')
     
+    # 自愈记录表
+    cursor.execute('''CREATE TABLE IF NOT EXISTS healing_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        test_case_id INTEGER NOT NULL,
+        original_steps TEXT, -- JSON 存储原始步骤
+        healed_steps TEXT, -- JSON 存储修复后步骤
+        analysis TEXT, -- JSON 存储失败分析
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (test_case_id) REFERENCES test_cases(id)
+    )''')
+
+    
     conn.commit()
     conn.close()
     print(f"✅ 数据库架构已就绪: {DB_PATH}")
@@ -2335,6 +2347,92 @@ async def import_data(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"导入失败: {str(e)}")
+
+# ============= 智能体系统 API =============
+
+# 延迟导入智能体模块
+try:
+    from agents.orchestrator import OrchestratorAgent
+    from agents.healer import HealerAgent
+    
+    # 初始化智能体
+    orchestrator = OrchestratorAgent(ai_client)
+    healer = HealerAgent(ai_client, DB_PATH)
+    
+    print("✅ 智能体系统已加载")
+except ImportError as e:
+    print(f"⚠️ 智能体模块导入失败: {e}")
+    orchestrator = None
+    healer = None
+
+class AgentRequest(BaseModel):
+    user_request: str
+    context: Optional[Dict] = {}
+
+class HealRequest(BaseModel):
+    test_case_id: int
+    execution_result: Dict
+
+@app.post("/api/v1/agents/orchestrate")
+async def orchestrate_agents(req: AgentRequest):
+    """智能体编排入口"""
+    if not orchestrator:
+        raise HTTPException(status_code=503, detail="智能体系统未就绪")
+    
+    try:
+        result = await orchestrator.orchestrate(req.user_request, req.context)
+        return result
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/ai/heal")
+async def heal_test_case(req: HealRequest):
+    """自动修复失败的测试用例"""
+    if not healer:
+        raise HTTPException(status_code=503, detail="自愈系统未就绪")
+    
+    try:
+        result = await healer.heal(req.test_case_id, req.execution_result)
+        return result
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/ai/analyze-failure")
+async def analyze_failure(req: Dict):
+    """分析测试失败原因"""
+    if not healer:
+        raise HTTPException(status_code=503, detail="自愈系统未就绪")
+    
+    try:
+        result = await healer.analyze_failure(req)
+        return result
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/healing-records/{test_case_id}")
+async def get_healing_records(test_case_id: int):
+    """获取测试用例的自愈历史"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM healing_records 
+            WHERE test_case_id = ? 
+            ORDER BY created_at DESC
+        """, (test_case_id,))
+        records = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return records
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     print(f"🚀 启动统一后端 (Unified Backend)... 数据库: {DB_PATH}")
