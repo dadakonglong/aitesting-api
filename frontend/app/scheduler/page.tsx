@@ -3,12 +3,12 @@
 import { useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 
-export default function HomePage() {
+export default function SchedulerRedirect() {
     const router = useRouter()
 
     useEffect(() => {
-        // 首页重定向到测试中心的AI生成Tab
-        router.replace('/testing?tab=ai')
+        // scheduler页面重定向到测试中心的定时任务Tab
+        router.replace('/testing?tab=scheduler')
     }, [router])
 
     return (

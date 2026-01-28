@@ -398,6 +398,80 @@ async def delete_environment(project_id: str, env_name: str):
     conn.close()
     return {"success": True}
 
+# --- é¡¹ç›®ç®¡ç† ---
+
+class ProjectCreate(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = ""
+
+@app.get("/api/v1/projects")
+async def list_projects():
+    """è·å–æ‰€æœ‰é¡¹ç›®åˆ—è¡¨"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    # ä»ç°æœ‰æ•°æ®ä¸­æå–æ‰€æœ‰å”¯ä¸€çš„project_id
+    cursor.execute("""
+        SELECT DISTINCT project_id as id, 
+               project_id as name,
+               '' as description,
+               MIN(created_at) as created_at
+        FROM apis 
+        GROUP BY project_id
+        UNION
+        SELECT DISTINCT project_id as id,
+               project_id as name, 
+               '' as description,
+               MIN(created_at) as created_at
+        FROM scenarios
+        GROUP BY project_id
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    
+    # å»é‡å¹¶æ ¼å¼åŒ–
+    projects_dict = {}
+    for row in rows:
+        pid = row['id']
+        if pid not in projects_dict:
+            projects_dict[pid] = {
+                'id': pid,
+                'name': pid.replace('-', ' ').title(),
+                'description': f'{pid} é¡¹ç›®',
+                'created_at': row['created_at']
+            }
+    
+    return list(projects_dict.values())
+
+@app.post("/api/v1/projects")
+async def create_project(project: ProjectCreate):
+    """åˆ›å»ºæ–°é¡¹ç›®(å®é™…ä¸Šåªæ˜¯è®°å½•,æ•°æ®ä¼šåœ¨ä½¿ç”¨æ—¶è‡ªåŠ¨åˆ›å»º)"""
+    # ç”±äºæˆ‘ä»¬çš„æ¶æ„æ˜¯åŸºäºproject_idçš„,ä¸éœ€è¦å•ç‹¬çš„projectsè¡¨
+    # è¿™é‡Œåªæ˜¯è¿”å›æˆåŠŸ,å®é™…é¡¹ç›®ä¼šåœ¨åˆ›å»ºAPIæˆ–åœºæ™¯æ—¶è‡ªåŠ¨äº§ç”Ÿ
+    return {"success": True, "project": project.dict()}
+
+@app.delete("/api/v1/projects/{project_id}")
+async def delete_project(project_id: str):
+    """åˆ é™¤é¡¹ç›®åŠå…¶æ‰€æœ‰æ•°æ®"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        # åˆ é™¤è¯¥é¡¹ç›®çš„æ‰€æœ‰æ•°æ®
+        cursor.execute("DELETE FROM apis WHERE project_id = ?", (project_id,))
+        cursor.execute("DELETE FROM scenarios WHERE project_id = ?", (project_id,))
+        cursor.execute("DELETE FROM test_cases WHERE project_id = ?", (project_id,))
+        cursor.execute("DELETE FROM project_environments WHERE project_id = ?", (project_id,))
+        conn.commit()
+        return {"success": True, "message": f"é¡¹ç›® {project_id} å·²åˆ é™¤"}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+
 @app.get("/api/v1/scenarios")
 async def list_scenarios():
     conn = sqlite3.connect(DB_PATH)
@@ -1668,15 +1742,6 @@ async def stress_test_api(req: StressTestRequest):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/v1/projects")
-async def list_projects():
-    """è·å–ç³»ç»Ÿä¸­æ‰€æœ‰é¡¹ç›® ID"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT project_id FROM apis UNION SELECT DISTINCT project_id FROM scenarios")
-    rows = cursor.fetchall()
-    conn.close()
-    return {"projects": [r[0] for r in rows if r[0]]}
 
 @app.post("/api/v1/import/swagger")
 async def import_swagger(project_id: str = Form("default-project"), source: str = Form(None), file: UploadFile = File(None)):
@@ -2438,3 +2503,94 @@ if __name__ == "__main__":
     print(f"ğŸš€ å¯åŠ¨ç»Ÿä¸€åç«¯ (Unified Backend)... æ•°æ®åº“: {DB_PATH}")
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
+ 
+  
+ #   = = = = = = = = = = = = = = = = = = = =   9p-li`mò‹ßYï~dƒº|  A P I   = = = = = = = = = = = = = = = = = = = =  
+ f r o m   s e r v i c e s . s c h e d u l e r _ s e r v i c e   i m p o r t   S c h e d u l e r S e r v i c e  
+ f r o m   p y d a n t i c   i m p o r t   B a s e M o d e l  
+  
+ #   R“ÆoPçV“,hŸv4d@şÒj 
+ s c h e d u l e r _ s e r v i c e   =   S c h e d u l e r S e r v i c e ( D B _ P A T H )  
+  
+ c l a s s   S c h e d u l e d J o b C r e a t e ( B a s e M o d e l ) :  
+         n a m e :   s t r  
+         d e s c r i p t i o n :   s t r   =   " "  
+         s c e n a r i o _ i d :   i n t  
+         p r o j e c t _ i d :   s t r  
+         c r o n :   s t r  
+         e n v i r o n m e n t _ i d :   i n t   =   N o n e  
+         n o t i f y _ o n _ f a i l u r e :   b o o l   =   F a l s e  
+         n o t i f i c a t i o n _ c o n f i g :   d i c t   =   { }  
+  
+ @ a p p . p o s t ( " / a p i / v 1 / s c h e d u l e r / j o b s " )  
+ a s y n c   d e f   c r e a t e _ s c h e d u l e d _ j o b ( j o b :   S c h e d u l e d J o b C r e a t e ) :  
+         " " " R“˜m9p-li`mò‹ßY" " "  
+         t r y :  
+                 r e s u l t   =   a w a i t   s c h e d u l e r _ s e r v i c e . c r e a t e _ j o b ( j o b . d i c t ( ) )  
+                 r e t u r n   r e s u l t  
+         e x c e p t   E x c e p t i o n   a s   e :  
+                 r a i s e   H T T P E x c e p t i o n ( s t a t u s _ c o d e = 5 0 0 ,   d e t a i l = s t r ( e ) )  
+  
+ @ a p p . g e t ( " / a p i / v 1 / s c h e d u l e r / j o b s " )  
+ a s y n c   d e f   l i s t _ s c h e d u l e d _ j o b s ( p r o j e c t _ i d :   s t r ) :  
+         " " " ~”ğ\G_`mò‹ßYR“Di0" " "  
+         t r y :  
+                 j o b s   =   a w a i t   s c h e d u l e r _ s e r v i c e . g e t _ j o b _ l i s t ( p r o j e c t _ i d )  
+                 r e t u r n   j o b s  
+         e x c e p t   E x c e p t i o n   a s   e :  
+                 r a i s e   H T T P E x c e p t i o n ( s t a t u s _ c o d e = 5 0 0 ,   d e t a i l = s t r ( e ) )  
+  
+ @ a p p . p u t ( " / a p i / v 1 / s c h e d u l e r / j o b s / { j o b _ i d } / p a u s e " )  
+ a s y n c   d e f   p a u s e _ j o b ( j o b _ i d :   i n t ) :  
+         " " " Æ“šPàN`mò‹ßY" " "  
+         t r y :  
+                 r e s u l t   =   a w a i t   s c h e d u l e r _ s e r v i c e . p a u s e _ j o b ( j o b _ i d )  
+                 r e t u r n   r e s u l t  
+         e x c e p t   E x c e p t i o n   a s   e :  
+                 r a i s e   H T T P E x c e p t i o n ( s t a t u s _ c o d e = 5 0 0 ,   d e t a i l = s t r ( e ) )  
+  
+ @ a p p . p u t ( " / a p i / v 1 / s c h e d u l e r / j o b s / { j o b _ i d } / r e s u m e " )  
+ a s y n c   d e f   r e s u m e _ j o b ( j o b _ i d :   i n t ) :  
+         " " " ­“ 22æ`mò‹ßY" " "  
+         t r y :  
+                 r e s u l t   =   a w a i t   s c h e d u l e r _ s e r v i c e . r e s u m e _ j o b ( j o b _ i d )  
+                 r e t u r n   r e s u l t  
+         e x c e p t   E x c e p t i o n   a s   e :  
+                 r a i s e   H T T P E x c e p t i o n ( s t a t u s _ c o d e = 5 0 0 ,   d e t a i l = s t r ( e ) )  
+  
+ @ a p p . d e l e t e ( " / a p i / v 1 / s c h e d u l e r / j o b s / { j o b _ i d } " )  
+ a s y n c   d e f   d e l e t e _ j o b ( j o b _ i d :   i n t ) :  
+         " " " R“»rÎj`mò‹ßY" " "  
+         t r y :  
+                 r e s u l t   =   a w a i t   s c h e d u l e r _ s e r v i c e . d e l e t e _ j o b ( j o b _ i d )  
+                 r e t u r n   r e s u l t  
+         e x c e p t   E x c e p t i o n   a s   e :  
+                 r a i s e   H T T P E x c e p t i o n ( s t a t u s _ c o d e = 5 0 0 ,   d e t a i l = s t r ( e ) )  
+  
+ @ a p p . p o s t ( " / a p i / v 1 / s c h e d u l e r / j o b s / { j o b _ i d } / t r i g g e r " )  
+ a s y n c   d e f   t r i g g e r _ j o b _ n o w ( j o b _ i d :   i n t ) :  
+         " " " Ô~*[F]µ“Få`mò‹ßY" " "  
+         t r y :  
+                 a w a i t   s c h e d u l e r _ s e r v i c e . e x e c u t e _ j o b ( j o b _ i d )  
+                 r e t u r n   { " m e s s a g e " :   " `mò‹ßY¸[6ƒY“? }  
+         e x c e p t   E x c e p t i o n   a s   e :  
+                 r a i s e   H T T P E x c e p t i o n ( s t a t u s _ c o d e = 5 0 0 ,   d e t a i l = s t r ( e ) )  
+  
+ @ a p p . g e t ( " / a p i / v 1 / s c h e d u l e r / j o b s / { j o b _ i d } / h i s t o r y " )  
+ a s y n c   d e f   g e t _ j o b _ h i s t o r y ( j o b _ i d :   i n t ,   l i m i t :   i n t   =   5 0 ) :  
+         " " " ~”ğ\G_`mò‹ßYµ“FåX“×Uv_" " "  
+         t r y :  
+                 h i s t o r y   =   a w a i t   s c h e d u l e r _ s e r v i c e . g e t _ j o b _ h i s t o r y ( j o b _ i d ,   l i m i t )  
+                 r e t u r n   h i s t o r y  
+         e x c e p t   E x c e p t i o n   a s   e :  
+                 r a i s e   H T T P E x c e p t i o n ( s t a t u s _ c o d e = 5 0 0 ,   d e t a i l = s t r ( e ) )  
+  
+ #   Z“âéYÃ“úŞY^g¥‚XÈ“Y?iºt§QbcT“?  
+ @ a p p . o n _ e v e n t ( " s t a r t u p " )  
+ a s y n c   d e f   l o a d _ s c h e d u l e d _ j o b s ( ) :  
+         " " " 4dÂedeZ“âéYÃ“úŞY^g¥‚XÈ“Y?iºtªQ‘k9p-li`mò‹ßY" " "  
+         t r y :  
+                 a w a i t   s c h e d u l e r _ s e r v i c e . l o a d _ j o b s _ f r o m _ d b ( )  
+         e x c e p t   E x c e p t i o n   a s   e :  
+                 p r i n t ( f " B’? T“ºrGm9p-li`mò‹ßY¶o«æ‰:   { e } " )  
+ 

@@ -2,15 +2,18 @@
 
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
+import { useProject } from '../contexts/ProjectContext'
+import { FolderOpen } from 'lucide-react'
 
 export default function Navbar() {
     const pathname = usePathname()
+    const { currentProject, setCurrentProject, projects } = useProject()
 
     const navItems = [
-        { name: '✨ 场景生成', href: '/' },
-        { name: '📋 测试管理', href: '/tests' },
-        { name: '📥 数据导入', href: '/import' },
-        { name: '📚 API列表', href: '/apis' },
+        { name: '🧪 测试中心', href: '/testing' },
+        { name: '📚 API管理', href: '/apis' },
+        { name: '📊 测试报告', href: '/reports' },
+        { name: '⚙️ 项目设置', href: '/settings' },
     ]
 
     return (
@@ -45,7 +48,10 @@ export default function Navbar() {
                         </div>
                         <div style={{ display: 'flex', marginLeft: '2.5rem', gap: '0.5rem' }}>
                             {navItems.map((item) => {
-                                const isActive = pathname === item.href
+                                const isActive = pathname === item.href ||
+                                    (item.href === '/testing' && (pathname === '/' || pathname === '/tests' || pathname === '/scheduler')) ||
+                                    (item.href === '/apis' && pathname === '/import') ||
+                                    (item.href === '/settings' && (pathname === '/projects' || pathname === '/environments'))
                                 return (
                                     <Link
                                         key={item.href}
@@ -68,17 +74,40 @@ export default function Navbar() {
                             })}
                         </div>
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center' }}>
-                        <div style={{
-                            padding: '0.25rem 0.75rem',
-                            borderRadius: '9999px',
-                            background: '#D1FAE5',
-                            color: '#047857',
-                            fontSize: '0.75rem',
-                            fontWeight: '500'
-                        }}>
-                            ● 在线
-                        </div>
+
+                    {/* 全局项目选择器 */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                        <FolderOpen size={18} style={{ color: '#6B7280' }} />
+                        <select
+                            value={currentProject}
+                            onChange={(e) => setCurrentProject(e.target.value)}
+                            style={{
+                                padding: '0.5rem 2.5rem 0.5rem 1rem',
+                                border: '2px solid #E5E7EB',
+                                borderRadius: '0.5rem',
+                                fontSize: '0.875rem',
+                                fontWeight: '600',
+                                color: '#1F2937',
+                                background: 'white',
+                                cursor: 'pointer',
+                                outline: 'none',
+                                appearance: 'none',
+                                backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'12\' height=\'12\' viewBox=\'0 0 12 12\'%3E%3Cpath fill=\'%236B7280\' d=\'M6 9L1 4h10z\'/%3E%3C/svg%3E")',
+                                backgroundRepeat: 'no-repeat',
+                                backgroundPosition: 'right 0.75rem center',
+                                minWidth: '180px'
+                            }}
+                        >
+                            {projects.length === 0 ? (
+                                <option value="default-project">默认项目</option>
+                            ) : (
+                                projects.map((project) => (
+                                    <option key={project.id} value={project.id}>
+                                        {project.name}
+                                    </option>
+                                ))
+                            )}
+                        </select>
                     </div>
                 </div>
             </div>

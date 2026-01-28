@@ -3,12 +3,12 @@
 import { useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 
-export default function HomePage() {
+export default function ProjectsRedirect() {
     const router = useRouter()
 
     useEffect(() => {
-        // 首页重定向到测试中心的AI生成Tab
-        router.replace('/testing?tab=ai')
+        // projects页面重定向到项目设置的项目管理Tab
+        router.replace('/settings?tab=projects')
     }, [router])
 
     return (
@@ -19,7 +19,7 @@ export default function HomePage() {
             minHeight: '100vh',
             color: '#6B7280'
         }}>
-            <p>正在跳转到测试中心...</p>
+            <p>正在跳转到项目设置...</p>
         </div>
     )
 }
