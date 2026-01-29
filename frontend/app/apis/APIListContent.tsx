@@ -178,16 +178,15 @@ export default function APIListContent() {
                     step_order: 1,
                     api_id: api.id,
                     api_name: api.name,
+                    path: api.path, // 兼容后端 path/api_path
                     api_path: api.path,
+                    method: api.method, // 兼容后端 method/api_method
                     api_method: api.method,
-                    description: api.description,
                     params: params,
                     headers: runtimeHeaders,
                     url_params: runtimeUrlParams,
                     param_mappings: [],
-                    assertions: [],
-                    expected_status: 200,
-                    timeout: 30
+                    assertions: []
                 }]
             }
 
@@ -234,14 +233,14 @@ export default function APIListContent() {
                 const result = await response.json()
                 setNewApi(prev => ({
                     ...prev,
+                    name: result.name || prev.name || '未命名接口',
                     method: result.method || 'GET',
                     path: result.path || '',
                     base_url: result.base_url || '',
                     headers: result.headers || {},
-                    request_body: result.body || {},
+                    request_body: result.request_body || result.body || {},
                     parameters: result.parameters || []
                 }))
-                alert('解析成功! 已自动填充表单内容。')
             } else {
                 const err = await response.json()
                 alert(`解析 cURL 失败: ${err.detail || '格式不规范'}`)
@@ -290,8 +289,12 @@ export default function APIListContent() {
                 setCurlInput('')
                 fetchAPIs()
             } else {
-                const err = await response.json()
-                alert(`保存失败: ${err.detail || '未知错误'}`)
+                const errData = await response.json().catch(() => ({ detail: '未知错误' }))
+                // 递归将对象转为更易读的字符串，防止出现 [object Object]
+                const errorMessage = typeof errData.detail === 'object'
+                    ? JSON.stringify(errData.detail)
+                    : errData.detail || '服务器内部错误'
+                alert(`保存失败: ${errorMessage}`)
             }
         } catch (err) {
             console.error(err)

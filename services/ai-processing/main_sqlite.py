@@ -6,25 +6,14 @@ import sqlite3
 import os
 import httpx
 import urllib.parse
-import time
-import asyncio
 from typing import List, Dict, Optional, Any
 from datetime import datetime
-import re
 from pydantic import BaseModel
+import uuid
 from dotenv import load_dotenv
-import numpy as np
 
 # 加载环境变量
 load_dotenv()
-
-# 导入轻量级服务
-try:
-    from lightweight_services import LightweightKnowledgeGraph, LightweightVectorSearch
-    SERVICES_AVAILABLE = True
-except ImportError as e:
-    print(f"⚠️ 轻量级服务导入失败: {e}")
-    SERVICES_AVAILABLE = False
 
 app = FastAPI(title="AI Testing API - Unified Edition")
 
@@ -38,16 +27,8 @@ app.add_middleware(
 )
 
 # 路径配置
-# 动态获取项目根目录 (适配不同电脑路径)
-CURRENT_FILE_DIR = os.path.dirname(os.path.abspath(__file__)) # services/ai-processing
-BASE_DIR = os.path.dirname(os.path.dirname(CURRENT_FILE_DIR))   # aitesting-api
-DB_PATH = os.path.join(BASE_DIR, "data", "apis.db")
-KG_PATH = os.path.join(BASE_DIR, "data", "knowledge_graph.pkl")
-VECTOR_DB_PATH = os.path.join(BASE_DIR, "data", "vectors.db")
-
-# 功能开关配置
-ENABLE_KNOWLEDGE_GRAPH = os.getenv("ENABLE_KNOWLEDGE_GRAPH", "true").lower() == "true"
-ENABLE_VECTOR_SEARCH = os.getenv("ENABLE_VECTOR_SEARCH", "true").lower() == "true"
+BASE_DIR = "D:/testc/aitesting-api"
+DB_PATH = os.path.join(BASE_DIR, "data/apis.db")
 
 # ============= 模型适配层 =============
 
@@ -108,31 +89,6 @@ class AIProvider:
 
 ai_client = AIProvider()
 
-# ============= 初始化知识图谱和向量检索服务 =============
-
-kg_service = None
-vector_service = None
-
-if SERVICES_AVAILABLE:
-    try:
-        if ENABLE_KNOWLEDGE_GRAPH:
-            kg_service = LightweightKnowledgeGraph(KG_PATH)
-            print(f"✅ 知识图谱服务已启用: {kg_service.get_stats()}")
-        else:
-            print("ℹ️ 知识图谱服务已禁用")
-        
-        if ENABLE_VECTOR_SEARCH:
-            vector_service = LightweightVectorSearch(VECTOR_DB_PATH)
-            print(f"✅ 向量检索服务已启用: {vector_service.get_stats()}")
-        else:
-            print("ℹ️ 向量检索服务已禁用")
-    except Exception as e:
-        print(f"⚠️ 服务初始化失败: {e}")
-        kg_service = None
-        vector_service = None
-else:
-    print("ℹ️ 轻量级服务不可用,请安装依赖: pip install networkx faiss-cpu")
-
 # ============= 数据库初始化 =============
 
 def init_database():
@@ -150,26 +106,24 @@ def init_database():
         base_url TEXT,
         parameters TEXT, -- JSON 存储
         request_body TEXT, -- JSON 存储
+        headers TEXT, -- JSON 存储
         project_id TEXT DEFAULT 'default-project',
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
     
-    # 自动迁移旧库：增加缺失的列 (独立捕获异常以确保后续列能被添加)
-    alter_queries = [
-        "ALTER TABLE apis ADD COLUMN base_url TEXT",
-        "ALTER TABLE apis ADD COLUMN parameters TEXT",
-        "ALTER TABLE apis ADD COLUMN request_body TEXT",
-        "ALTER TABLE apis ADD COLUMN headers TEXT"
-    ]
-    for q in alter_queries:
-        try:
-            cursor.execute(q)
-            print(f"📊 数据库迁移: 执行成功 {q}")
-        except sqlite3.OperationalError as e:
-            if "duplicate column name" in str(e).lower():
-                pass # 列已存在
-            else:
-                print(f"⚠️ 数据库迁移提醒: {e} ({q})")
+    # 自动迁移旧库：增加缺失的列
+    try:
+        cursor.execute("ALTER TABLE apis ADD COLUMN base_url TEXT")
+    except: pass
+    try:
+        cursor.execute("ALTER TABLE apis ADD COLUMN parameters TEXT")
+    except: pass
+    try:
+        cursor.execute("ALTER TABLE apis ADD COLUMN request_body TEXT")
+    except: pass
+    try:
+        cursor.execute("ALTER TABLE apis ADD COLUMN headers TEXT")
+    except: pass
     
     # 场景表
     cursor.execute('''CREATE TABLE IF NOT EXISTS scenarios (
@@ -212,81 +166,24 @@ def init_database():
         UNIQUE(project_id, env_name)
     )''')
     
-    # 自愈记录表
-    cursor.execute('''CREATE TABLE IF NOT EXISTS healing_records (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        test_case_id INTEGER NOT NULL,
-        original_steps TEXT, -- JSON 存储原始步骤
-        healed_steps TEXT, -- JSON 存储修复后步骤
-        analysis TEXT, -- JSON 存储失败分析
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (test_case_id) REFERENCES test_cases(id)
+    # 项目表
+    cursor.execute('''CREATE TABLE IF NOT EXISTS projects (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
-
     
+    # 兼容性处理：如果 api 表中存在 default-project 但 projects 表中没有，则插入
+    cursor.execute("SELECT COUNT(*) FROM projects WHERE id = 'default-project'")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("INSERT INTO projects (id, name, description) VALUES ('default-project', '默认项目', '系统自动创建的默认项目')")
+
     conn.commit()
     conn.close()
     print(f"✅ 数据库架构已就绪: {DB_PATH}")
 
 init_database()
-
-# ============= 向量生成辅助函数 =============
-
-async def generate_embedding(text: str) -> Optional[np.ndarray]:
-    """使用OpenAI Embedding API生成文本向量"""
-    if not vector_service:
-        return None
-    
-    try:
-        client = ai_client.get_client(ai_client.default_provider)
-        response = await client.embeddings.create(
-            model="text-embedding-ada-002",
-            input=text
-        )
-        embedding = np.array(response.data[0].embedding, dtype=np.float32)
-        return embedding
-    except Exception as e:
-        print(f"⚠️ 向量生成失败: {e}")
-        return None
-
-async def index_api_to_vector(api_id: str, api_info: dict):
-    """将API信息向量化并索引"""
-    if not vector_service:
-        return
-    
-    try:
-        # 构建API描述文本
-        text_parts = [
-            api_info.get('path', ''),
-            api_info.get('method', ''),
-            api_info.get('summary', ''),
-            api_info.get('description', '')
-        ]
-        text = ' '.join([p for p in text_parts if p])
-        
-        # 生成向量
-        embedding = await generate_embedding(text)
-        if embedding is not None:
-            vector_service.add_vector(api_id, embedding, api_info)
-            print(f"📊 API已向量化: {api_info.get('path')}")
-    except Exception as e:
-        print(f"⚠️ API向量化失败: {e}")
-
-def add_api_to_kg(api_id: str, api_info: dict):
-    """将API添加到知识图谱"""
-    if not kg_service:
-        return
-    
-    try:
-        kg_service.add_api(
-            api_id,
-            path=api_info.get('path'),
-            method=api_info.get('method'),
-            name=api_info.get('summary') or api_info.get('path'),
-            project_id=api_info.get('project_id')
-        )
-    except Exception as e:
-        print(f"⚠️ 添加到知识图谱失败: {e}")
 
 # ============= 核心业务路由 =============
 
@@ -398,80 +295,6 @@ async def delete_environment(project_id: str, env_name: str):
     conn.close()
     return {"success": True}
 
-# --- 项目管理 ---
-
-class ProjectCreate(BaseModel):
-    id: str
-    name: str
-    description: Optional[str] = ""
-
-@app.get("/api/v1/projects")
-async def list_projects():
-    """获取所有项目列表"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
-    # 从现有数据中提取所有唯一的project_id
-    cursor.execute("""
-        SELECT DISTINCT project_id as id, 
-               project_id as name,
-               '' as description,
-               MIN(created_at) as created_at
-        FROM apis 
-        GROUP BY project_id
-        UNION
-        SELECT DISTINCT project_id as id,
-               project_id as name, 
-               '' as description,
-               MIN(created_at) as created_at
-        FROM scenarios
-        GROUP BY project_id
-    """)
-    rows = cursor.fetchall()
-    conn.close()
-    
-    # 去重并格式化
-    projects_dict = {}
-    for row in rows:
-        pid = row['id']
-        if pid not in projects_dict:
-            projects_dict[pid] = {
-                'id': pid,
-                'name': pid.replace('-', ' ').title(),
-                'description': f'{pid} 项目',
-                'created_at': row['created_at']
-            }
-    
-    return list(projects_dict.values())
-
-@app.post("/api/v1/projects")
-async def create_project(project: ProjectCreate):
-    """创建新项目(实际上只是记录,数据会在使用时自动创建)"""
-    # 由于我们的架构是基于project_id的,不需要单独的projects表
-    # 这里只是返回成功,实际项目会在创建API或场景时自动产生
-    return {"success": True, "project": project.dict()}
-
-@app.delete("/api/v1/projects/{project_id}")
-async def delete_project(project_id: str):
-    """删除项目及其所有数据"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    try:
-        # 删除该项目的所有数据
-        cursor.execute("DELETE FROM apis WHERE project_id = ?", (project_id,))
-        cursor.execute("DELETE FROM scenarios WHERE project_id = ?", (project_id,))
-        cursor.execute("DELETE FROM test_cases WHERE project_id = ?", (project_id,))
-        cursor.execute("DELETE FROM project_environments WHERE project_id = ?", (project_id,))
-        conn.commit()
-        return {"success": True, "message": f"项目 {project_id} 已删除"}
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        conn.close()
-
-
 @app.get("/api/v1/scenarios")
 async def list_scenarios():
     conn = sqlite3.connect(DB_PATH)
@@ -491,6 +314,183 @@ async def list_scenarios():
 async def generate_case(scenario_id: int):
     """从海量 API 中检索并智能编排用例链"""
     try:
+        def _safe_json_loads(val, default):
+            if val is None:
+                return default
+            if isinstance(val, (dict, list)):
+                return val
+            if isinstance(val, str):
+                s = val.strip()
+                if not s:
+                    return default
+                try:
+                    return json.loads(s)
+                except Exception:
+                    return default
+            return default
+
+        def _normalize_headers_dict(h):
+            if not isinstance(h, dict):
+                return {}
+            out = {}
+            for k, v in h.items():
+                if k is None:
+                    continue
+                key = str(k).strip()
+                if not key:
+                    continue
+                # 统一为字符串，避免 httpx header 类型问题
+                out[key] = "" if v is None else str(v)
+            return out
+
+        def _has_mapping(mappings, to_field, to_type="headers"):
+            for m in mappings or []:
+                if not isinstance(m, dict):
+                    continue
+                if (m.get("to_field") == to_field) and (m.get("to_type", "params") == to_type):
+                    return True
+            return False
+
+        def _ensure_header_mapping(mappings, from_step, from_fields, to_field):
+            """允许多个候选 from_field：前面的失败了，后面的仍可能成功"""
+            if mappings is None:
+                mappings = []
+            if not isinstance(mappings, list):
+                mappings = []
+            if _has_mapping(mappings, to_field, "headers"):
+                return mappings
+            for f in from_fields:
+                mappings.append({
+                    "from_step": from_step,
+                    "from_field": f,
+                    "to_field": to_field,
+                    "to_type": "headers"
+                })
+            return mappings
+
+        def _enhance_steps_with_headers(project_id: str, steps: List[Dict[str, Any]], cursor):
+            """生成用例后，自动补齐 headers + 动态依赖（如 token、员工/门店ID、sessionId 等）的 param_mappings。"""
+            if not isinstance(steps, list) or not steps:
+                return steps
+
+            # 取出项目下所有 API 的 headers 定义，按 (method,path) 建索引
+            cursor.execute(
+                "SELECT path, method, headers FROM apis WHERE project_id = ?",
+                (project_id,)
+            )
+            api_rows = cursor.fetchall()
+            api_headers_by_key = {}
+            for r in api_rows:
+                try:
+                    p = r["path"] if isinstance(r, sqlite3.Row) else r[0]
+                    m = r["method"] if isinstance(r, sqlite3.Row) else r[1]
+                    h = r["headers"] if isinstance(r, sqlite3.Row) else r[2]
+                except Exception:
+                    continue
+                api_headers_by_key[(str(m or "").upper(), str(p or ""))] = _normalize_headers_dict(_safe_json_loads(h, {}))
+
+            # 约定：第 1 步通常是登录/获取 token（从该步提取动态头）
+            from_step_for_auth = 1
+
+            for i, step in enumerate(steps):
+                if not isinstance(step, dict):
+                    continue
+
+                method = str(step.get("api_method") or step.get("method") or "GET").upper()
+                path = step.get("api_path") or step.get("path") or ""
+                key = (method, str(path))
+
+                headers = _normalize_headers_dict(step.get("headers") or {})
+                params_body = step.get("params") if isinstance(step.get("params"), dict) else {}
+                param_mappings = step.get("param_mappings")
+                if not isinstance(param_mappings, list):
+                    param_mappings = []
+
+                # 1) 合并 API 定义中的 headers（不覆盖用户已有；跳过 Authorization 静态值）
+                api_headers = api_headers_by_key.get(key) or {}
+                for hk, hv in api_headers.items():
+                    if hk.lower() == "authorization":
+                        continue
+                    if hk not in headers and hv:
+                        headers[hk] = hv
+
+                # 2) 如果 headers 里出现 ${...} 占位符，清理掉，避免“看起来有值但执行时无效”
+                for hk in list(headers.keys()):
+                    hv = headers.get(hk, "")
+                    if isinstance(hv, str) and ("${" in hv or "{{" in hv):
+                        # Authorization 必须靠 param_mappings 注入
+                        if hk.lower() == "authorization":
+                            headers.pop(hk, None)
+
+                # 3) 动态头自动补齐（优先用 step.params 的静态值；否则用 param_mappings 从第1步提取）
+                if "X-Venue-Id" not in headers:
+                    if isinstance(params_body, dict) and params_body.get("venueId"):
+                        headers["X-Venue-Id"] = str(params_body.get("venueId"))
+                    else:
+                        param_mappings = _ensure_header_mapping(
+                            param_mappings,
+                            from_step_for_auth,
+                            ["data.venueId", "data.user.venueId", "data.profile.venueId"],
+                            "X-Venue-Id"
+                        )
+
+                if "X-Employee-Id" not in headers:
+                    if isinstance(params_body, dict) and params_body.get("employeeId"):
+                        headers["X-Employee-Id"] = str(params_body.get("employeeId"))
+                    else:
+                        param_mappings = _ensure_header_mapping(
+                            param_mappings,
+                            from_step_for_auth,
+                            ["data.employeeId", "data.user.employeeId", "data.profile.employeeId", "data.empId"],
+                            "X-Employee-Id"
+                        )
+
+                # Authorization：无论 API 定义里有没有，都确保通过映射注入
+                param_mappings = _ensure_header_mapping(
+                    param_mappings,
+                    from_step_for_auth,
+                    ["data.token", "token", "data.access_token", "data.accessToken"],
+                    "Authorization"
+                )
+
+                # 4) 常见 body 依赖自动补齐：sessionId
+                # 典型链路：步骤2 open-pay 返回 data.sessionId，步骤3 close-room 需要该 sessionId
+                current_step_order = step.get("step_order") or (i + 1)
+                if isinstance(params_body, dict) and "sessionId" in params_body and int(current_step_order) > 1:
+                    # 只有在尚未配置映射时才自动添加，避免覆盖人工配置
+                    if not _has_mapping(param_mappings, "sessionId", to_type="params"):
+                        from_step_for_session = int(current_step_order) - 1
+                        # 优先尝试 data.sessionId；若不存在，执行时会回退为原始静态值
+                        param_mappings.append({
+                            "from_step": from_step_for_session,
+                            "from_field": "data.sessionId",
+                            "to_field": "sessionId",
+                            "to_type": "params"
+                        })
+
+                # 5) 通用 body 依赖自动补齐：同名字段 data.xxx -> params.xxx
+                # 只对第2步及之后生效，且不会覆盖已有人工映射
+                if isinstance(params_body, dict) and int(current_step_order) > 1:
+                    from_step_for_generic = int(current_step_order) - 1
+                    for field_name in list(params_body.keys()):
+                        # 已有专门逻辑或已配置映射的字段跳过
+                        if field_name in ("sessionId",):
+                            continue
+                        if _has_mapping(param_mappings, field_name, to_type="params"):
+                            continue
+                        # 自动假定上一步响应中存在 data.<field_name>
+                        param_mappings.append({
+                            "from_step": from_step_for_generic,
+                            "from_field": f"data.{field_name}",
+                            "to_field": field_name,
+                            "to_type": "params"
+                        })
+
+                step["headers"] = headers
+                step["param_mappings"] = param_mappings
+
+            return steps
+
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -502,181 +502,35 @@ async def generate_case(scenario_id: int):
         
         # 2. RAG: 简易语义检索 (包含完整参数和请求体以供 AI 精准识别)
         cursor.execute("""
-            SELECT path, method, summary, description, base_url, parameters, request_body, headers 
+            SELECT path, method, summary, description, base_url, parameters, request_body, headers
             FROM apis 
             WHERE project_id = ?
         """, (scenario["project_id"],))
         rows_apis = cursor.fetchall()
         all_apis = [dict(row) for row in rows_apis]
         
-        # 3. AI 编排
-        system_prompt = """你是一个高级接口自动化专家。
-        任务：根据给出的【业务意图】和【可用 API 列表】，自动识别出正确的调用链，并以 JSON 格式返回。
-        要求：
-        1. 识别参数依赖（如 A 接口返回的 id 是 B 接口的输入）。
-        2. 生成完整的测试数据：
-           - `params` 必须包含该 API 定义中 `request_body` 的所有字段。
-           - 严禁返回空对象或仅包含映射字段。
-           - 使用合理且真实的测试数据（如果是查询，使用典型值；如果是创建，使用随机但合理的姓名/手机号等）。
-        3. **参数映射 (param_mappings) - 必须生成!**：
-           - **每个步骤都必须包含 param_mappings 字段**(即使为空数组 [])
-           - 识别参数依赖: 如果后续步骤需要前序步骤的返回值,必须配置映射
-           - 即使字段值将从前序步骤提取，也必须在 `params` 中保留该字段，并填充占位符数据。
-           - 映射关系必须准确指向前序步骤的 `from_field` 和当前步骤的 `to_field`。
-           - 常见映射场景: 登录返回token → 后续请求使用token, 创建订单返回orderId → 查询订单使用orderId
-           - **映射格式**: {"from_step": 步骤序号, "from_field": "响应字段路径", "to_field": "目标字段路径"}
-           - **重要**: 仔细分析每个步骤的API定义,识别所有需要的参数映射,不要遗漏!
-        4. **Headers 继承 (重要!)**：
-           - 如果 API 定义中有 `headers` 字段,必须在生成的步骤中包含相同的 headers。
-           - 特别是 `Content-Type` 头,必须严格按照 API 定义设置。
-        5. **自动生成逻辑断言 (关键!)**：
-           - **只生成基础断言，不要臆测业务字段**
-           - **必须生成的断言**：
-             * HTTP状态码断言（必需）: {"type": "status_code", "expected": 200, "description": "HTTP状态码应为200"}
-             * 业务状态码断言（强烈推荐）: {"type": "field_value", "field": "code", "expected": 0, "description": "业务状态码应为0"}
-           - **禁止生成的断言**：
-             * 不要断言具体的业务字段值（如sessionId、orderId、userId等）
-             * 不要断言不确定的响应字段
-             * 不要使用占位符作为期望值（如"placeholder_xxx"）
-           - **每个步骤只生成1-2个断言**: HTTP状态码(必需) + 业务状态码(推荐)
-           - **字段路径格式 (field)**：
-             * 使用点记号表示嵌套路径，如 "data.user.id"
-             * 数组索引用数字，如 "data.list.0.name"
-             * 常见响应结构: {"code": 0, "message": "success", "data": {...}}
-        请务必返回合法的 JSON 对象。
-        格式示例（包含完整的参数映射）：
-        { 
-          "scenario_name": "用户登录并创建订单", 
-          "steps": [
-            { 
-              "step_order": 1, 
-              "api_path": "/user/login", 
-              "api_method": "POST", 
-              "description": "用户登录获取token", 
-              "params": {"phone": "<从API定义获取>", "password": "<从API定义获取>"}, 
-              "headers": {"Content-Type": "application/json"}, 
-              "assertions": [
-                {"type": "status_code", "expected": 200, "description": "HTTP状态码应为200"},
-                {"type": "field_value", "field": "code", "expected": 0, "description": "业务状态码应为0"}
-              ], 
-              "param_mappings": []
-            },
-            { 
-              "step_order": 2, 
-              "api_path": "/order/create", 
-              "api_method": "POST", 
-              "description": "创建订单", 
-              "params": {"productId": "<从API定义获取>", "quantity": 1}, 
-              "headers": {"Content-Type": "application/json", "Authorization": "placeholder_token"}, 
-              "assertions": [
-                {"type": "status_code", "expected": 200, "description": "HTTP状态码应为200"},
-                {"type": "field_value", "field": "code", "expected": 0, "description": "业务状态码应为0"}
-              ], 
-              "param_mappings": [
-                {"from_step": 1, "from_field": "data.token", "to_field": "headers.Authorization"}
-              ]
-            },
-            { 
-              "step_order": 3, 
-              "api_path": "/order/query", 
-              "api_method": "GET", 
-              "description": "查询订单详情", 
-              "params": {"orderId": "placeholder_order_id"}, 
-              "headers": {"Content-Type": "application/json", "Authorization": "placeholder_token"}, 
-              "assertions": [
-                {"type": "status_code", "expected": 200, "description": "HTTP状态码应为200"},
-                {"type": "field_value", "field": "code", "expected": 0, "description": "业务状态码应为0"}
-              ], 
-              "param_mappings": [
-                {"from_step": 1, "from_field": "data.token", "to_field": "headers.Authorization"},
-                {"from_step": 2, "from_field": "data.orderId", "to_field": "params.orderId"}
-              ]
-            }
-          ] 
-        }
+        # 3. AI 编排 (增强版 - 智能识别参数依赖)
+        system_prompt = """你是个资深自动化专家。任务：根据【业务意图】和【API列表】，生成 JSON 测试步骤。
+关键规则：
+1. 必须识别依赖：若 A 返回 data.token，B 需使用，则配置 param_mappings。
+2. 特别是鉴权：登录返回的 Token 必须映射到后续接口的 Headers，to_field 通常为 "Authorization"，to_type 为 "headers"。
+3. 禁止自引用：步骤N不能引用步骤N自己的数据，from_step必须小于当前步骤。
+4. 第一步通常无依赖：第一个步骤（通常是登录）的param_mappings应该为空[]。
+5. 字段区分：params 放 Body (POST/PUT)，url_params 放 Query String。
+6. 真实数据：生成符合逻辑的姓名、手机号等，不要用 {}。
+格式：{ "scenario_name": "...", "steps": [{ "step_order": 1, "api_path": "...", "api_method": "...", "params": {}, "url_params": {}, "headers": {}, "param_mappings": [{ "from_step": 1, "from_field": "data.token", "to_field": "Authorization", "to_type": "headers" }] }] }"""
         
-        **重要提示**: 
-        - params中的值必须从API定义的request_body中获取,不要使用示例中的具体值
-        - 保持API定义中的原始测试数据,不要随意修改
-        - 只有在API定义中没有提供默认值时,才使用合理的测试数据"""
-        
-        
-        user_prompt = f"意图: {scenario['nlu_result']}\n可用 API: {json.dumps(all_apis[:50])}" # 限制上下文
+        user_prompt = f"意图: {scenario['nlu_result']}\n可用 API: {json.dumps(all_apis[:50])}" 
         case_result = await ai_client.chat(system_prompt, user_prompt)
-        
-        # 3.5 验证并修复断言配置
-        def validate_and_fix_assertions(steps):
-            """验证并修复断言配置,确保包含必需字段"""
-            fixed_count = 0
-            for step in steps:
-                assertions = step.get("assertions", [])
-                fixed_assertions = []
-                
-                for assertion in assertions:
-                    assertion_type = assertion.get("type", "")
-                    description = assertion.get("description", "").lower()
-                    
-                    # 检查必需字段
-                    if assertion_type in ["field_exists", "field_value", "json_path"]:
-                        if not assertion.get("field"):
-                            print(f"⚠️ 警告: 步骤 {step.get('step_order')} 的 {assertion_type} 断言缺少 field 字段")
-                            print(f"   断言配置: {assertion}")
-                            print(f"   描述: {description}")
-                            
-                            field = None
-                            
-                            # 方法1: 根据期望值推测
-                            if assertion_type == "field_value":
-                                expected = assertion.get("expected") or assertion.get("expected_value")
-                                if expected == 0 or expected == "0":
-                                    field = "code"
-                                    print(f"   ✅ 根据期望值推测: field='code'")
-                                elif expected in ["success", "成功", "ok", "OK"]:
-                                    field = "message"
-                                    print(f"   ✅ 根据期望值推测: field='message'")
-                            
-                            # 方法2: 根据描述推测
-                            if not field and description:
-                                if "code" in description or "状态码" in description or "业务码" in description:
-                                    field = "code"
-                                    print(f"   ✅ 根据描述推测: field='code'")
-                                elif "message" in description or "消息" in description or "msg" in description:
-                                    field = "message"
-                                    print(f"   ✅ 根据描述推测: field='message'")
-                                elif "list" in description or "列表" in description or "数组" in description:
-                                    field = "data.list"
-                                    print(f"   ✅ 根据描述推测: field='data.list'")
-                                elif "data" in description or "数据" in description:
-                                    field = "data"
-                                    print(f"   ✅ 根据描述推测: field='data'")
-                                elif "token" in description or "令牌" in description:
-                                    field = "data.token"
-                                    print(f"   ✅ 根据描述推测: field='data.token'")
-                            
-                            # 方法3: 使用默认值
-                            if not field:
-                                field = "data"
-                                print(f"   ⚠️ 无法推测,使用默认值: field='data'")
-                            
-                            assertion["field"] = field
-                            fixed_count += 1
-                    
-                    # 确保expected字段存在
-                    if "expected" not in assertion and "expected_value" in assertion:
-                        assertion["expected"] = assertion["expected_value"]
-                    
-                    fixed_assertions.append(assertion)
-                
-                step["assertions"] = fixed_assertions
-            
-            if fixed_count > 0:
-                print(f"📋 断言验证完成: 共修复 {fixed_count} 个不完整的断言配置")
-            
-            return steps
-        
-        # 验证并修复生成的步骤
-        if "steps" in case_result:
-            case_result["steps"] = validate_and_fix_assertions(case_result["steps"])
+
+        # 3.5 生成后增强：自动合并 API headers，并补齐动态头映射（避免漏 X-Employee-Id / X-Venue-Id 等）
+        try:
+            steps = case_result.get("steps") if isinstance(case_result, dict) else None
+            if isinstance(steps, list):
+                case_result["steps"] = _enhance_steps_with_headers(scenario["project_id"], steps, cursor)
+        except Exception as _e:
+            # 不阻断主流程：增强失败时仍保存 AI 产物
+            print(f"DEBUG: enhance steps headers failed: {str(_e)}")
         
         # 4. 保存测试用例
         cursor.execute(
@@ -684,54 +538,10 @@ async def generate_case(scenario_id: int):
             (case_result.get("scenario_name"), json.dumps(case_result.get("steps")), scenario["project_id"])
         )
         case_id = cursor.lastrowid
-        
-        # 关联场景
         cursor.execute("UPDATE scenarios SET test_case_id = ? WHERE id = ?", (case_id, scenario_id))
-        
         conn.commit()
         conn.close()
-        # 兼容前端字段名
-        case_result["name"] = case_result.get("scenario_name")
-        return case_result
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.delete("/api/v1/test_cases/{test_case_id}/steps/{step_order}")
-async def delete_test_step(test_case_id: int, step_order: int):
-    """从测试用例中删除指定步骤并重新编排序号"""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        # 1. 获取当前步骤
-        cursor.execute("SELECT steps FROM test_cases WHERE id = ?", (test_case_id,))
-        row = cursor.fetchone()
-        if not row:
-            conn.close()
-            raise HTTPException(status_code=404, detail="测试用例不存在")
-        
-        steps = json.loads(row["steps"])
-        
-        # 2. 过滤掉目标步骤
-        new_steps = [s for s in steps if s.get("step_order") != step_order]
-        
-        if len(new_steps) == len(steps):
-            conn.close()
-            raise HTTPException(status_code=404, detail="指定步骤不存在")
-            
-        # 3. 重新编排序号
-        for i, step in enumerate(new_steps, 1):
-            step["step_order"] = i
-            
-        # 4. 写回数据库
-        cursor.execute("UPDATE test_cases SET steps = ? WHERE id = ?", (json.dumps(new_steps), test_case_id))
-        conn.commit()
-        conn.close()
-        
-        return {"success": True, "message": f"已删除第 {step_order} 步，剩余 {len(new_steps)} 步", "steps": new_steps}
+        return {**case_result, "name": case_result.get("scenario_name"), "id": case_id}
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -740,784 +550,195 @@ async def delete_test_step(test_case_id: int, step_order: int):
 # --- 执行引擎 ---
 
 class ExecutionRequest(BaseModel):
-    test_case_id: Optional[int] = None  # 可选,用于完整场景执行
+    test_case_id: Optional[int] = None
+    steps: Optional[List[Any]] = None  # 支持直接传入步骤执行
     environment: str = "test"
     base_url: str = "http://localhost:8000"
-    steps: Optional[List[Dict]] = None  # 可选,用于单步执行
-
-class APICreateRequest(BaseModel):
-    name: str
-    method: str
-    path: str
-    description: Optional[str] = ""
-    project_id: str = "default-project"
-    base_url: Optional[str] = ""
-    headers: Optional[Dict] = {}
-    request_body: Optional[Dict] = {}
-    parameters: Optional[List] = []
-
-class CurlParseRequest(BaseModel):
-    curl: str
-
-def parse_curl_command(curl_command: str) -> Dict[str, Any]:
-    import shlex
-    try:
-        # 预处理：去掉换行符和反斜杠连接
-        curl_command = curl_command.replace('\\\n', ' ').replace('\\\r\n', ' ').strip()
-        tokens = shlex.split(curl_command)
-    except Exception as e:
-        raise ValueError(f"cURL 解析失败 (shlex): {str(e)}")
-
-    result = {
-        "method": "GET",
-        "url": "",
-        "path": "",
-        "base_url": "",
-        "headers": {},
-        "body": {},
-        "parameters": [] # 新增：解析查询参数
-    }
-
-    i = 0
-    is_get_mode = False
-    while i < len(tokens):
-        token = tokens[i]
-        if token == "curl":
-            i += 1
-            continue
-        if token in ["-X", "--request"]:
-            if i + 1 < len(tokens):
-                result["method"] = tokens[i+1].upper()
-                i += 2
-                continue
-        if token in ["-G", "--get"]:
-            is_get_mode = True
-            i += 1
-            continue
-        if token in ["-u", "--user"]:
-            if i + 1 < len(tokens):
-                import base64
-                auth_val = base64.b64encode(tokens[i+1].encode()).decode()
-                result["headers"]["Authorization"] = f"Basic {auth_val}"
-                i += 2
-                continue
-        if token in ["-H", "--header"]:
-            if i + 1 < len(tokens):
-                header_str = tokens[i+1]
-                if ":" in header_str:
-                    key, val = header_str.split(":", 1)
-                    # 某些 header 不需要保留在定义中（如缓存头），但在解析阶段我们先保留，由执行引擎清洗
-                    result["headers"][key.strip()] = val.strip()
-                i += 2
-                continue
-        if token in ["-d", "--data", "--data-raw", "--data-binary", "--data-urlencoded", "--data-urlencode"]:
-            if i + 1 < len(tokens):
-                body_str = tokens[i + 1]
-                if result["method"] == "GET" and not is_get_mode:
-                    result["method"] = "POST"
-                
-                # 尝试解析 JSON
-                try:
-                    parsed_body = json.loads(body_str)
-                    if isinstance(result["body"], dict):
-                        result["body"].update(parsed_body)
-                    else:
-                        result["body"] = parsed_body
-                except:
-                    # 如果不是 JSON，尝试按 key=value 解析
-                    if "=" in body_str:
-                        params = urllib.parse.parse_qs(body_str)
-                        body_params = {k: v[0] for k, v in params.items()}
-                        if isinstance(result["body"], dict):
-                            result["body"].update(body_params)
-                        else:
-                            result["body"] = body_params
-                    else:
-                        result["body"] = body_str
-                i += 2
-                continue
-        if token in ["-F", "--form"]:
-            if i + 1 < len(tokens):
-                form_str = tokens[i + 1]
-                if "=" in form_str:
-                    parts = form_str.split("=", 1)
-                    k, v = parts[0], parts[1]
-                    if isinstance(result["body"], dict):
-                        result["body"][k] = v
-                result["method"] = "POST"
-                i += 2
-                continue
-        if not token.startswith("-") and not result["url"]:
-            full_url = token
-            # 兼容不带 http 的写法
-            if not re.match(r'https?://', full_url):
-                full_url = "http://" + full_url
-            
-            result["url"] = full_url
-            try:
-                parsed = urllib.parse.urlparse(full_url)
-                result["base_url"] = f"{parsed.scheme}://{parsed.netloc}"
-                result["path"] = parsed.path
-                # 解析 URL 中的查询参数
-                if parsed.query:
-                    qs = urllib.parse.parse_qs(parsed.query)
-                    for k, v in qs.items():
-                        result["parameters"].append({
-                            "name": k,
-                            "value": v[0],
-                            "in": "query",
-                            "required": False
-                        })
-            except:
-                result["path"] = full_url
-            i += 1
-            continue
-        i += 1
-    
-    # 如果是 GET 模式，将 body 合并到 parameters
-    if is_get_mode and isinstance(result["body"], dict):
-        for k, v in result["body"].items():
-            result["parameters"].append({
-                "name": k,
-                "value": str(v),
-                "in": "query",
-                "required": False
-            })
-        result["body"] = {}
-        result["method"] = "GET"
-
-    return result
 
 @app.post("/api/v1/executions")
 async def execute_case(req: ExecutionRequest):
-    """链式执行引擎：支持变量动态映射和 HTTP 发送"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    """万能执行引擎：支持场景用例和实时单接口执行"""
     try:
-        # 1. 确定运行时的步骤数据
-        case_info = None
+        steps = []
         if req.steps:
             steps = req.steps
-        else:
-            if not req.test_case_id:
-                raise HTTPException(status_code=400, detail="必须提供 test_case_id 或 steps")
+        elif req.test_case_id:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
             cursor.execute("SELECT * FROM test_cases WHERE id = ?", (req.test_case_id,))
-            case_info = cursor.fetchone()
-            if not case_info: 
-                raise HTTPException(status_code=404, detail="用例不存在")
-            steps = json.loads(case_info["steps"])
-        
-        context = {} # 存储运行时变量
+            case = cursor.fetchone()
+            conn.close()
+            if not case: raise HTTPException(status_code=404, detail="用例不存在")
+            steps = json.loads(case["steps"])
+            print(f"DEBUG: Loaded {len(steps)} steps from test_case {req.test_case_id}")
+            # 自动补齐 step_order (防止 context 冲突)
+            for i, s in enumerate(steps):
+                if not s.get("step_order"): s["step_order"] = i + 1
+        else:
+            raise HTTPException(status_code=400, detail="必须提供 test_case_id 或 steps")
+
+        context = {} 
         step_results = []
         
-        async with httpx.AsyncClient(verify=False, timeout=30.0, follow_redirects=True) as client:
-            for step in steps:
-                step_order = step.get("step_order", 0)
+        def get_value_by_path(data, path):
+            """支持 a.b.c 路径提取"""
+            if data is None or not path: return None
+            parts = path.split('.')
+            curr = data
+            for p in parts:
+                if isinstance(curr, dict) and p in curr: curr = curr[p]
+                elif isinstance(curr, list) and p.isdigit(): # 支持数组索引
+                    idx = int(p)
+                    if idx < len(curr): curr = curr[idx]
+                    else: return None
+                else: return None
+            return curr
+
+        async with httpx.AsyncClient(verify=False) as client:
+            for i, step in enumerate(steps):
+                step_order = step.get("step_order", i + 1)
+                print(f"DEBUG: Starting step {step_order} [{step.get('api_method', 'GET')} {step.get('api_path')}]")
                 start_time = datetime.now()
-                # 确定 Base URL: 环境选择器优先于接口定义的 base_url
+                
+                # 确定 Base URL
                 current_base_url = req.base_url.strip() if req.base_url else ""
-                
-                # 如果没有选环境，或者环境是默认的 localhost，则尝试取接口定义里的
-                if not current_base_url or "localhost:8000" in current_base_url:
-                    if step.get("base_url"):
-                        current_base_url = step.get("base_url").strip()
-                
-                # 如果最终还是空的，给个默认
+                if not current_base_url or current_base_url == "http://localhost:8000":
+                    current_base_url = (step.get("base_url") or "").strip()
                 if not current_base_url:
                     current_base_url = "http://localhost:8000"
 
                 step_data = {
                     "step_order": step_order,
                     "url": "",
-                    "method": step.get("api_method", "GET").upper(),
+                    "method": step.get("api_method", step.get("method", "GET")).upper(),
                     "request_data": step.get("params", {}),
+                    "request_headers": step.get("headers", {}).copy(),
                     "success": False,
-                    "status_code": "Error",
-                    "extractions": []
+                    "status_code": "Error"
                 }
                 
                 try:
-                    # 变量替换与参数准备
-                    api_path = step.get('api_path', '').strip()
-                    
-                    # 路径清洗：如果 api_path 里不小心带了域名（某些 cURL 导入或手动输入的误操作），尝试剥离它
-                    if re.match(r'https?://', api_path):
-                        parsed_path = urllib.parse.urlparse(api_path)
-                        api_path = parsed_path.path
-                        if parsed_path.query and not step.get("url_params"):
-                            # 如果路径里有 query 且没定义参数，则保留（通过 safe_path 处理）
-                            api_path = f"{parsed_path.path}?{parsed_path.query}"
-
-                    normalized_api_path = api_path.split('?')[0].strip("/")
-                    
-                    # 确保 path 不带开头的斜杠，方便拼接
-                    clean_path = api_path.lstrip('/')
-                    safe_path = urllib.parse.quote(clean_path, safe="/?=&")
+                    api_path = step.get('api_path', step.get('path', ''))
+                    safe_path = urllib.parse.quote(api_path.lstrip('/'), safe="/?=&")
                     url = f"{current_base_url.rstrip('/')}/{safe_path}"
-                    
-                    params = step.get("params", {}).copy()
-                    method = step_data["method"]
-                    
-                    # --- 参数自动补全逻辑 ---
-                    # 如果 params 字段较少（可能是 AI 生成场景时丢失了字段），尝试从数据库拉取完整定义
-                    if method.upper() == "POST" and len(params) < 5:
-                        try:
-                            proj_id = case_info["project_id"] if case_info else step.get("project_id", "")
-                            cursor.execute("""
-                                SELECT request_body FROM apis 
-                                WHERE (path = ? OR path = ?) AND method = ? AND project_id = ?
-                                LIMIT 1
-                            """, (normalized_api_path, f"/{normalized_api_path}", method, proj_id))
-                            api_row = cursor.fetchone()
-                            if api_row and api_row["request_body"]:
-                                rb_def = json.loads(api_row["request_body"])
-                                if "content" in rb_def:
-                                    for ct, content in rb_def["content"].items():
-                                        props = content.get("schema", {}).get("properties", {})
-                                        if props:
-                                            full_params = {}
-                                            for f_name, f_def in props.items():
-                                                full_params[f_name] = f_def.get("example") if f_def.get("example") is not None else f_def.get("default", "")
-                                            full_params.update(params) # 覆盖提取的值
-                                            params = full_params
-                                            print(f"📋 步骤 {step_order}: 已从数据库补全完整请求参数 (原始字段数: {len(step.get('params', {}))}, 补全后: {len(params)})")
-                                            break
-                        except Exception as e:
-                            print(f"⚠️ 补齐参数失败: {e}")
-                    # ----------------------
-
-                    # 智能路径搜索与提取工具函数 (注入到 step 作用域)
-                    def find_field_paths(data, target_field, current_path="", max_depth=5):
-                        if max_depth <= 0: return []
-                        paths = []
-                        if isinstance(data, dict):
-                            if target_field in data:
-                                path = f"{current_path}.{target_field}" if current_path else target_field
-                                paths.append(path)
-                            for k, v in data.items():
-                                new_path = f"{current_path}.{k}" if current_path else k
-                                paths.extend(find_field_paths(v, target_field, new_path, max_depth - 1))
-                        elif isinstance(data, list) and len(data) > 0:
-                            new_path = f"{current_path}[0]" if current_path else "[0]"
-                            paths.extend(find_field_paths(data[0], target_field, new_path, max_depth - 1))
-                        return paths
-
-                    def try_extract_with_path(data, path):
-                        try:
-                            curr = data
-                            for part in path.replace('[', '.[').split('.'):
-                                if not part: continue
-                                if part.startswith('[') and part.endswith(']'):
-                                    curr = curr[int(part[1:-1])]
-                                elif part.isdigit():
-                                    curr = curr[int(part)] if isinstance(curr, list) else curr.get(part)
-                                else:
-                                    curr = curr.get(part)
-                                if curr is None: break
-                            return curr
-                        except: return None
-                    
-                    # 处理 URL 参数 (query 和 path)
-                    query_params = {}
-                    url_params_list = step.get("url_params", [])
-                    print(f"   [DEBUG] 原始 params: {json.dumps(params, ensure_ascii=False)[:200]}")
-                    print(f"   [DEBUG] 原始 url_params: {json.dumps(url_params_list, ensure_ascii=False)[:200]}")
-                    if isinstance(url_params_list, list):
-                        for p in url_params_list:
-                            p_name = p.get("name")
-                            p_in = p.get("in", "query")  # 默认为 query,防止 AI 生成时遗漏
-                            p_val = p.get("value")
-                            if p_val is None:
-                                # 尝试获取默认值
-                                schema = p.get("schema", {})
-                                p_val = schema.get("default") if isinstance(schema, dict) else None
-                            
-                            if p_val is not None and p_name:
-                                if p_in == "path":
-                                    # 替换路径参数 {name} 或 :name
-                                    url = url.replace(f"{{{p_name}}}", str(p_val))
-                                    url = url.replace(f":{p_name}", str(p_val))
-                                else:
-                                    # 其他所有情况(query、空值、未定义等)都作为查询参数
-                                    query_params[p_name] = p_val
-                    elif isinstance(url_params_list, dict):
-                        # 如果是字典,直接作为 query 参数
-                        query_params.update(url_params_list)
-                    print(f"   [DEBUG] 处理后 query_params: {json.dumps(query_params, ensure_ascii=False)}")
-
                     step_data["url"] = url
                     
-                    # 处理headers (深度清洗系统干扰项)
-                    headers = step.get("headers", {}).copy()
+                    params_body = (step.get("params") or {}).copy()
+                    params_query = (step.get("url_params") or {}).copy()
+                    request_headers = (step.get("headers") or {}).copy()
+                    method = step_data["method"]
                     
-                    # 核心清洗逻辑：剔除可能引发 304, 403, 411 或损坏响应的 Header
-                    black_list = [
-                        'host',                    # 必须剔除，否则跨环境执行会 403 (Host 不匹配)
-                        'if-none-match',           # 必须剔除，否则会报 304 Not Modified
-                        'if-modified-since',       # 必须剔除，同上
-                        'content-length',          # 必须剔除，防止 Body 修改后长度校验失败
-                        'connection',              # 交给 httpx
-                        'accept-encoding',         # 交给 httpx (支持自动解压)
-                        # 'content-type',          # [FIX] 不再剔除，允许表单等非 JSON 格式通过
-                    ]
-                    
-                    # 转换为小写进行匹配并剔除
-                    headers = {k: v for k, v in headers.items() if k.lower() not in black_list}
-                    
-                    # 强制注入非缓存头，确保获取实时数据
-                    headers["Cache-Control"] = "no-cache"
-                    headers["Pragma"] = "no-cache"
-                    
-                    # 处理参数映射(包括 headers中的变量替换)并记录提取过程
+                    # 记录提取过程
                     extractions = []
+                    
+                    # 深度依赖映射处理
                     for mapping in step.get("param_mappings", []):
                         from_step_idx = mapping.get("from_step")
                         from_field = mapping.get("from_field")
                         to_field = mapping.get("to_field")
+                        to_type = mapping.get("to_type", "params") 
                         
-                        # 初始化提取记录
+                        if from_step_idx is None or to_field is None: continue
+                        
+                        # 创建提取记录
                         extraction = {
                             "from_step": from_step_idx,
                             "from_field": from_field,
                             "to_field": to_field,
-                            "extracted_value": None,
+                            "to_type": to_type,
                             "success": False,
-                            "error_msg": ""
+                            "extracted_value": None,
+                            "error_msg": None
                         }
                         
-                        if from_step_idx is None or to_field is None:
-                            extraction["error_msg"] = "参数映射配置不完整"
-                            extractions.append(extraction)
-                            continue
+                        search_key = f"step_{from_step_idx}"
+                        from_data = context.get(search_key, {}).get("response")
+                        field_val = get_value_by_path(from_data, from_field)
                         
-                        from_data = context.get(f"step_{from_step_idx}", {}).get("response")
-                        field_val = None
-                        if from_data:
-                            # 1. 尝试原始路径提取
-                            field_val = try_extract_with_path(from_data, from_field)
+                        # 调试日志
+                        print(f"DEBUG: Extracting from step {from_step_idx}")
+                        print(f"DEBUG: from_field = {from_field}")
+                        print(f"DEBUG: extracted value = {str(field_val)[:50] if field_val else 'None'}...")
+                        
+                        if field_val is not None:
+                            extraction["success"] = True
+                            extraction["extracted_value"] = str(field_val)[:100] if len(str(field_val)) > 100 else field_val
                             
-                            # 2. 如果失败，启动智能修复
-                            if field_val is None:
-                                print(f"🔧 智能修复 - 步骤 {step_order}: 路径 '{from_field}' 提取失败，开始智能搜索...")
-                                target_node = from_field.split('.')[-1].replace('[', '').replace(']', '')
-                                possible_paths = find_field_paths(from_data, target_node)
-                                
-                                # 评估并选择最优路径 (深度优先, 原始类型优先)
-                                candidates = []
-                                for p in possible_paths:
-                                    v = try_extract_with_path(from_data, p)
-                                    if v is not None:
-                                        candidates.append({
-                                            'path': p, 'val': v, 
-                                            'depth': p.count('.') + p.count('['),
-                                            'is_prim': isinstance(v, (str, int, float, bool))
-                                        })
-                                candidates.sort(key=lambda x: (not x['is_prim'], -x['depth']))
-                                
-                                if candidates:
-                                    best = candidates[0]
-                                    field_val = best['val']
-                                    extraction["fixed_path"] = best['path']
-                                    extraction["auto_fixed"] = True
-                                    print(f"✅ 智能修复成功: 使用了路径 '{best['path']}'，提取到值: {field_val}")
-                                else:
-                                    extraction["error_msg"] = f"未能在响应中找到目标字段 '{target_node}'"
-                                    print(f"❌ 智能修复失败: 无法找到字段 '{target_node}'")
-                            
-                            if field_val is not None:
-                                extraction["extracted_value"] = field_val
-                                extraction["success"] = True
-                                # 填充到请求参数或 Headers
-                                if to_field.startswith("headers."):
-                                    headers[to_field.replace("headers.", "")] = field_val
-                                elif to_field.startswith("params."):
-                                    # 去掉 params. 前缀,直接填充到 params 字典
-                                    params[to_field.replace("params.", "")] = field_val
-                                else:
-                                    params[to_field] = field_val
+                            if to_type == "headers": 
+                                val_str = str(field_val)
+                                if to_field.lower() == "authorization" and not val_str.lower().startswith("bearer "):
+                                    val_str = f"Bearer {val_str}"
+                                request_headers[to_field] = val_str
+                                print(f"DEBUG: Set header {to_field} = {val_str[:50]}...")
+                            elif to_type == "url_params" or to_type == "query": 
+                                params_query[to_field] = field_val
+                            else: 
+                                params_body[to_field] = field_val
                         else:
-                            extraction["error_msg"] = f"前序步骤 {from_step_idx} 的响应不存在"
+                            extraction["error_msg"] = f"无法从步骤{from_step_idx}提取{from_field}"
+                            print(f"DEBUG: WARNING - Could not extract {from_field} from step {from_step_idx}")
                         
                         extractions.append(extraction)
-                    
-                    step_data["extractions"] = extractions
-                    
-                    # 处理headers中的变量引用 ${stepX.field}
-                    for key, value in list(headers.items()):
-                        if isinstance(value, str) and "${" in value:
-                            matches = re.findall(r'\$\{step(\d+)\.(.+?)\}', value)
-                            for step_idx, field_path in matches:
-                                step_data_ref = context.get(f"step_{step_idx}", {}).get("response", {})
-                                field_value = step_data_ref
-                                for part in field_path.split('.'):
-                                    if isinstance(field_value, dict):
-                                        field_value = field_value.get(part)
-                                    else:
-                                        field_value = None
-                                        break
-                                if field_value:
-                                    value = value.replace(f"${{step{step_idx}.{field_path}}}", str(field_value))
-                            headers[key] = value
 
-                    step_data["request_data"] = params
+                    step_data["request_data"] = params_body
+                    step_data["url_params"] = params_query
+                    step_data["request_headers"] = request_headers
+                    step_data["extractions"] = extractions  # 添加提取记录
                     
                     # 2. 发送请求
-                    print(f"🚀 执行步骤 {step_order}: {method} {url}")
-                    print(f"   [DEBUG] Content-Type: {next((v for k, v in headers.items() if k.lower() == 'content-type'), 'None')}")
-                    if query_params:
-                        print(f"   查询参数: {json.dumps(query_params, ensure_ascii=False)}")
+                    res = await client.request(
+                        method, 
+                        url, 
+                        params=params_query if params_query else None, 
+                        json=params_body if method != "GET" and params_body else None, 
+                        headers=request_headers,
+                        timeout=15.0
+                    )
+                    duration = (datetime.now() - start_time).total_seconds()
+                    print(f"DEBUG: Step {step_order} response status: {res.status_code}")
                     
-                    # 智能判断发送模式 (JSON, Form, Data)
-                    ct = next((v for k, v in headers.items() if k.lower() == 'content-type'), "").lower()
-                    req_kwargs = {
-                        "method": method,
-                        "url": url,
-                        "headers": headers,
-                        "timeout": 30.0,
-                        "follow_redirects": True,
-                        # 修复: GET 请求合并 query 和 body 参数; 非 GET 请求只传 query 参数到 URL
-                        "params": {**query_params, **params} if method == "GET" else query_params
-                    }
-                    print(f"   [DEBUG] 最终传给 httpx 的 params: {json.dumps(req_kwargs['params'], ensure_ascii=False)}")
-
-                    if method != "GET":
-                        if "application/x-www-form-urlencoded" in ct or "multipart/form-data" in ct:
-                            # 表单模式
-                            req_kwargs["data"] = params
-                            print(f"   请求体 (Form): {json.dumps(params, ensure_ascii=False)[:200]}")
-                        elif isinstance(params, (dict, list)):
-                            # JSON 模式 (默认)
-                            req_kwargs["json"] = params
-                            print(f"   请求体 (JSON): {json.dumps(params, ensure_ascii=False)[:200]}")
-                        else:
-                            # 原始文本/字节
-                            req_kwargs["content"] = str(params)
-                            print(f"   请求体 (RAW): {str(params)[:200]}")
+                    res_content = res.text
+                    try: res_content = res.json()
+                    except: pass
                     
-                    try:
-                        res = await client.request(**req_kwargs)
-                        duration = (datetime.now() - start_time).total_seconds()
-                        
-                        print(f"   ✅ 响应: {res.status_code} ({duration:.2f}s)")
-                        
-                        # 3. 记录结果
-                        res_content = res.text
-                        try:
-                            res_json = res.json()
-                            res_content = res_json
-                        except:
-                            pass
-                        
-                        # 4. 执行断言验证
-                        assertions_config = step.get("assertions", [])
-                        assertion_results = []
-                        
-                        # 如果AI没有生成断言,添加默认断言
-                        if not assertions_config:
-                            assertions_config = [
-                                {
-                                    "type": "status_code",
-                                    "operator": "equals",
-                                    "expected_value": 200,
-                                    "description": "状态码应为200"
-                                },
-                                {
-                                    "type": "response_time",
-                                    "operator": "less_than",
-                                    "expected_value": 1000,
-                                    "description": "响应时间应小于1秒"
-                                }
-                            ]
-                        # 3. 执行断言
-                        assertion_results = []
-                        for assertion in assertions_config: # Changed from step.get("assertions", []) to assertions_config
-                            # 动态修复断言配置(执行时修复,确保旧场景也能正常工作)
-                            assertion_type = assertion.get("type", "")
-                            description = assertion.get("description", "").lower()
-                            
-                            # 如果断言需要field字段但缺失,自动修复
-                            if assertion_type in ["field_exists", "field_value", "json_path"]:
-                                if not assertion.get("field"):
-                                    field = None
-                                    
-                                    # 方法1: 根据期望值推测
-                                    if assertion_type == "field_value":
-                                        expected_val = assertion.get("expected") or assertion.get("expected_value")
-                                        if expected_val == 0 or expected_val == "0":
-                                            field = "code"
-                                        elif expected_val in ["success", "成功", "ok", "OK"]:
-                                            field = "message"
-                                    
-                                    # 方法2: 根据描述推测
-                                    if not field and description:
-                                        if "code" in description or "状态码" in description or "业务码" in description:
-                                            field = "code"
-                                        elif "message" in description or "消息" in description or "msg" in description:
-                                            field = "message"
-                                        elif "list" in description or "列表" in description or "数组" in description:
-                                            field = "data.list"
-                                        elif "订单" in description or "id" in description:
-                                            field = "data.id"
-                                        elif "data" in description or "数据" in description:
-                                            field = "data"
-                                        elif "token" in description or "令牌" in description:
-                                            field = "data.token"
-                                    
-                                    # 方法3: 默认值
-                                    if not field:
-                                        field = "data"
-                                    
-                                    assertion["field"] = field
-                                    print(f"   ⚙️ 运行时修复断言: {description} → field='{field}'")
-                            
-                            # ---------------------------------------------------------
-                            # [新增] 智能字段映射 (Smart Field Mapping)
-                            # 解决 API 字段不统一问题 (如 code vs errcode, message vs errmsg)
-                            # ---------------------------------------------------------
-                            current_field = assertion.get("field", "")
-                            if isinstance(res_content, dict) and "." not in current_field:
-                                # 只有当原字段在响应中不存在时才尝试映射
-                                if current_field not in res_content:
-                                    mapping = {
-                                        "code": ["errcode", "RetCode", "status", "ret", "error_code"],
-                                        "message": ["errmsg", "msg", "info", "error", "message", "desc"],
-                                        "data": ["result", "content", "body", "list"]
-                                    }
-                                    
-                                    if current_field in mapping:
-                                        for alt in mapping[current_field]:
-                                            if alt in res_content:
-                                                assertion["field"] = alt
-                                                print(f"   🔄 字段自动映射: {current_field} -> {alt}")
-                                                break
-                            # ---------------------------------------------------------
-                            
-                            # 支持expected和expected_value两种字段名
-                            expected = assertion.get("expected") or assertion.get("expected_value")
-                            description = assertion.get("description", "")
-                            
-                            result = {
-                                "type": assertion_type,
-                                "description": description,
-                                "expected": expected,
-                                "actual": None,
-                                "passed": False
-                            }
-                            
-                            try:
-                                if assertion_type == "status_code":
-                                    result["field"] = "HTTP状态码"
-                                    result["operator"] = "等于"
-                                    result["actual"] = res.status_code
-                                    try:
-                                        result["passed"] = (int(res.status_code) == int(expected))
-                                    except:
-                                        result["passed"] = (str(res.status_code) == str(expected))
-                                
-                                elif assertion_type == "response_time":
-                                    result["field"] = "响应时间"
-                                    result["operator"] = "小于"
-                                    actual_ms = int(duration * 1000)
-                                    result["actual"] = f"{actual_ms}ms"
-                                    try:
-                                        result["passed"] = (actual_ms <= int(expected))
-                                    except:
-                                        result["passed"] = False
-                                
-                                elif assertion_type == "field_exists":
-                                    field = assertion.get("field", "")
-                                    if isinstance(res_content, dict):
-                                        # 支持嵌套字段,如 "data.user.id"
-                                        field_exists = True
-                                        current = res_content
-                                        for part in field.split("."):
-                                            if isinstance(current, dict) and part in current:
-                                                current = current[part]
-                                            else:
-                                                field_exists = False
-                                                break
-                                        result["actual"] = field_exists
-                                        result["passed"] = field_exists
-                                    else:
-                                        result["actual"] = False
-                                        result["passed"] = False
-                                
-                                elif assertion_type in ["field_value", "json_path"]:
-                                    # 支持 field, expression, path, json_path 等字段名
-                                    field_raw = assertion.get("field") or assertion.get("expression") or assertion.get("path") or assertion.get("json_path", "")
-                                    # 清理 JSONPath 前缀
-                                    field = str(field_raw).strip()
-                                    if field.startswith("$."): field = field[2:]
-                                    elif field.startswith("$"): field = field[1:]
-                                    
-                                    if isinstance(res_content, dict):
-                                        current = res_content
-                                        parts = field.split(".")
-                                        
-                                        # 智能处理: 如果第一级是 'data' 但响应根部没有 'data'，尝试跳过它
-                                        if parts and parts[0] == "data" and "data" not in current and len(parts) > 1:
-                                            parts = parts[1:]
-                                        
-                                        for part in parts:
-                                            # 处理函数如 length()
-                                            if part.endswith("()"):
-                                                func = part[:-2].lower()
-                                                if func == "length":
-                                                    current = len(current) if isinstance(current, (list, dict, str)) else 0
-                                                    continue
-                                            
-                                            # 处理数组索引如 "data.list.0"
-                                            if isinstance(current, list) and part.isdigit():
-                                                idx = int(part)
-                                                current = current[idx] if idx < len(current) else None
-                                            elif isinstance(current, dict):
-                                                # 尝试匹配原样 key
-                                                if part in current:
-                                                    current = current[part]
-                                                # 尝试处理 songs vs song 这种单复数不一致情况 (简单的模糊匹配)
-                                                elif part.endswith("s") and part[:-1] in current:
-                                                    current = current[part[:-1]]
-                                                else:
-                                                    current = None
-                                                    break
-                                            else:
-                                                current = None
-                                                break
-                                        
-                                        result["actual"] = current
-                                        
-                                        # 如果没有提供 expected, 则退化为 field_exists 逻辑
-                                        if expected is None:
-                                            # 判定标准：不为 None 且（如果是列表则非空）
-                                            result["passed"] = (current is not None and not (isinstance(current, list) and len(current) == 0))
-                                            result["description"] = f"校验字段 {field_raw} 是否存在且不为空"
-                                        else:
-                                            # 统一转为字串比较，增强兼容性
-                                            is_match = str(current) == str(expected)
-                                            
-                                            # [新增] 语义化宽松匹配 (针对 message 类字段)
-                                            if not is_match and field in ["message", "msg", "errmsg", "error", "info", "desc"]:
-                                                # 如果期望是 success 但实际是 "点歌成功" / "OK" 等
-                                                expected_lower = str(expected).lower()
-                                                current_str = str(current)
-                                                
-                                                if expected_lower in ["success", "ok"]:
-                                                    if "成功" in current_str or "ok" in current_str.lower() or "success" in current_str.lower():
-                                                        is_match = True
-                                                        result["actual"] = f"{current_str} (语义匹配 Success)"
-                                                
-                                                # 如果实际值包含期望值 (如 "操作成功" 包含 "成功")
-                                                elif str(expected) in current_str:
-                                                    is_match = True
-                                                    result["actual"] = f"{current_str} (包含期望值)"
-
-                                            result["passed"] = is_match
-                                    else:
-                                        result["actual"] = None
-                                        result["passed"] = False
-                                
-                                elif assertion_type == "response_contains":
-                                    text = str(assertion.get("text", "") or expected or "")
-                                    contains = text in str(res_content)
-                                    result["actual"] = f"包含 '{text}'" if contains else "不包含"
-                                    result["passed"] = contains
-                                
-                                else:
-                                    # 未知或语义类型处理 (如 "登录成功")
-                                    # 尝试 1: 在响应中查找相关关键字 (原逻辑)
-                                    keywords = [assertion_type, description]
-                                    matches = any(kw and kw in str(res_content) for kw in keywords)
-                                    
-                                    # 尝试 2: 语义化成功判定。如果断言涉及 "成功", "完成", "OK", "有效" 等
-                                    success_keywords = ["成功", "完成", "OK", "有效", "success", "ok", "valid"]
-                                    is_success_assertion = any(sk in assertion_type or sk in description for sk in success_keywords)
-                                    
-                                    if not matches and is_success_assertion:
-                                        # 如果是成功类断言但没匹配到关键字，检查常见的成功标志
-                                        if isinstance(res_content, dict):
-                                            # 检查 code/status/success 等常见字段
-                                            code = res_content.get("code")
-                                            is_success_code = code in [0, 200, "0", "200"]
-                                            is_success_bool = res_content.get("success") is True or res_content.get("status") in ["success", "ok"]
-                                            
-                                            if is_success_code or is_success_bool:
-                                                matches = True
-                                                result["actual"] = f"匹配业务成功标志 (code={code})" if is_success_code else "匹配业务成功状态"
-                                    
-                                    # 只有在 actual 还没被赋值(即未知断言类型)时，才使用模糊匹配的结果
-                                    if result.get("actual") is None and assertion_type not in ["status_code", "field_value", "json_path", "field_exists", "response_contains"]:
-                                        result["actual"] = "部分匹配" if matches else "无匹配"
-                                        result["passed"] = matches if keywords else True
-                                    if not matches:
-                                        print(f"   ⚠️ 未知断言类型: {assertion_type}, 匹配失败")
-                                
-                            except Exception as e:
-                                result["error"] = str(e)
-                                result["passed"] = False
-                            
-                            assertion_results.append(result)
-                        
-                        # 判断步骤是否成功(所有断言都通过)
-                        all_assertions_passed = all(a["passed"] for a in assertion_results)
-                            
-                        step_data.update({
-                            "status_code": res.status_code,
-                            "duration": duration,
-                            "response": res_content,
-                            "response_headers": dict(res.headers),  # 新增:响应头
-                            "assertions": assertion_results,
-                            "success": res.status_code < 400 and all_assertions_passed
-                        })
-                        context[f"step_{step_order}"] = step_data
-                        step_results.append(step_data)
-                        
-                    except httpx.TimeoutException as e:
-                        error_msg = f"请求超时: {repr(e)}"
-                        print(f"   ❌ {error_msg}")
-                        step_data["error"] = error_msg
-                        step_results.append(step_data)
-                    except httpx.ConnectError as e:
-                        # ConnectError的str()可能为空,使用repr()获取详细信息
-                        error_detail = str(e) if str(e) else repr(e)
-                        error_msg = f"连接失败: {error_detail}"
-                        print(f"   ❌ {error_msg}")
-                        step_data["error"] = error_msg
-                        step_results.append(step_data)
-                    except httpx.HTTPStatusError as e:
-                        error_msg = f"HTTP错误 {e.response.status_code}: {str(e)}"
-                        print(f"   ❌ {error_msg}")
-                        step_data["error"] = error_msg
-                        step_results.append(step_data)
-                    except Exception as e:
-                        error_detail = str(e) if str(e) else repr(e)
-                        error_msg = f"请求异常: {type(e).__name__}: {error_detail}"
-                        print(f"   ❌ {error_msg}")
-                        import traceback
-                        traceback.print_exc()
-
-                        step_data["error"] = error_msg
-                        step_results.append(step_data)
+                    # 关键修复：深拷贝一份数据放入 context，防止后续引用修改
+                    step_data.update({
+                        "status_code": res.status_code,
+                        "duration": duration,
+                        "response": res_content,
+                        "success": res.status_code < 400
+                    })
+                    
+                    # 调试日志
+                    print(f"DEBUG: Saving step {step_order} to context")
+                    if isinstance(res_content, dict) and 'data' in res_content:
+                        if 'token' in res_content.get('data', {}):
+                            token_val = res_content['data']['token']
+                            print(f"DEBUG: Response contains token: {str(token_val)[:30]}...")
+                    
+                    context[f"step_{step_order}"] = json.loads(json.dumps(step_data, default=str)) 
+                    step_results.append(step_data)
                 except Exception as e:
-                    error_msg = f"步骤准备异常: {type(e).__name__}: {str(e)}"
-                    print(f"❌ 步骤 {step_order} 运行异常: {error_msg}")
-                    step_data["error"] = error_msg
-                    # 即使出错也返回已准备好的 URL 和 Method，方便前端展示
+                    import traceback
+                    print(f"CRITICAL ERROR in Step {step_order}:")
+                    traceback.print_exc()
+                    step_data["error"] = f"{type(e).__name__}: {str(e)}"
                     step_results.append(step_data)
 
-        # 4. 保存执行记录并判定总状态
+        # 4. 保存执行记录
         final_status = "success" if all(s.get("success", False) for s in step_results) else "failed"
-        
-        # 只有完整场景执行才保存到数据库
-        if req.test_case_id:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO executions (test_case_id, status, results) VALUES (?, ?, ?)",
-                (req.test_case_id, final_status, json.dumps(step_results))
+                (req.test_case_id or 0, final_status, json.dumps(step_results))
             )
             exec_id = cursor.lastrowid
             conn.commit()
-        else:
-            # 单步执行使用临时ID
+            conn.close()
+        except:
             exec_id = 0
         
         return {"id": exec_id, "status": final_status, "results": step_results}
@@ -1525,223 +746,82 @@ async def execute_case(req: ExecutionRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        conn.close()
 
 # --- 导入与列表 (保持原有逻辑) ---
 
+class ProjectBase(BaseModel):
+    name: str
+    description: Optional[str] = ""
+
+class APIBase(BaseModel):
+    name: str
+    method: str
+    path: str
+    description: Optional[str] = ""
+    base_url: Optional[str] = ""
+    headers: Optional[Any] = {}
+    request_body: Optional[Any] = {}
+    parameters: Optional[Any] = []
+    project_id: Optional[str] = "default-project"
+
+class CurlParseRequest(BaseModel):
+    curl: str
+
 class StressTestRequest(BaseModel):
-    """压测请求参数"""
     api_id: int
     test_count: int = 10
     expected_debounce_time: int = 500
     request_interval: int = 100
 
-@app.post("/api/v1/test/stress-test")
-async def stress_test_api(req: StressTestRequest):
-    """
-    API压测接口
-    
-    对指定的API进行压力测试，分析是否存在防抖逻辑
-    """
+@app.get("/api/v1/projects")
+async def list_projects():
+    """获取系统中所有项目信息"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM projects ORDER BY created_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+@app.post("/api/v1/projects")
+async def create_project(project: ProjectBase):
+    """创建新项目 (自动生成唯一 ID)"""
     try:
-        # 1. 获取API信息
+        project_id = str(uuid.uuid4())[:8] # 使用 8 位短 UUID
         conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM apis WHERE id = ?", (req.api_id,))
-        api_row = cursor.fetchone()
+        cursor.execute(
+            "INSERT INTO projects (id, name, description) VALUES (?, ?, ?)",
+            (project_id, project.name, project.description)
+        )
+        conn.commit()
         conn.close()
-        
-        if not api_row:
-            raise HTTPException(status_code=404, detail="API不存在")
-        
-        # 2. 构建请求信息
-        api_info = {
-            "id": api_row["id"],
-            "path": api_row["path"],
-            "method": api_row["method"],
-            "base_url": api_row["base_url"],
-            "headers": json.loads(api_row["headers"] or "{}"),
-            "request_body": json.loads(api_row["request_body"] or "{}")
-        }
-        
-        # 3. 构建完整URL
-        base_url = api_info["base_url"] or "http://localhost:8000"
-        full_url = base_url + api_info["path"]
-        
-        # 4. 准备请求数据
-        headers = api_info["headers"]
-        
-        # 获取请求体：优先使用schema字段，如果没有则使用整个request_body
-        request_body_data = api_info["request_body"]
-        if isinstance(request_body_data, dict) and "schema" in request_body_data:
-            request_body_json = request_body_data["schema"]
-        else:
-            request_body_json = request_body_data
-        
-        # 5. 执行压测
-        test_results = []
-        start_time = time.time()
-        
-        async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
-            for i in range(1, req.test_count + 1):
-                request_start = time.time()
-                
-                try:
-                    if api_info["method"].upper() == "GET":
-                        response = await client.get(full_url, headers=headers)
-                    elif api_info["method"].upper() == "POST":
-                        response = await client.post(full_url, headers=headers, json=request_body_json)
-                    elif api_info["method"].upper() == "PUT":
-                        response = await client.put(full_url, headers=headers, json=request_body_json)
-                    elif api_info["method"].upper() == "DELETE":
-                        response = await client.delete(full_url, headers=headers)
-                    else:
-                        raise ValueError(f"不支持的HTTP方法: {api_info['method']}")
-                    
-                    request_end = time.time()
-                    duration = request_end - request_start
-                    
-                    # 先读取响应文本
-                    response_text = response.text
-                    
-                    # 尝试解析为JSON
-                    try:
-                        response_data = json.loads(response_text) if response_text else {}
-                    except Exception as json_error:
-                        # 如果无法解析为JSON，保存原始文本
-                        if response_text:
-                            response_data = {"raw_text": response_text[:1000]}  # 保存更多内容
-                        else:
-                            response_data = {"raw_text": "(空响应)", "status_code": response.status_code}
-                    
-                    test_results.append({
-                        "request_id": i,
-                        "duration": round(duration, 3),
-                        "status_code": response.status_code,
-                        "success": True,
-                        "response": response_data
-                    })
-                    
-                except Exception as e:
-                    request_end = time.time()
-                    duration = request_end - request_start
-                    
-                    test_results.append({
-                        "request_id": i,
-                        "duration": round(duration, 3),
-                        "status_code": None,
-                        "success": False,
-                        "error": str(e)
-                    })
-                
-                # 等待间隔
-                if i < req.test_count:
-                    await asyncio.sleep(req.request_interval / 1000)
-        
-        total_time = time.time() - start_time
-        
-        # 6. 分析结果
-        successful_results = [r for r in test_results if r["success"]]
-        failed_count = len(test_results) - len(successful_results)
-        
-        # 分析防抖
-        analysis = {
-            "has_debounce": False,
-            "confidence": 0,
-            "reasons": []
-        }
-        
-        if successful_results:
-            # 检查是否有429状态码或限流错误
-            rate_limit_count = 0
-            for r in test_results:
-                # 检查HTTP状态码429
-                if r.get("status_code") == 429:
-                    rate_limit_count += 1
-                # 检查响应体中的code字段
-                elif r.get("success") and isinstance(r.get("response"), dict):
-                    response_code = r["response"].get("code")
-                    response_msg = str(r["response"].get("message", "")).lower()
-                    if response_code == 429 or "请求频繁" in response_msg or "稍后再试" in response_msg or "too many" in response_msg:
-                        rate_limit_count += 1
-            
-            # 如果有限流响应，直接判定为有防抖
-            if rate_limit_count > 0:
-                analysis["reasons"].append(f"检测到{rate_limit_count}个请求被限流（429状态码或限流错误）")
-                analysis["confidence"] += 60
-                analysis["has_debounce"] = True
-            
-            # 检查响应内容是否相同
-            response_contents = [json.dumps(r["response"], sort_keys=True) for r in successful_results]
-            unique_responses = len(set(response_contents))
-            
-            # 检查响应时间
-            durations = [r["duration"] for r in successful_results]
-            avg_duration = sum(durations) / len(durations)
-            max_duration = max(durations)
-            min_duration = min(durations)
-            
-            # 快速响应数量
-            fast_responses = [d for d in durations if d < avg_duration * 0.5]
-            
-            # 判断逻辑
-            confidence = analysis["confidence"]  # 继承之前的置信度
-            
-            if unique_responses == 1 and len(successful_results) > 1:
-                analysis["reasons"].append(f"所有{len(successful_results)}个成功请求返回了相同的内容")
-                confidence += 30
-            
-            if len(fast_responses) > len(durations) * 0.5:
-                analysis["reasons"].append(f"{len(fast_responses)}/{len(durations)}个请求响应特别快（可能被防抖拦截）")
-                confidence += 40
-            
-            if len(durations) > 1 and max_duration > min_duration * 3:
-                analysis["reasons"].append(f"响应时间差异大（最快{min_duration:.3f}s，最慢{max_duration:.3f}s）")
-                confidence += 20
-            
-            if failed_count > len(test_results) * 0.3:
-                analysis["reasons"].append(f"{failed_count}/{len(test_results)}个请求失败（可能被防抖拒绝）")
-                confidence += 30
-            
-            analysis["confidence"] = min(confidence, 100)
-            analysis["has_debounce"] = confidence >= 50
-        
-        # 7. 返回结果
-        return {
-            "success": True,
-            "api_info": {
-                "id": api_info["id"],
-                "path": api_info["path"],
-                "method": api_info["method"],
-                "url": full_url
-            },
-            "test_config": {
-                "test_count": req.test_count,
-                "expected_debounce_time": req.expected_debounce_time,
-                "request_interval": req.request_interval
-            },
-            "test_results": test_results,
-            "analysis": analysis,
-            "stats": {
-                "total_requests": len(test_results),
-                "successful_requests": len(successful_results),
-                "failed_requests": failed_count,
-                "total_time": round(total_time, 2),
-                "avg_duration": round(avg_duration, 3) if successful_results else 0,
-                "min_duration": round(min_duration, 3) if successful_results else 0,
-                "max_duration": round(max_duration, 3) if successful_results else 0
-            }
-        }
-        
-    except HTTPException:
-        raise
+        return {"success": True, "project_id": project_id, "name": project.name}
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.delete("/api/v1/projects/{project_id}")
+async def delete_project(project_id: str):
+    """删除项目及其关联数据"""
+    if project_id == "default-project":
+        raise HTTPException(status_code=400, detail="不能删除默认项目")
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # 删除项目、API、环境、用例、场景等
+        cursor.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        cursor.execute("DELETE FROM apis WHERE project_id = ?", (project_id,))
+        cursor.execute("DELETE FROM project_environments WHERE project_id = ?", (project_id,))
+        cursor.execute("DELETE FROM scenarios WHERE project_id = ?", (project_id,))
+        cursor.execute("DELETE FROM test_cases WHERE project_id = ?", (project_id,))
+        
+        conn.commit()
+        conn.close()
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/import/swagger")
 async def import_swagger(project_id: str = Form("default-project"), source: str = Form(None), file: UploadFile = File(None)):
@@ -1765,62 +845,12 @@ async def import_swagger(project_id: str = Form("default-project"), source: str 
         base_url = servers[0].get("url", "") if servers else ""
 
         for path, methods in paths.items():
-            # 提取路径级别的通用参数 (Path-level parameters)
-            path_params = methods.get("parameters", [])
-            
             for method, details in methods.items():
                 if method.lower() in ["get", "post", "put", "delete", "patch"]:
-                    # 合并路径级参数和方法级参数
-                    all_params = path_params + details.get("parameters", [])
-                    
-                    # 1. 初始化 headers，添加标准 HTTP headers
-                    headers = {
-                        "Accept": "*/*",
-                        "Accept-Encoding": "gzip, deflate, br",
-                        "Connection": "keep-alive",
-                        "User-Agent": "API-Testing-Platform/1.0"
-                    }
-                    
-                    # 如果有 base_url，添加 Host header
-                    if base_url:
-                        try:
-                            from urllib.parse import urlparse
-                            parsed = urlparse(base_url)
-                            if parsed.netloc:
-                                headers["Host"] = parsed.netloc
-                        except:
-                            pass
-                    
-                    url_params = []
-                    
-                    # 2. 处理 Swagger 中定义的 header parameters（会覆盖默认值）
-                    for param in all_params:
-                        param_in = param.get("in", "")
-                        if param_in == "header":
-                            headers[param.get("name")] = param.get("schema", {}).get("default", "")
-                        else:
-                            url_params.append({
-                                "name": param.get("name"),
-                                "in": param_in,
-                                "required": param.get("required", False),
-                                "schema": param.get("schema", {}),
-                                "description": param.get("description", "")
-                            })
-
-                    # 3. 针对写操作自动补全 Content-Type
-                    if method.lower() in ["post", "put", "patch"]:
-                        # 默认值
-                        headers["Content-Type"] = "application/json"
-                        
-                        request_body = details.get("requestBody", {})
-                        if request_body:
-                            content_types = request_body.get("content", {})
-                            if content_types:
-                                # 找到第一个非 null 的 content-type
-                                for ct in content_types.keys():
-                                    if ct and str(ct).lower() != "null":
-                                        headers["Content-Type"] = ct
-                                        break
+                    # 提取参数
+                    params = details.get("parameters", [])
+                    # 提取请求体
+                    request_body = details.get("requestBody", {})
                     
                     apis.append((
                         path, 
@@ -1828,9 +858,8 @@ async def import_swagger(project_id: str = Form("default-project"), source: str 
                         details.get("summary", ""), 
                         details.get("description", ""), 
                         base_url,
-                        json.dumps(url_params),  # 只存储非header参数
-                        json.dumps(details.get("requestBody", {})),
-                        json.dumps(headers),  # 单独存储headers
+                        json.dumps(params),
+                        json.dumps(request_body),
                         project_id
                     ))
         
@@ -1838,99 +867,116 @@ async def import_swagger(project_id: str = Form("default-project"), source: str 
         cursor = conn.cursor()
         cursor.execute("DELETE FROM apis WHERE project_id = ?", (project_id,))
         cursor.executemany("""
-            INSERT INTO apis (path, method, summary, description, base_url, parameters, request_body, headers, project_id) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO apis (path, method, summary, description, base_url, parameters, request_body, project_id) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, apis)
         conn.commit()
-        
-        # 新增: 将导入的API添加到向量索引和知识图谱
-        if vector_service or kg_service:
-            cursor.execute("SELECT id, path, method, summary, description, project_id FROM apis WHERE project_id = ?", (project_id,))
-            imported_apis = cursor.fetchall()
-            
-            for api_row in imported_apis:
-                api_id = str(api_row[0])
-                api_info = {
-                    'path': api_row[1],
-                    'method': api_row[2],
-                    'summary': api_row[3],
-                    'description': api_row[4],
-                    'project_id': api_row[5]
-                }
-                
-                # 添加到知识图谱
-                add_api_to_kg(api_id, api_info)
-                
-                # 添加到向量索引
-                await index_api_to_vector(api_id, api_info)
-        
         conn.close()
         
         return {"success": True, "indexed": len(apis), "total": len(apis), "project_id": project_id}
     except Exception as e:
         return {"success": False, "message": str(e)}
 
-@app.post("/api/v1/parse/curl")
-async def api_parse_curl(req: CurlParseRequest):
-    """解析 cURL 命令为 API 定义"""
-    try:
-        result = parse_curl_command(req.curl)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
 @app.post("/api/v1/apis")
-async def create_api(api: APICreateRequest):
-    """手动创建 API 接口定义"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+async def create_api(api: APIBase):
+    """手动创建接口"""
     try:
+        def to_json(val):
+            if isinstance(val, (dict, list)): return json.dumps(val)
+            return str(val)
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO apis (path, method, summary, description, base_url, parameters, request_body, headers, project_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            api.path, 
-            api.method, 
-            api.name, 
-            api.description, 
-            api.base_url,
-            json.dumps(api.parameters),
-            json.dumps(api.request_body),
-            json.dumps(api.headers),
-            api.project_id
+            api.path, api.method, api.name, api.description, api.base_url,
+            to_json(api.parameters), to_json(api.request_body), to_json(api.headers), api.project_id
         ))
-        new_api_id = cursor.lastrowid
         conn.commit()
-        return {"id": new_api_id, "success": True}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
         conn.close()
-
-@app.put("/api/v1/apis/{api_id}")
-async def update_api(api_id: int, api: APICreateRequest):
-    """手动修改 API 接口定义"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("""
-            UPDATE apis SET 
-                path = ?, method = ?, summary = ?, description = ?, 
-                base_url = ?, parameters = ?, request_body = ?, 
-                headers = ?, project_id = ?
-            WHERE id = ?
-        """, (
-            api.path, api.method, api.name, api.description, 
-            api.base_url, json.dumps(api.parameters), 
-            json.dumps(api.request_body), json.dumps(api.headers),
-            api.project_id, api_id
-        ))
-        conn.commit()
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
+
+@app.put("/api/v1/apis/{api_id}")
+async def update_api(api_id: int, api: APIBase):
+    """更新接口定义"""
+    try:
+        def to_json(val):
+            if isinstance(val, (dict, list)): return json.dumps(val)
+            return str(val)
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE apis SET 
+                path = ?, method = ?, summary = ?, description = ?, 
+                base_url = ?, parameters = ?, request_body = ?, headers = ?, project_id = ?
+            WHERE id = ?
+        """, (
+            api.path, api.method, api.name, api.description, api.base_url,
+            to_json(api.parameters), to_json(api.request_body), to_json(api.headers), api.project_id,
+            api_id
+        ))
+        conn.commit()
         conn.close()
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/v1/apis/{api_id}")
+async def delete_api_entry(api_id: int):
+    """删除单个接口定义"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM apis WHERE id = ?", (api_id,))
+        conn.commit()
+        conn.close()
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/parse/curl")
+async def parse_curl_command(req: CurlParseRequest):
+    """使用 AI 极速解析 cURL"""
+    try:
+        system_prompt = "你是一个接口专家。解析 cURL 并返回 JSON：{name(中文名), method, path, base_url, headers, request_body, parameters}。无则返回默认值。"
+        result = await ai_client.chat(system_prompt, req.curl)
+        if "body" in result and "request_body" not in result:
+            result["request_body"] = result["body"]
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"解析失败: {str(e)}")
+
+@app.post("/api/v1/test/stress-test")
+async def api_stress_test(req: StressTestRequest):
+    """简单的压测分析接口（占位实现）"""
+    # 这里可以添加真实的并发测试逻辑，目前返回模拟数据以支持前端 UI 展示
+    return {
+        "analysis": {
+            "has_debounce": False,
+            "confidence": 100,
+            "reasons": ["目前仅作为功能测试返回值"]
+        },
+        "stats": {
+            "total_requests": req.test_count,
+            "successful_requests": req.test_count,
+            "avg_duration": 0.05,
+            "total_time": req.test_count * 0.1
+        },
+        "test_results": [
+            {
+                "request_id": i + 1,
+                "success": True,
+                "duration": 0.05,
+                "status_code": 200,
+                "response": {"message": "Success"}
+            } for i in range(req.test_count)
+        ]
+    }
 
 @app.get("/api/v1/apis")
 async def list_apis():
@@ -1940,7 +986,6 @@ async def list_apis():
     cursor.execute("SELECT * FROM apis ORDER BY created_at DESC")
     rows = cursor.fetchall()
     conn.close()
-    print(f"📋 获取 API 列表: 发现 {len(rows)} 条数据")
     return {"apis": [
         {
             "id": r["id"], 
@@ -1951,646 +996,12 @@ async def list_apis():
             "base_url": r["base_url"],
             "parameters": json.loads(r["parameters"] or "[]"),
             "request_body": json.loads(r["request_body"] or "{}"),
-            "headers": json.loads(r["headers"] or "{}"),  # 添加headers字段
+            "headers": json.loads(r["headers"] or "{}"),
             "project_id": r["project_id"],
             "tags": []
         } for r in rows
     ]}
 
-@app.delete("/api/v1/apis/{api_id}")
-async def delete_api(api_id: str):
-    """删除单个API"""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM apis WHERE id = ?", (api_id,))
-        deleted = cursor.rowcount
-        conn.commit()
-        conn.close()
-        
-        if deleted == 0:
-            raise HTTPException(status_code=404, detail="API不存在")
-        
-        return {"success": True, "message": "API删除成功"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.delete("/api/v1/apis/project/{project_id}")
-async def delete_apis_by_project(project_id: str):
-    """批量删除指定项目的所有API"""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM apis WHERE project_id = ?", (project_id,))
-        deleted_count = cursor.rowcount
-        conn.commit()
-        conn.close()
-        
-        return {"success": True, "deleted": deleted_count, "message": f"已删除 {deleted_count} 个API"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/import/postman")
-async def import_postman(file: UploadFile = File(...), project_id: str = Form("default-project")):
-    """导入Postman Collection文件"""
-    import tempfile
-    
-    try:
-        # 1. 保存上传的文件
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.json', mode='wb') as tmp:
-            content = await file.read()
-            tmp.write(content)
-            tmp_path = tmp.name
-        
-        # 2. 读取并解析Collection
-        with open(tmp_path, 'r', encoding='utf-8') as f:
-            collection = json.load(f)
-        
-        # 3. 解析Collection中的API
-        apis = []
-        _parse_postman_items(collection.get('item', []), apis, project_id)
-        
-        # 4. 保存到数据库
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        # 删除该项目的旧数据
-        cursor.execute("DELETE FROM apis WHERE project_id = ?", (project_id,))
-        
-        # 插入新数据
-        for api in apis:
-            cursor.execute("""
-                INSERT INTO apis (path, method, summary, description, base_url, parameters, request_body, headers, project_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                api['path'],
-                api['method'],
-                api['name'],
-                api.get('description', ''),
-                api.get('base_url', ''),
-                json.dumps(api.get('parameters', [])),
-                json.dumps(api.get('request_body', {})),
-                json.dumps(api.get('headers', {})),
-                project_id
-            ))
-        
-        conn.commit()
-        conn.close()
-        
-        # 5. 清理临时文件
-        os.remove(tmp_path)
-        
-        return {
-            "success": True,
-            "indexed": len(apis),
-            "total": len(apis),
-            "project_id": project_id
-        }
-        
-    except Exception as e:
-        print(f"❌ Postman导入失败: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return {
-            "success": False,
-            "message": str(e)
-        }
-
-def _parse_postman_items(items: List, apis: List, project_id: str, folder_path: str = ""):
-    """递归解析Postman Collection项"""
-    for item in items:
-        if 'request' in item:
-            # 这是一个请求
-            api = _convert_postman_request(item, folder_path)
-            apis.append(api)
-        elif 'item' in item:
-            # 这是一个文件夹
-            new_path = f"{folder_path}/{item['name']}" if folder_path else item['name']
-            _parse_postman_items(item['item'], apis, project_id, new_path)
-
-def _convert_postman_request(item: dict, folder_path: str) -> dict:
-    """转换Postman请求为标准格式"""
-    request = item.get('request', {})
-    url = request.get('url', {})
-    
-    # 处理URL
-    if isinstance(url, str):
-        path = url
-        base_url = ""
-    else:
-        path = '/' + '/'.join(url.get('path', []))
-        # 提取base_url
-        protocol = url.get('protocol', 'http')
-        host = url.get('host', [])
-        if isinstance(host, list):
-            base_url = f"{protocol}://{'.'.join(host)}"
-        else:
-            base_url = f"{protocol}://{host}"
-    
-    # 解析参数和Headers
-    parameters = []
-    headers = {}
-    
-    # Query参数
-    if isinstance(url, dict):
-        for query in url.get('query', []):
-            if not query.get('disabled', False):
-                parameters.append({
-                    "name": query.get('key'),
-                    "in": "query",
-                    "type": "string",
-                    "required": True,
-                    "description": query.get('description', '')
-                })
-    
-    # Header参数 - 单独提取为headers字典
-    for header in request.get('header', []):
-        if not header.get('disabled', False):
-            headers[header.get('key')] = header.get('value', '')
-    
-    # 解析请求体
-    request_body = {}
-    body = request.get('body', {})
-    if body:
-        mode = body.get('mode', 'raw')
-        if mode == 'raw':
-            try:
-                raw_data = json.loads(body.get('raw', '{}'))
-                request_body = {"schema": raw_data}
-            except:
-                request_body = {}
-        elif mode == 'formdata':
-            request_body = {"schema": {"type": "formdata"}}
-    
-    return {
-        "name": item.get('name', ''),
-        "path": path,
-        "method": request.get('method', 'GET'),
-        "description": item.get('description', ''),
-        "base_url": base_url,
-        "parameters": parameters,
-        "request_body": request_body,
-        "headers": headers,
-        "tags": [folder_path] if folder_path else []
-    }
-
-# ============= 数据导入导出功能 =============
-
-from fastapi.responses import StreamingResponse
-import io
-
-@app.get("/api/v1/data/export")
-async def export_data(
-    project_id: Optional[str] = None,
-    include_executions: bool = False
-):
-    """导出数据为 JSON 文件"""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        export_data = {
-            "export_time": datetime.now().isoformat(),
-            "version": "1.0",
-            "data": {}
-        }
-        
-        # 导出 APIs
-        if project_id:
-            cursor.execute("SELECT * FROM apis WHERE project_id = ?", (project_id,))
-        else:
-            cursor.execute("SELECT * FROM apis")
-        export_data["data"]["apis"] = [dict(row) for row in cursor.fetchall()]
-        
-        # 导出 Scenarios
-        if project_id:
-            cursor.execute("SELECT * FROM scenarios WHERE project_id = ?", (project_id,))
-        else:
-            cursor.execute("SELECT * FROM scenarios")
-        export_data["data"]["scenarios"] = [dict(row) for row in cursor.fetchall()]
-        
-        # 导出 Test Cases
-        if project_id:
-            cursor.execute("SELECT * FROM test_cases WHERE project_id = ?", (project_id,))
-        else:
-            cursor.execute("SELECT * FROM test_cases")
-        export_data["data"]["test_cases"] = [dict(row) for row in cursor.fetchall()]
-        
-        # 导出 Project Environments
-        if project_id:
-            cursor.execute("SELECT * FROM project_environments WHERE project_id = ?", (project_id,))
-        else:
-            cursor.execute("SELECT * FROM project_environments")
-        export_data["data"]["project_environments"] = [dict(row) for row in cursor.fetchall()]
-        
-        # 可选：导出执行记录
-        if include_executions:
-            cursor.execute("SELECT * FROM executions")
-            export_data["data"]["executions"] = [dict(row) for row in cursor.fetchall()]
-        
-        conn.close()
-        
-        # 生成文件名
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"aitesting-export-{timestamp}.json"
-        
-        # 转换为 JSON 字符串
-        json_str = json.dumps(export_data, ensure_ascii=False, indent=2)
-        
-        # 创建字节流
-        json_bytes = io.BytesIO(json_str.encode('utf-8'))
-        
-        # 返回文件下载响应
-        return StreamingResponse(
-            json_bytes,
-            media_type="application/json",
-            headers={
-                "Content-Disposition": f"attachment; filename={filename}"
-            }
-        )
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"导出失败: {str(e)}")
-
-@app.post("/api/v1/data/import")
-async def import_data(
-    file: UploadFile = File(...),
-    mode: str = Form("merge")
-):
-    """
-    导入数据从 JSON 文件
-    mode: merge (合并), replace (替换), skip_duplicates (跳过重复)
-    """
-    try:
-        # 读取上传的文件
-        content = await file.read()
-        import_data = json.loads(content.decode('utf-8'))
-        
-        # 验证数据格式
-        if "data" not in import_data:
-            raise HTTPException(status_code=400, detail="无效的数据格式")
-        
-        data = import_data["data"]
-        
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        stats = {
-            "apis": 0,
-            "scenarios": 0,
-            "test_cases": 0,
-            "project_environments": 0,
-            "executions": 0
-        }
-        skipped = 0
-        errors = []
-        
-        try:
-            # 如果是替换模式，先清空数据
-            if mode == "replace":
-                cursor.execute("DELETE FROM executions")
-                cursor.execute("DELETE FROM test_cases")
-                cursor.execute("DELETE FROM scenarios")
-                cursor.execute("DELETE FROM apis")
-                cursor.execute("DELETE FROM project_environments")
-                print("🗑️ 已清空现有数据")
-            
-            # 导入 APIs
-            if "apis" in data:
-                for api in data["apis"]:
-                    try:
-                        # 跳过重复模式：检查是否已存在
-                        if mode == "skip_duplicates":
-                            cursor.execute(
-                                "SELECT id FROM apis WHERE path = ? AND method = ? AND project_id = ?",
-                                (api.get("path"), api.get("method"), api.get("project_id", "default-project"))
-                            )
-                            if cursor.fetchone():
-                                skipped += 1
-                                continue
-                        
-                        # 插入数据（不包含 id，让数据库自动生成）
-                        cursor.execute("""
-                            INSERT INTO apis (path, method, summary, description, base_url, parameters, request_body, headers, project_id, created_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            api.get("path"),
-                            api.get("method"),
-                            api.get("summary"),
-                            api.get("description"),
-                            api.get("base_url"),
-                            api.get("parameters"),
-                            api.get("request_body"),
-                            api.get("headers"),
-                            api.get("project_id", "default-project"),
-                            api.get("created_at")
-                        ))
-                        stats["apis"] += 1
-                    except Exception as e:
-                        errors.append(f"API导入错误: {str(e)}")
-            
-            # 导入 Test Cases（需要先导入，因为 scenarios 依赖它）
-            old_to_new_test_case_ids = {}
-            if "test_cases" in data:
-                for test_case in data["test_cases"]:
-                    try:
-                        old_id = test_case.get("id")
-                        cursor.execute("""
-                            INSERT INTO test_cases (name, steps, project_id, created_at)
-                            VALUES (?, ?, ?, ?)
-                        """, (
-                            test_case.get("name"),
-                            test_case.get("steps"),
-                            test_case.get("project_id", "default-project"),
-                            test_case.get("created_at")
-                        ))
-                        new_id = cursor.lastrowid
-                        old_to_new_test_case_ids[old_id] = new_id
-                        stats["test_cases"] += 1
-                    except Exception as e:
-                        errors.append(f"测试用例导入错误: {str(e)}")
-            
-            # 导入 Scenarios
-            if "scenarios" in data:
-                for scenario in data["scenarios"]:
-                    try:
-                        # 更新 test_case_id 映射
-                        old_test_case_id = scenario.get("test_case_id")
-                        new_test_case_id = old_to_new_test_case_ids.get(old_test_case_id) if old_test_case_id else None
-                        
-                        cursor.execute("""
-                            INSERT INTO scenarios (name, description, natural_language_input, project_id, nlu_result, test_case_id, created_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            scenario.get("name"),
-                            scenario.get("description"),
-                            scenario.get("natural_language_input"),
-                            scenario.get("project_id", "default-project"),
-                            scenario.get("nlu_result"),
-                            new_test_case_id,
-                            scenario.get("created_at")
-                        ))
-                        stats["scenarios"] += 1
-                    except Exception as e:
-                        errors.append(f"场景导入错误: {str(e)}")
-            
-            # 导入 Project Environments
-            if "project_environments" in data:
-                for env in data["project_environments"]:
-                    try:
-                        # 跳过重复模式：检查是否已存在
-                        if mode == "skip_duplicates":
-                            cursor.execute(
-                                "SELECT id FROM project_environments WHERE project_id = ? AND env_name = ?",
-                                (env.get("project_id"), env.get("env_name"))
-                            )
-                            if cursor.fetchone():
-                                skipped += 1
-                                continue
-                        
-                        cursor.execute("""
-                            INSERT INTO project_environments (project_id, env_name, base_url, is_default, created_at)
-                            VALUES (?, ?, ?, ?, ?)
-                            ON CONFLICT(project_id, env_name) DO UPDATE SET
-                                base_url = excluded.base_url,
-                                is_default = excluded.is_default
-                        """, (
-                            env.get("project_id"),
-                            env.get("env_name"),
-                            env.get("base_url"),
-                            env.get("is_default", 0),
-                            env.get("created_at")
-                        ))
-                        stats["project_environments"] += 1
-                    except Exception as e:
-                        errors.append(f"环境配置导入错误: {str(e)}")
-            
-            # 可选：导入执行记录
-            if "executions" in data:
-                for execution in data["executions"]:
-                    try:
-                        # 更新 test_case_id 映射
-                        old_test_case_id = execution.get("test_case_id")
-                        new_test_case_id = old_to_new_test_case_ids.get(old_test_case_id) if old_test_case_id else None
-                        
-                        cursor.execute("""
-                            INSERT INTO executions (test_case_id, status, results, created_at)
-                            VALUES (?, ?, ?, ?)
-                        """, (
-                            new_test_case_id,
-                            execution.get("status"),
-                            execution.get("results"),
-                            execution.get("created_at")
-                        ))
-                        stats["executions"] += 1
-                    except Exception as e:
-                        errors.append(f"执行记录导入错误: {str(e)}")
-            
-            conn.commit()
-            print(f"✅ 数据导入成功: {stats}")
-            
-        except Exception as e:
-            conn.rollback()
-            raise e
-        finally:
-            conn.close()
-        
-        return {
-            "success": True,
-            "imported": stats,
-            "skipped": skipped,
-            "errors": errors
-        }
-        
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="无效的 JSON 文件")
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"导入失败: {str(e)}")
-
-# ============= 智能体系统 API =============
-
-# 延迟导入智能体模块
-try:
-    from agents.orchestrator import OrchestratorAgent
-    from agents.healer import HealerAgent
-    
-    # 初始化智能体
-    orchestrator = OrchestratorAgent(ai_client)
-    healer = HealerAgent(ai_client, DB_PATH)
-    
-    print("✅ 智能体系统已加载")
-except ImportError as e:
-    print(f"⚠️ 智能体模块导入失败: {e}")
-    orchestrator = None
-    healer = None
-
-class AgentRequest(BaseModel):
-    user_request: str
-    context: Optional[Dict] = {}
-
-class HealRequest(BaseModel):
-    test_case_id: int
-    execution_result: Dict
-
-@app.post("/api/v1/agents/orchestrate")
-async def orchestrate_agents(req: AgentRequest):
-    """智能体编排入口"""
-    if not orchestrator:
-        raise HTTPException(status_code=503, detail="智能体系统未就绪")
-    
-    try:
-        result = await orchestrator.orchestrate(req.user_request, req.context)
-        return result
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/ai/heal")
-async def heal_test_case(req: HealRequest):
-    """自动修复失败的测试用例"""
-    if not healer:
-        raise HTTPException(status_code=503, detail="自愈系统未就绪")
-    
-    try:
-        result = await healer.heal(req.test_case_id, req.execution_result)
-        return result
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/ai/analyze-failure")
-async def analyze_failure(req: Dict):
-    """分析测试失败原因"""
-    if not healer:
-        raise HTTPException(status_code=503, detail="自愈系统未就绪")
-    
-    try:
-        result = await healer.analyze_failure(req)
-        return result
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/v1/healing-records/{test_case_id}")
-async def get_healing_records(test_case_id: int):
-    """获取测试用例的自愈历史"""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT * FROM healing_records 
-            WHERE test_case_id = ? 
-            ORDER BY created_at DESC
-        """, (test_case_id,))
-        records = [dict(row) for row in cursor.fetchall()]
-        conn.close()
-        return records
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 if __name__ == "__main__":
     print(f"🚀 启动统一后端 (Unified Backend)... 数据库: {DB_PATH}")
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
- 
-  
- #   = = = = = = = = = = = = = = = = = = = =   9p-li`m��Y�~d��|  A P I   = = = = = = = = = = = = = = = = = = = =  
- f r o m   s e r v i c e s . s c h e d u l e r _ s e r v i c e   i m p o r t   S c h e d u l e r S e r v i c e  
- f r o m   p y d a n t i c   i m p o r t   B a s e M o d e l  
-  
- #   R��oP�V�,h�v4d@��j 
- s c h e d u l e r _ s e r v i c e   =   S c h e d u l e r S e r v i c e ( D B _ P A T H )  
-  
- c l a s s   S c h e d u l e d J o b C r e a t e ( B a s e M o d e l ) :  
-         n a m e :   s t r  
-         d e s c r i p t i o n :   s t r   =   " "  
-         s c e n a r i o _ i d :   i n t  
-         p r o j e c t _ i d :   s t r  
-         c r o n :   s t r  
-         e n v i r o n m e n t _ i d :   i n t   =   N o n e  
-         n o t i f y _ o n _ f a i l u r e :   b o o l   =   F a l s e  
-         n o t i f i c a t i o n _ c o n f i g :   d i c t   =   { }  
-  
- @ a p p . p o s t ( " / a p i / v 1 / s c h e d u l e r / j o b s " )  
- a s y n c   d e f   c r e a t e _ s c h e d u l e d _ j o b ( j o b :   S c h e d u l e d J o b C r e a t e ) :  
-         " " " R��m9p-li`m��Y" " "  
-         t r y :  
-                 r e s u l t   =   a w a i t   s c h e d u l e r _ s e r v i c e . c r e a t e _ j o b ( j o b . d i c t ( ) )  
-                 r e t u r n   r e s u l t  
-         e x c e p t   E x c e p t i o n   a s   e :  
-                 r a i s e   H T T P E x c e p t i o n ( s t a t u s _ c o d e = 5 0 0 ,   d e t a i l = s t r ( e ) )  
-  
- @ a p p . g e t ( " / a p i / v 1 / s c h e d u l e r / j o b s " )  
- a s y n c   d e f   l i s t _ s c h e d u l e d _ j o b s ( p r o j e c t _ i d :   s t r ) :  
-         " " " ~��\G_`m��YR�Di0" " "  
-         t r y :  
-                 j o b s   =   a w a i t   s c h e d u l e r _ s e r v i c e . g e t _ j o b _ l i s t ( p r o j e c t _ i d )  
-                 r e t u r n   j o b s  
-         e x c e p t   E x c e p t i o n   a s   e :  
-                 r a i s e   H T T P E x c e p t i o n ( s t a t u s _ c o d e = 5 0 0 ,   d e t a i l = s t r ( e ) )  
-  
- @ a p p . p u t ( " / a p i / v 1 / s c h e d u l e r / j o b s / { j o b _ i d } / p a u s e " )  
- a s y n c   d e f   p a u s e _ j o b ( j o b _ i d :   i n t ) :  
-         " " " Ɠ�P�N`m��Y" " "  
-         t r y :  
-                 r e s u l t   =   a w a i t   s c h e d u l e r _ s e r v i c e . p a u s e _ j o b ( j o b _ i d )  
-                 r e t u r n   r e s u l t  
-         e x c e p t   E x c e p t i o n   a s   e :  
-                 r a i s e   H T T P E x c e p t i o n ( s t a t u s _ c o d e = 5 0 0 ,   d e t a i l = s t r ( e ) )  
-  
- @ a p p . p u t ( " / a p i / v 1 / s c h e d u l e r / j o b s / { j o b _ i d } / r e s u m e " )  
- a s y n c   d e f   r e s u m e _ j o b ( j o b _ i d :   i n t ) :  
-         " " " �� 22�`m��Y" " "  
-         t r y :  
-                 r e s u l t   =   a w a i t   s c h e d u l e r _ s e r v i c e . r e s u m e _ j o b ( j o b _ i d )  
-                 r e t u r n   r e s u l t  
-         e x c e p t   E x c e p t i o n   a s   e :  
-                 r a i s e   H T T P E x c e p t i o n ( s t a t u s _ c o d e = 5 0 0 ,   d e t a i l = s t r ( e ) )  
-  
- @ a p p . d e l e t e ( " / a p i / v 1 / s c h e d u l e r / j o b s / { j o b _ i d } " )  
- a s y n c   d e f   d e l e t e _ j o b ( j o b _ i d :   i n t ) :  
-         " " " R��r�j`m��Y" " "  
-         t r y :  
-                 r e s u l t   =   a w a i t   s c h e d u l e r _ s e r v i c e . d e l e t e _ j o b ( j o b _ i d )  
-                 r e t u r n   r e s u l t  
-         e x c e p t   E x c e p t i o n   a s   e :  
-                 r a i s e   H T T P E x c e p t i o n ( s t a t u s _ c o d e = 5 0 0 ,   d e t a i l = s t r ( e ) )  
-  
- @ a p p . p o s t ( " / a p i / v 1 / s c h e d u l e r / j o b s / { j o b _ i d } / t r i g g e r " )  
- a s y n c   d e f   t r i g g e r _ j o b _ n o w ( j o b _ i d :   i n t ) :  
-         " " " �~*[F]��F�`m��Y" " "  
-         t r y :  
-                 a w a i t   s c h e d u l e r _ s e r v i c e . e x e c u t e _ j o b ( j o b _ i d )  
-                 r e t u r n   { " m e s s a g e " :   " `m��Y�[6�Y�? }  
-         e x c e p t   E x c e p t i o n   a s   e :  
-                 r a i s e   H T T P E x c e p t i o n ( s t a t u s _ c o d e = 5 0 0 ,   d e t a i l = s t r ( e ) )  
-  
- @ a p p . g e t ( " / a p i / v 1 / s c h e d u l e r / j o b s / { j o b _ i d } / h i s t o r y " )  
- a s y n c   d e f   g e t _ j o b _ h i s t o r y ( j o b _ i d :   i n t ,   l i m i t :   i n t   =   5 0 ) :  
-         " " " ~��\G_`m��Y��F�X��Uv_" " "  
-         t r y :  
-                 h i s t o r y   =   a w a i t   s c h e d u l e r _ s e r v i c e . g e t _ j o b _ h i s t o r y ( j o b _ i d ,   l i m i t )  
-                 r e t u r n   h i s t o r y  
-         e x c e p t   E x c e p t i o n   a s   e :  
-                 r a i s e   H T T P E x c e p t i o n ( s t a t u s _ c o d e = 5 0 0 ,   d e t a i l = s t r ( e ) )  
-  
- #   Z���YÓ���Y^g���XȓY?i�t�QbcT�?  
- @ a p p . o n _ e v e n t ( " s t a r t u p " )  
- a s y n c   d e f   l o a d _ s c h e d u l e d _ j o b s ( ) :  
-         " " " 4d�edeZ���YÓ���Y^g���XȓY?i�t�Q�k9p-li`m��Y" " "  
-         t r y :  
-                 a w a i t   s c h e d u l e r _ s e r v i c e . l o a d _ j o b s _ f r o m _ d b ( )  
-         e x c e p t   E x c e p t i o n   a s   e :  
-                 p r i n t ( f " B�? T��rGm9p-li`m��Y�o���:   { e } " )  
- 

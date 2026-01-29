@@ -15,7 +15,6 @@ export default function ProjectManagementTab() {
     const [showForm, setShowForm] = useState(false)
     const [editingProject, setEditingProject] = useState<Project | null>(null)
     const [formData, setFormData] = useState({
-        id: '',
         name: '',
         description: ''
     })
@@ -60,7 +59,7 @@ export default function ProjectManagementTab() {
             if (res.ok) {
                 loadProjects()
                 setShowForm(false)
-                setFormData({ id: '', name: '', description: '' })
+                setFormData({ name: '', description: '' })
                 setEditingProject(null)
             }
         } catch (error) {
@@ -91,7 +90,7 @@ export default function ProjectManagementTab() {
                 onClick={() => {
                     setShowForm(true)
                     setEditingProject(null)
-                    setFormData({ id: '', name: '', description: '' })
+                    setFormData({ name: '', description: '' })
                 }}
                 style={{
                     display: 'flex',
@@ -124,31 +123,6 @@ export default function ProjectManagementTab() {
                         {editingProject ? '编辑项目' : '新建项目'}
                     </h3>
                     <form onSubmit={handleSubmit}>
-                        <div style={{ marginBottom: '1rem' }}>
-                            <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-                                项目ID (唯一标识)
-                            </label>
-                            <input
-                                type="text"
-                                value={formData.id}
-                                onChange={(e) => setFormData({ ...formData, id: e.target.value })}
-                                placeholder="如: my-app, user-service"
-                                required
-                                disabled={!!editingProject}
-                                pattern="[a-z0-9-]+"
-                                title="只能包含小写字母、数字和连字符"
-                                style={{
-                                    width: '100%',
-                                    padding: '0.75rem',
-                                    border: '2px solid #E5E7EB',
-                                    borderRadius: '0.5rem',
-                                    outline: 'none'
-                                }}
-                            />
-                            <p style={{ fontSize: '0.75rem', color: '#6B7280', marginTop: '0.25rem' }}>
-                                只能包含小写字母、数字和连字符,创建后不可修改
-                            </p>
-                        </div>
                         <div style={{ marginBottom: '1rem' }}>
                             <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
                                 项目名称

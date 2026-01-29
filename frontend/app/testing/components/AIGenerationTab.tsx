@@ -42,7 +42,11 @@ export default function AIGenerationTab() {
                 }
             )
 
-            if (!caseRes.ok) throw new Error('生成测试用例失败')
+            if (!caseRes.ok) {
+                const errorData = await caseRes.json().catch(() => ({}))
+                const errorMsg = errorData.detail || errorData.message || '生成测试用例失败'
+                throw new Error(errorMsg)
+            }
             const caseData = await caseRes.json()
 
             setResult({

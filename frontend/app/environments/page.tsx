@@ -7,8 +7,13 @@ export default function EnvironmentsRedirect() {
     const router = useRouter()
 
     useEffect(() => {
-        // environments页面重定向到项目设置的环境配置Tab
-        router.replace('/settings?tab=environments')
+        const params = new URLSearchParams(window.location.search)
+        const project = params.get('project')
+        const targetUrl = project
+            ? `/settings?tab=environments&project=${project}`
+            : '/settings?tab=environments'
+
+        router.replace(targetUrl)
     }, [router])
 
     return (

@@ -2,16 +2,31 @@
 
 import { useState, useEffect } from 'react'
 import { Globe, Plus, Trash2, X } from 'lucide-react'
+import { useSearchParams } from 'next/navigation'
 import { useProject } from '../../contexts/ProjectContext'
 
 export default function EnvironmentManagementTab() {
-    const { currentProject } = useProject()
+    const { currentProject, setCurrentProject, projects } = useProject()
+    const searchParams = useSearchParams()
     const [environments, setEnvironments] = useState<any[]>([])
     const [newEnvName, setNewEnvName] = useState('')
     const [newEnvUrl, setNewEnvUrl] = useState('')
 
+    // 监听 URL 中的 project 参数并更新当前项目
     useEffect(() => {
-        fetchEnvironments(currentProject)
+        const projectId = searchParams?.get('project')
+        if (projectId && projectId !== currentProject) {
+            setCurrentProject(projectId)
+        }
+    }, [searchParams, currentProject, setCurrentProject])
+
+    // 获取当前项目名称
+    const projectName = projects.find(p => p.id === currentProject)?.name || currentProject
+
+    useEffect(() => {
+        if (currentProject) {
+            fetchEnvironments(currentProject)
+        }
     }, [currentProject])
 
     const fetchEnvironments = async (projectId: string) => {
@@ -87,7 +102,7 @@ export default function EnvironmentManagementTab() {
                 marginBottom: '1.5rem'
             }}>
                 <p style={{ fontSize: '0.875rem', color: '#1E40AF', margin: 0 }}>
-                    💡 为项目 <strong>{currentProject}</strong> 配置不同环境的域名,在执行测试时可以选择对应环境
+                    💡 为项目 <strong>{projectName}</strong> 配置不同环境的域名,在执行测试时可以选择对应环境
                 </p>
             </div>
 
