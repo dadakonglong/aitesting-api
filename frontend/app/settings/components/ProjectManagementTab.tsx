@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Plus, Edit2, Trash2, FolderOpen, Settings } from 'lucide-react'
+import { Plus, Edit2, Trash2, FolderOpen, Settings, Download, Upload } from 'lucide-react'
 
 interface Project {
     id: string
@@ -18,6 +18,68 @@ export default function ProjectManagementTab() {
         name: '',
         description: ''
     })
+    const [importLoading, setImportLoading] = useState(false)
+
+    const handleExport = async (project: Project) => {
+        try {
+            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/projects/${project.id}/export`)
+            if (res.ok) {
+                const data = await res.json()
+                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+                const url = window.URL.createObjectURL(blob)
+                const a = document.createElement('a')
+                a.href = url
+                a.download = `${project.name}_backup.json`
+                document.body.appendChild(a)
+                a.click()
+                window.URL.revokeObjectURL(url)
+                document.body.removeChild(a)
+            } else {
+                alert('导出失败')
+            }
+        } catch (error) {
+            console.error('导出失败:', error)
+            alert('导出失败')
+        }
+    }
+
+    const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0]
+        if (!file) return
+
+        setImportLoading(true)
+        try {
+            const reader = new FileReader()
+            reader.onload = async (event) => {
+                try {
+                    const content = JSON.parse(event.target?.result as string)
+                    const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/projects/import`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(content)
+                    })
+                    if (res.ok) {
+                        const result = await res.json()
+                        alert(result.message || '导入成功')
+                        loadProjects()
+                    } else {
+                        const err = await res.json()
+                        alert(`导入失败: ${err.detail || '未知错误'}`)
+                    }
+                } catch (err) {
+                    alert('文件格式错误，请确保上传的是有效的导出 JSON')
+                } finally {
+                    setImportLoading(false)
+                    // Reset input
+                    e.target.value = ''
+                }
+            }
+            reader.readAsText(file)
+        } catch (error) {
+            console.error('读取文件失败:', error)
+            setImportLoading(false)
+        }
+    }
 
     useEffect(() => {
         loadProjects()
@@ -86,29 +148,64 @@ export default function ProjectManagementTab() {
         <>
 
             {/* Add Button */}
-            <button
-                onClick={() => {
-                    setShowForm(true)
-                    setEditingProject(null)
-                    setFormData({ name: '', description: '' })
-                }}
-                style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.5rem',
-                    padding: '0.75rem 1.5rem',
-                    background: 'linear-gradient(to right, #3B82F6, #2563EB)',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '0.5rem',
-                    cursor: 'pointer',
-                    fontWeight: '600',
-                    marginBottom: '1.5rem'
-                }}
-            >
-                <Plus size={20} />
-                新建项目
-            </button>
+            <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem' }}>
+                <button
+                    onClick={() => {
+                        setShowForm(true)
+                        setEditingProject(null)
+                        setFormData({ name: '', description: '' })
+                    }}
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.5rem',
+                        padding: '0.75rem 1.5rem',
+                        background: 'linear-gradient(to right, #3B82F6, #2563EB)',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '0.5rem',
+                        cursor: 'pointer',
+                        fontWeight: '600',
+                    }}
+                >
+                    <Plus size={20} />
+                    新建项目
+                </button>
+
+                <div style={{ position: 'relative' }}>
+                    <input
+                        type="file"
+                        accept=".json"
+                        onChange={handleImport}
+                        style={{
+                            position: 'absolute',
+                            inset: 0,
+                            opacity: 0,
+                            cursor: 'pointer',
+                            zIndex: 10
+                        }}
+                        disabled={importLoading}
+                    />
+                    <button
+                        style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.5rem',
+                            padding: '0.75rem 1.5rem',
+                            background: 'white',
+                            color: '#374151',
+                            border: '2px solid #E5E7EB',
+                            borderRadius: '0.5rem',
+                            cursor: 'pointer',
+                            fontWeight: '600',
+                            opacity: importLoading ? 0.5 : 1
+                        }}
+                    >
+                        <Upload size={20} />
+                        {importLoading ? '导入中...' : '导入项目'}
+                    </button>
+                </div>
+            </div>
 
             {/* Form */}
             {showForm && (
@@ -259,7 +356,26 @@ export default function ProjectManagementTab() {
                                 管理
                             </button>
                             <button
+                                onClick={() => handleExport(project)}
+                                title="导出项目"
+                                style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    padding: '0.5rem',
+                                    background: '#F3F4F6',
+                                    color: '#4B5563',
+                                    border: 'none',
+                                    borderRadius: '0.375rem',
+                                    cursor: 'pointer',
+                                    fontSize: '0.875rem'
+                                }}
+                            >
+                                <Download size={16} />
+                            </button>
+                            <button
                                 onClick={() => handleDelete(project.id)}
+                                title="删除项目"
                                 style={{
                                     display: 'flex',
                                     alignItems: 'center',

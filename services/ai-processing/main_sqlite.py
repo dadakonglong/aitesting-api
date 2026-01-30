@@ -1896,43 +1896,53 @@ class HealApplyRequest(BaseModel):
     execution_id: Optional[int] = None  # 不传则需在下次执行后单独传 execution_result
 
 
-@app.post("/api/v1/heal/analyze")
-async def heal_analyze(req: HealAnalyzeRequest):
-    """
-    API Healer - 分析失败原因：根据某次执行记录，对失败步骤做根因分析并给出修复建议。
-    返回：失败类型、根因、是否可自愈、修复建议（含 patch_hint）。
-    """
+@app.get("/api/v1/projects/{project_id}/export")
+async def export_project(project_id: str):
+    """导出项目及其所有关联数据（API、环境、场景、用例）"""
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT id, test_case_id, status, results FROM executions WHERE id = ?", (req.execution_id,))
-        row = cursor.fetchone()
+        
+        # 1. 项目基本信息
+        cursor.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
+        project = dict(cursor.fetchone() or {})
+        if not project:
+            raise HTTPException(status_code=404, detail="项目不存在")
+            
+        # 2. 接口列表
+        cursor.execute("SELECT * FROM apis WHERE project_id = ?", (project_id,))
+        apis = [dict(row) for row in cursor.fetchall()]
+        
+        # 3. 环境配置
+        cursor.execute("SELECT * FROM project_environments WHERE project_id = ?", (project_id,))
+        environments = [dict(row) for row in cursor.fetchall()]
+        
+        # 4. 场景
+        cursor.execute("SELECT * FROM scenarios WHERE project_id = ?", (project_id,))
+        scenarios = [dict(row) for row in cursor.fetchall()]
+        
+        # 5. 场景测试用例
+        cursor.execute("SELECT * FROM test_cases WHERE project_id = ?", (project_id,))
+        test_cases = [dict(row) for row in cursor.fetchall()]
+
+        # 6. API 级测试用例
+        cursor.execute("SELECT * FROM api_test_cases WHERE project_id = ?", (project_id,))
+        api_test_cases = [dict(row) for row in cursor.fetchall()]
+        
         conn.close()
-        if not row:
-            raise HTTPException(status_code=404, detail="执行记录不存在")
-        results = []
-        try:
-            results = json.loads(row["results"] or "[]")
-        except Exception:
-            pass
-        steps = _normalize_results_to_steps(results)
-        failed_steps = [s for s in steps if s.get("success") is False]
-        if req.step_index is not None:
-            idx = req.step_index
-            if idx < 0 or idx >= len(steps):
-                raise HTTPException(status_code=400, detail="step_index 越界")
-            if steps[idx].get("success") is True:
-                return {"status": "no_failure", "message": "该步骤已通过", "step_index": idx}
-            failed_steps = [steps[idx]]
-        if not failed_steps:
-            return {"status": "no_failure", "message": "无失败步骤"}
-        execution_result = {"steps": failed_steps}
-        analysis = await healer_agent.analyze_failure(execution_result)
-        analysis["execution_id"] = req.execution_id
-        if req.step_index is not None:
-            analysis["step_index"] = req.step_index
-        return analysis
+        
+        export_data = {
+            "version": "1.0",
+            "project": project,
+            "apis": apis,
+            "environments": environments,
+            "scenarios": scenarios,
+            "test_cases": test_cases,
+            "api_test_cases": api_test_cases
+        }
+        
+        return export_data
     except HTTPException:
         raise
     except Exception as e:
@@ -1941,36 +1951,85 @@ async def heal_analyze(req: HealAnalyzeRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/v1/heal/apply")
-async def heal_apply(req: HealApplyRequest):
-    """
-    API Healer - 应用修复：根据某次执行记录的分析结果，自动修改场景用例（test_cases 表）的步骤。
-    仅对 test_case_id > 0 的场景用例生效；计划执行（test_case_id=0）无对应用例可改，请用 analyze 查看建议后人工调整。
-    """
-    if req.test_case_id <= 0:
-        raise HTTPException(status_code=400, detail="仅支持对场景用例（test_case_id > 0）应用修复")
+@app.post("/api/v1/projects/import")
+async def import_project(data: Dict[str, Any]):
+    """导入项目数据"""
     try:
-        execution_result = None
-        if req.execution_id:
-            conn = sqlite3.connect(DB_PATH)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute("SELECT results FROM executions WHERE id = ?", (req.execution_id,))
-            row = cursor.fetchone()
-            conn.close()
-            if not row:
-                raise HTTPException(status_code=404, detail="执行记录不存在")
-            try:
-                results = json.loads(row["results"] or "[]")
-            except Exception:
-                results = []
-            execution_result = {"steps": _normalize_results_to_steps(results)}
-        if not execution_result or not execution_result.get("steps"):
-            raise HTTPException(status_code=400, detail="请提供 execution_id 以指定用于修复的执行记录")
-        result = await healer_agent.heal(req.test_case_id, execution_result)
-        return result
-    except HTTPException:
-        raise
+        project = data.get("project")
+        if not project or not project.get("id"):
+            raise HTTPException(status_code=400, detail="无效的项目数据")
+            
+        project_id = project["id"]
+        
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # 检查项目是否已存在
+        cursor.execute("SELECT id FROM projects WHERE id = ?", (project_id,))
+        if cursor.fetchone():
+            import uuid
+            project_id = f"{project_id}_imported_{uuid.uuid4().hex[:4]}"
+            project["id"] = project_id
+            project["name"] = f"{project['name']} (导入)"
+
+        # 插入项目信息
+        cursor.execute(
+            "INSERT INTO projects (id, name, description, created_at) VALUES (?, ?, ?, ?)",
+            (project["id"], project["name"], project.get("description", ""), project.get("created_at"))
+        )
+        
+        def safe_json_dump(val):
+            if isinstance(val, (dict, list)):
+                return json.dumps(val, ensure_ascii=False)
+            return val
+
+        # 2. 接口列表
+        for item in data.get("apis", []):
+            cursor.execute(
+                """INSERT INTO apis (path, method, summary, description, base_url, parameters, request_body, headers, project_id, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (item["path"], item["method"], item.get("summary"), item.get("description"), item.get("base_url"),
+                 safe_json_dump(item.get("parameters")), safe_json_dump(item.get("request_body")), 
+                 safe_json_dump(item.get("headers")), project_id, item.get("created_at"))
+            )
+            
+        # 3. 环境配置
+        for item in data.get("environments", []):
+            cursor.execute(
+                "INSERT INTO project_environments (project_id, env_name, base_url, is_default, created_at) VALUES (?, ?, ?, ?, ?)",
+                (project_id, item["env_name"], item["base_url"], item.get("is_default", 0), item.get("created_at"))
+            )
+            
+        # 4. 场景
+        for item in data.get("scenarios", []):
+            cursor.execute(
+                """INSERT INTO scenarios (name, description, natural_language_input, project_id, nlu_result, test_case_id, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (item.get("name"), item.get("description"), item.get("natural_language_input"), project_id,
+                 safe_json_dump(item.get("nlu_result")), item.get("test_case_id"), item.get("created_at"))
+            )
+            
+        # 5. 场景测试用例
+        for item in data.get("test_cases", []):
+            cursor.execute(
+                "INSERT INTO test_cases (name, steps, project_id, created_at) VALUES (?, ?, ?, ?)",
+                (item.get("name"), safe_json_dump(item.get("steps")), project_id, item.get("created_at"))
+            )
+
+        # 6. API 级测试用例
+        for item in data.get("api_test_cases", []):
+            cursor.execute(
+                """INSERT INTO api_test_cases (project_id, api_id, method, path, source, case_type, name, description, request_template, expected_template, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (project_id, item.get("api_id"), item.get("method"), item.get("path"), item.get("source"),
+                 item.get("case_type"), item.get("name"), item.get("description"),
+                 safe_json_dump(item.get("request_template")), safe_json_dump(item.get("expected_template")),
+                 item.get("created_at"), item.get("updated_at"))
+            )
+            
+        conn.commit()
+        conn.close()
+        return {"success": True, "project_id": project_id, "message": f"项目 {project['name']} 已成功导入"}
     except Exception as e:
         import traceback
         traceback.print_exc()
