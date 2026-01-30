@@ -1,10 +1,15 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+import { useSearchParams } from 'next/navigation'
 import { useProject } from '../contexts/ProjectContext'
 import { BarChart, LineChart, TrendingUp, AlertCircle, CheckCircle, Clock, Activity } from 'lucide-react'
 
+const API_BASE = process.env.NEXT_PUBLIC_AI_API_URL || 'http://localhost:8000'
+
 export default function ReportsPage() {
+    const searchParams = useSearchParams()
+    const executionIdFromUrl = searchParams?.get('execution_id')
     const { currentProject } = useProject()
     const [timeRange, setTimeRange] = useState('7d')
     const [overviewStats, setOverviewStats] = useState<any>(null)
@@ -12,41 +17,69 @@ export default function ReportsPage() {
     const [apiStats, setApiStats] = useState<any[]>([])
     const [failureAnalysis, setFailureAnalysis] = useState<any>(null)
     const [loading, setLoading] = useState(true)
+    const [executionDetail, setExecutionDetail] = useState<any>(null)
 
     useEffect(() => {
         fetchReportData()
     }, [currentProject, timeRange])
 
+    useEffect(() => {
+        if (!executionIdFromUrl) {
+            setExecutionDetail(null)
+            return
+        }
+        const load = async () => {
+            try {
+                const res = await fetch(`${API_BASE}/api/v1/executions/${executionIdFromUrl}`)
+                const data = await res.json().catch(() => ({}))
+                if (res.ok && data != null) {
+                    setExecutionDetail(data)
+                } else {
+                    setExecutionDetail({ error: true, message: data.detail || data.message || '加载失败或执行记录不存在' })
+                }
+            } catch (e) {
+                setExecutionDetail({ error: true, message: '网络错误或服务不可用' })
+            }
+        }
+        load()
+    }, [executionIdFromUrl])
+
     const fetchReportData = async () => {
         setLoading(true)
         try {
-            // 获取概览统计
-            const overviewRes = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/reports/overview?project_id=${currentProject}&time_range=${timeRange}`)
+            const overviewRes = await fetch(`${API_BASE}/api/v1/reports/overview?project_id=${currentProject}&time_range=${timeRange}`)
             const overview = await overviewRes.json()
-            setOverviewStats(overview)
-
-            // 获取趋势数据
-            const trendRes = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/reports/trends?project_id=${currentProject}&metric=success_rate&days=30`)
+            setOverviewStats(res.ok && !overview.detail ? overview : null)
+        } catch {
+            setOverviewStats(null)
+        }
+        try {
+            const trendRes = await fetch(`${API_BASE}/api/v1/reports/trends?project_id=${currentProject}&metric=success_rate&days=30`)
             const trends = await trendRes.json()
-            setTrendData(trends)
-
-            // 获取API统计
-            const apiRes = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/reports/api-stats?project_id=${currentProject}`)
+            setTrendData(Array.isArray(trends) ? trends : [])
+        } catch {
+            setTrendData([])
+        }
+        try {
+            const apiRes = await fetch(`${API_BASE}/api/v1/reports/api-stats?project_id=${currentProject}&time_range=${timeRange}`)
             const apis = await apiRes.json()
-            setApiStats(apis)
-
-            // 获取失败分析
-            const failureRes = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/reports/failures?project_id=${currentProject}&days=7`)
+            setApiStats(Array.isArray(apis) ? apis : [])
+        } catch {
+            setApiStats([])
+        }
+        try {
+            const daysMap: Record<string, number> = { '7d': 7, '30d': 30, '90d': 90 }
+            const days = daysMap[timeRange] ?? 7
+            const failureRes = await fetch(`${API_BASE}/api/v1/reports/failures?project_id=${currentProject}&days=${days}`)
             const failures = await failureRes.json()
             setFailureAnalysis(failures)
-        } catch (error) {
-            console.error('获取报告数据失败:', error)
-        } finally {
-            setLoading(false)
+        } catch {
+            setFailureAnalysis(null)
         }
+        setLoading(false)
     }
 
-    if (loading) {
+    if (loading && !executionIdFromUrl) {
         return (
             <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '80vh' }}>
                 <div style={{ textAlign: 'center' }}>
@@ -69,6 +102,58 @@ export default function ReportsPage() {
                 </p>
             </div>
 
+            {/* 单次执行详情（从接口测试计划「查看测试报告」跳转带 execution_id 时显示） */}
+            {executionIdFromUrl && (
+                <div style={{ marginBottom: '2rem', background: 'rgba(255,255,255,0.95)', borderRadius: '1rem', padding: '1.5rem', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)' }}>
+                    <h2 style={{ fontSize: '1.25rem', fontWeight: '600', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        {executionDetail && !executionDetail.error ? (executionDetail.status === 'success' ? <CheckCircle size={22} style={{ color: '#10B981' }} /> : <AlertCircle size={22} style={{ color: '#EF4444' }} />) : null}
+                        执行详情 #{executionIdFromUrl}
+                    </h2>
+                    {!executionDetail ? (
+                        <p style={{ color: '#6B7280' }}>加载中...</p>
+                    ) : executionDetail.error ? (
+                        <p style={{ color: '#EF4444' }}>{executionDetail.message || '加载失败'}</p>
+                    ) : (
+                        <>
+                            <p style={{ fontSize: '0.875rem', color: '#6B7280', marginBottom: '0.75rem' }}>
+                                状态: <strong>{executionDetail.status === 'success' ? '全部通过' : '存在失败'}</strong>
+                                | 共 {(executionDetail.results ?? []).length} 条
+                            </p>
+                            <div style={{ overflowX: 'auto', maxHeight: '400px', overflowY: 'auto', border: '1px solid #E5E7EB', borderRadius: '0.5rem' }}>
+                                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
+                                    <thead style={{ background: '#F3F4F6' }}>
+                                        <tr>
+                                            <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>步骤</th>
+                                            <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>接口</th>
+                                            <th style={{ padding: '0.5rem 0.75rem', textAlign: 'left' }}>用例类型</th>
+                                            <th style={{ padding: '0.5rem 0.75rem', textAlign: 'center' }}>状态码</th>
+                                            <th style={{ padding: '0.5rem 0.75rem', textAlign: 'center' }}>结果</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {(executionDetail.results ?? []).length === 0 ? (
+                                            <tr><td colSpan={5} style={{ padding: '1rem', textAlign: 'center', color: '#6B7280' }}>暂无步骤数据</td></tr>
+                                        ) : (
+                                            (executionDetail.results ?? []).map((r: any, i: number) => (
+                                                <tr key={i} style={{ borderTop: '1px solid #E5E7EB', background: r.success ? 'transparent' : '#FEF2F2' }}>
+                                                    <td style={{ padding: '0.5rem 0.75rem' }}>{r.step_order ?? i + 1}</td>
+                                                    <td style={{ padding: '0.5rem 0.75rem' }}><span style={{ fontWeight: '500' }}>{r.method}</span> {r.url ?? '-'}</td>
+                                                    <td style={{ padding: '0.5rem 0.75rem' }}>{r.case_type ?? '-'}</td>
+                                                    <td style={{ padding: '0.5rem 0.75rem', textAlign: 'center' }}>{r.status_code ?? '-'}</td>
+                                                    <td style={{ padding: '0.5rem 0.75rem', textAlign: 'center' }}>
+                                                        {r.success ? <span style={{ color: '#10B981', fontWeight: '500' }}>通过</span> : <span style={{ color: '#EF4444', fontWeight: '500' }}>失败</span>}
+                                                    </td>
+                                                </tr>
+                                            ))
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </>
+                    )}
+                </div>
+            )}
+
             {/* 时间范围选择 */}
             <div style={{ marginBottom: '2rem' }}>
                 <select
@@ -90,84 +175,84 @@ export default function ReportsPage() {
                 </select>
             </div>
 
-            {/* 概览统计卡片 */}
-            {overviewStats && (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '1.5rem', marginBottom: '2rem' }}>
-                    {/* 总执行次数 */}
-                    <div style={{
-                        background: 'rgba(255,255,255,0.95)',
-                        borderRadius: '1rem',
-                        padding: '1.5rem',
-                        boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)'
-                    }}>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
-                            <div style={{ fontSize: '0.875rem', color: '#6B7280', fontWeight: '500' }}>总执行次数</div>
-                            <Activity size={20} style={{ color: '#3B82F6' }} />
-                        </div>
-                        <div style={{ fontSize: '2rem', fontWeight: '700', color: '#111827' }}>{overviewStats.total_executions}</div>
-                        <div style={{ fontSize: '0.75rem', color: '#10B981', marginTop: '0.5rem' }}>
-                            ✓ {overviewStats.success_count} 成功 | ✗ {overviewStats.failed_count} 失败
-                        </div>
+            {/* 概览统计卡片（始终显示，无数据时显示 0） */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '1.5rem', marginBottom: '2rem' }}>
+                {/* 总执行次数 */}
+                <div style={{
+                    background: 'rgba(255,255,255,0.95)',
+                    borderRadius: '1rem',
+                    padding: '1.5rem',
+                    boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)'
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
+                        <div style={{ fontSize: '0.875rem', color: '#6B7280', fontWeight: '500' }}>总执行次数</div>
+                        <Activity size={20} style={{ color: '#3B82F6' }} />
                     </div>
-
-                    {/* 成功率 */}
-                    <div style={{
-                        background: 'rgba(255,255,255,0.95)',
-                        borderRadius: '1rem',
-                        padding: '1.5rem',
-                        boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)'
-                    }}>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
-                            <div style={{ fontSize: '0.875rem', color: '#6B7280', fontWeight: '500' }}>成功率</div>
-                            <CheckCircle size={20} style={{ color: '#10B981' }} />
-                        </div>
-                        <div style={{ fontSize: '2rem', fontWeight: '700', color: '#111827' }}>
-                            {(overviewStats.success_rate * 100).toFixed(1)}%
-                        </div>
-                        <div style={{ fontSize: '0.75rem', color: '#6B7280', marginTop: '0.5rem' }}>
-                            {overviewStats.success_rate >= 0.9 ? '✨ 优秀' : overviewStats.success_rate >= 0.7 ? '👍 良好' : '⚠️ 需改进'}
-                        </div>
-                    </div>
-
-                    {/* 平均响应时间 */}
-                    <div style={{
-                        background: 'rgba(255,255,255,0.95)',
-                        borderRadius: '1rem',
-                        padding: '1.5rem',
-                        boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)'
-                    }}>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
-                            <div style={{ fontSize: '0.875rem', color: '#6B7280', fontWeight: '500' }}>平均响应时间</div>
-                            <Clock size={20} style={{ color: '#F59E0B' }} />
-                        </div>
-                        <div style={{ fontSize: '2rem', fontWeight: '700', color: '#111827' }}>
-                            {overviewStats.avg_response_time}ms
-                        </div>
-                        <div style={{ fontSize: '0.75rem', color: '#6B7280', marginTop: '0.5rem' }}>
-                            {overviewStats.avg_response_time < 200 ? '⚡ 极快' : overviewStats.avg_response_time < 500 ? '✓ 正常' : '🐌 较慢'}
-                        </div>
-                    </div>
-
-                    {/* 活跃场景 */}
-                    <div style={{
-                        background: 'rgba(255,255,255,0.95)',
-                        borderRadius: '1rem',
-                        padding: '1.5rem',
-                        boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)'
-                    }}>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
-                            <div style={{ fontSize: '0.875rem', color: '#6B7280', fontWeight: '500' }}>测试场景</div>
-                            <TrendingUp size={20} style={{ color: '#8B5CF6' }} />
-                        </div>
-                        <div style={{ fontSize: '2rem', fontWeight: '700', color: '#111827' }}>
-                            {overviewStats.active_scenarios}/{overviewStats.total_scenarios}
-                        </div>
-                        <div style={{ fontSize: '0.75rem', color: '#6B7280', marginTop: '0.5rem' }}>
-                            活跃场景/总场景
-                        </div>
+                    <div style={{ fontSize: '2rem', fontWeight: '700', color: '#111827' }}>{overviewStats?.total_executions ?? 0}</div>
+                    <div style={{ fontSize: '0.75rem', color: '#10B981', marginTop: '0.5rem' }}>
+                        ✓ {overviewStats?.success_count ?? 0} 成功 | ✗ {overviewStats?.failed_count ?? 0} 失败
                     </div>
                 </div>
-            )}
+
+                {/* 成功率 */}
+                <div style={{
+                    background: 'rgba(255,255,255,0.95)',
+                    borderRadius: '1rem',
+                    padding: '1.5rem',
+                    boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)'
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
+                        <div style={{ fontSize: '0.875rem', color: '#6B7280', fontWeight: '500' }}>成功率</div>
+                        <CheckCircle size={20} style={{ color: '#10B981' }} />
+                    </div>
+                    <div style={{ fontSize: '2rem', fontWeight: '700', color: '#111827' }}>
+                        {overviewStats != null && typeof overviewStats.success_rate === 'number'
+                            ? (overviewStats.success_rate * 100).toFixed(1)
+                            : '0'}%
+                    </div>
+                    <div style={{ fontSize: '0.75rem', color: '#6B7280', marginTop: '0.5rem' }}>
+                        {(overviewStats?.success_rate ?? 0) >= 0.9 ? '✨ 优秀' : (overviewStats?.success_rate ?? 0) >= 0.7 ? '👍 良好' : '⚠️ 需改进'}
+                    </div>
+                </div>
+
+                {/* 平均响应时间 */}
+                <div style={{
+                    background: 'rgba(255,255,255,0.95)',
+                    borderRadius: '1rem',
+                    padding: '1.5rem',
+                    boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)'
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
+                        <div style={{ fontSize: '0.875rem', color: '#6B7280', fontWeight: '500' }}>平均响应时间</div>
+                        <Clock size={20} style={{ color: '#F59E0B' }} />
+                    </div>
+                    <div style={{ fontSize: '2rem', fontWeight: '700', color: '#111827' }}>
+                        {overviewStats?.avg_response_time ?? 0} ms
+                    </div>
+                    <div style={{ fontSize: '0.75rem', color: '#6B7280', marginTop: '0.5rem' }}>
+                        {(overviewStats?.avg_response_time ?? 0) < 200 ? '⚡ 极快' : (overviewStats?.avg_response_time ?? 0) < 500 ? '✓ 正常' : '🐌 较慢'}
+                    </div>
+                </div>
+
+                {/* 活跃场景 */}
+                <div style={{
+                    background: 'rgba(255,255,255,0.95)',
+                    borderRadius: '1rem',
+                    padding: '1.5rem',
+                    boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)'
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
+                        <div style={{ fontSize: '0.875rem', color: '#6B7280', fontWeight: '500' }}>测试场景</div>
+                        <TrendingUp size={20} style={{ color: '#8B5CF6' }} />
+                    </div>
+                    <div style={{ fontSize: '2rem', fontWeight: '700', color: '#111827' }}>
+                        {overviewStats?.active_scenarios ?? 0}/{overviewStats?.total_scenarios ?? 0}
+                    </div>
+                    <div style={{ fontSize: '0.75rem', color: '#6B7280', marginTop: '0.5rem' }}>
+                        活跃场景/总场景
+                    </div>
+                </div>
+            </div>
 
             {/* 趋势图和失败分析 */}
             <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '1.5rem', marginBottom: '2rem' }}>
@@ -272,13 +357,15 @@ export default function ReportsPage() {
                     <BarChart size={20} style={{ color: '#8B5CF6' }} />
                     接口统计 (Top 20)
                 </h3>
+                <p style={{ fontSize: '0.75rem', color: '#6B7280', marginBottom: '0.75rem' }}>请求次数：该接口在所选时间范围内被调用的总步数；涉及执行数：包含该接口的执行计划次数。</p>
                 {apiStats.length > 0 ? (
                     <div style={{ overflowX: 'auto' }}>
                         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                             <thead>
                                 <tr style={{ background: '#F9FAFB', borderBottom: '2px solid #E5E7EB' }}>
                                     <th style={{ padding: '0.75rem', textAlign: 'left', fontSize: '0.75rem', fontWeight: '600', color: '#6B7280' }}>接口</th>
-                                    <th style={{ padding: '0.75rem', textAlign: 'center', fontSize: '0.75rem', fontWeight: '600', color: '#6B7280' }}>执行次数</th>
+                                    <th style={{ padding: '0.75rem', textAlign: 'center', fontSize: '0.75rem', fontWeight: '600', color: '#6B7280' }}>请求次数</th>
+                                    <th style={{ padding: '0.75rem', textAlign: 'center', fontSize: '0.75rem', fontWeight: '600', color: '#6B7280' }}>涉及执行数</th>
                                     <th style={{ padding: '0.75rem', textAlign: 'center', fontSize: '0.75rem', fontWeight: '600', color: '#6B7280' }}>成功</th>
                                     <th style={{ padding: '0.75rem', textAlign: 'center', fontSize: '0.75rem', fontWeight: '600', color: '#6B7280' }}>失败</th>
                                     <th style={{ padding: '0.75rem', textAlign: 'center', fontSize: '0.75rem', fontWeight: '600', color: '#6B7280' }}>成功率</th>
@@ -288,17 +375,18 @@ export default function ReportsPage() {
                                 {apiStats.map((api, i) => (
                                     <tr key={i} style={{ borderBottom: '1px solid #F3F4F6' }}>
                                         <td style={{ padding: '0.75rem', fontSize: '0.875rem', fontWeight: '500' }}>{api.api_name}</td>
-                                        <td style={{ padding: '0.75rem', textAlign: 'center', fontSize: '0.875rem' }}>{api.total_executions}</td>
+                                        <td style={{ padding: '0.75rem', textAlign: 'center', fontSize: '0.875rem' }}>{api.request_count ?? api.total_executions ?? 0}</td>
+                                        <td style={{ padding: '0.75rem', textAlign: 'center', fontSize: '0.875rem' }}>{api.run_count ?? '-'}</td>
                                         <td style={{ padding: '0.75rem', textAlign: 'center', fontSize: '0.875rem', color: '#10B981' }}>{api.success_count}</td>
                                         <td style={{ padding: '0.75rem', textAlign: 'center', fontSize: '0.875rem', color: '#EF4444' }}>{api.failed_count}</td>
                                         <td style={{ padding: '0.75rem', textAlign: 'center', fontSize: '0.875rem', fontWeight: '600' }}>
                                             <span style={{
                                                 padding: '0.25rem 0.5rem',
                                                 borderRadius: '0.375rem',
-                                                background: api.success_rate >= 0.9 ? '#D1FAE5' : api.success_rate >= 0.7 ? '#FEF3C7' : '#FEE2E2',
-                                                color: api.success_rate >= 0.9 ? '#065F46' : api.success_rate >= 0.7 ? '#92400E' : '#991B1B'
+                                                background: (api.success_rate ?? 0) >= 0.9 ? '#D1FAE5' : (api.success_rate ?? 0) >= 0.7 ? '#FEF3C7' : '#FEE2E2',
+                                                color: (api.success_rate ?? 0) >= 0.9 ? '#065F46' : (api.success_rate ?? 0) >= 0.7 ? '#92400E' : '#991B1B'
                                             }}>
-                                                {(api.success_rate * 100).toFixed(1)}%
+                                                {((api.success_rate ?? 0) * 100).toFixed(1)}%
                                             </span>
                                         </td>
                                     </tr>

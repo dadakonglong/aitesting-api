@@ -42,35 +42,47 @@ class HealerAgent:
         }
     
     async def _analyze_step_failure(self, step: Dict) -> Dict:
-        """分析单个步骤的失败原因"""
+        """分析单个步骤的失败原因（兼容 execution results 的 step 格式）"""
         system_prompt = """你是一个接口测试自愈专家。
-        分析测试步骤失败的原因,并判断是否可以自动修复。
-        
+        分析测试步骤失败的原因，并判断是否可以自动修复。
+
         常见失败类型:
         1. 接口路径变更 (可自愈)
-        2. 参数名称变更 (可自愈)
-        3. 响应结构变更 (可自愈)
-        4. 断言配置错误 (可自愈)
-        5. 业务逻辑错误 (不可自愈,需人工介入)
-        6. 环境问题 (不可自愈)
-        
-        返回JSON格式:
+        2. 参数名称/请求体变更 (可自愈)
+        3. 响应结构或状态码变更 (可自愈，如期望 200 实际 201)
+        4. 断言/期望配置错误 (可自愈)
+        5. 鉴权/Token 失效或缺失 (可自愈：更新 token 映射)
+        6. 业务逻辑错误或环境不可用 (不可自愈，需人工介入)
+
+        返回 JSON 格式:
         {
-            "failure_type": "类型",
-            "root_cause": "根本原因",
-            "can_heal": true/false,
-            "suggested_fix": "修复建议"
+            "failure_type": "类型简述",
+            "root_cause": "根本原因说明",
+            "can_heal": true 或 false,
+            "suggested_fix": "具体修复建议（人可读）",
+            "patch_hint": "可选，结构化修复提示，如: 更新期望状态码为xxx / 更新请求头Authorization / 更新path 等"
         }
         """
-        
+        params = step.get("params") or step.get("request_data") or {}
+        api_method = step.get("api_method") or step.get("method", "")
+        api_path = step.get("api_path") or step.get("url", "")
+        status_code = step.get("status_code")
+        error_msg = step.get("error_msg") or step.get("error") or ""
+        assertions = step.get("assertions", [])
+        response_body = step.get("response")
+        expected_status = step.get("expected_status")
+
         user_prompt = f"""测试步骤信息:
-API: {step.get('api_method')} {step.get('api_path')}
-请求参数: {json.dumps(step.get('params', {}), ensure_ascii=False)}
-响应状态码: {step.get('status_code')}
-错误信息: {step.get('error_msg', '')}
-断言结果: {json.dumps(step.get('assertions', []), ensure_ascii=False)}
+API: {api_method} {api_path}
+请求参数/Body: {json.dumps(params, ensure_ascii=False, default=str)}
+请求头(如有): {json.dumps(step.get('request_headers') or step.get('headers') or {}, ensure_ascii=False)}
+实际响应状态码: {status_code}
+期望状态码(如有): {expected_status}
+错误信息: {error_msg}
+断言/期望(如有): {json.dumps(assertions, ensure_ascii=False)}
+实际响应体(片段): {json.dumps(response_body, ensure_ascii=False, default=str)[:800] if response_body else '无'}
+请分析失败原因并给出是否可自愈及修复建议。
 """
-        
         response = await self.ai_client.chat(system_prompt, user_prompt)
         return response
     
@@ -183,6 +195,8 @@ API: {step.get('api_method')} {step.get('api_path')}
 """
         
         response = await self.ai_client.chat(system_prompt, user_prompt)
+        if isinstance(response, list):
+            return response
         return response.get("steps", original_steps)
     
     def _diff_steps(self, original: List[Dict], healed: List[Dict]) -> List[Dict]:

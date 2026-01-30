@@ -1,9 +1,10 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import json
+import os
+import sys
 import uvicorn
 import sqlite3
-import os
 import httpx
 import urllib.parse
 from typing import List, Dict, Optional, Any
@@ -11,6 +12,16 @@ from datetime import datetime
 from pydantic import BaseModel
 import uuid
 from dotenv import load_dotenv
+
+# 保证从项目根或本目录运行都能找到 services / agents
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+if _script_dir not in sys.path:
+    sys.path.insert(0, _script_dir)
+
+# 本地服务模块
+from services.api_planner import ApiPlanner
+from services.ai_case_generator import generate_cases_for_endpoint as ai_generate_cases_for_endpoint
+from agents.healer import HealerAgent
 
 # 加载环境变量
 load_dotenv()
@@ -33,6 +44,76 @@ DB_PATH = os.path.join(BASE_DIR, "data/apis.db")
 # ============= 模型适配层 =============
 
 from openai import AsyncOpenAI
+import re
+
+
+def _parse_ai_json(content: str) -> Dict:
+    """
+    容错解析大模型返回的 JSON：空返回、顶层数组、markdown 包裹、尾部逗号等。
+    解析失败时返回 {} 并打日志，不抛错，避免整次调用报「无法解析」。
+    """
+    if content is None:
+        return {}
+    raw = content.strip() if isinstance(content, str) else ""
+    # 去掉 BOM / 不可见字符
+    if raw.startswith("\ufeff"):
+        raw = raw[1:].strip()
+    if not raw:
+        return {}
+    # 1. 直接解析
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, list):
+            return {"cases": obj}
+        return obj if isinstance(obj, dict) else {}
+    except json.JSONDecodeError:
+        pass
+    # 2. 顶层为数组：取 [ ... ] 解析后包装为 {"cases": ...}
+    if raw.lstrip().startswith("["):
+        start = raw.find("[")
+        end = raw.rfind("]")
+        if end > start:
+            try:
+                obj = json.loads(raw[start : end + 1])
+                return {"cases": obj} if isinstance(obj, list) else {}
+            except json.JSONDecodeError:
+                pass
+    # 3. 去掉 markdown 代码块
+    if "```" in raw:
+        m = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
+        if m:
+            try:
+                inner = m.group(1).strip()
+                obj = json.loads(inner)
+                if isinstance(obj, list):
+                    return {"cases": obj}
+                return obj if isinstance(obj, dict) else {}
+            except json.JSONDecodeError:
+                pass
+    # 4. 取第一个 { 到最后一个 } 或 [ 到 ]
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start != -1 and end > start:
+        try:
+            obj = json.loads(raw[start : end + 1])
+            return obj if isinstance(obj, dict) else {}
+        except json.JSONDecodeError:
+            pass
+    # 5. 修复尾部逗号后再试
+    for attempt in [raw, raw[start : end + 1] if start != -1 and end > start else raw]:
+        fixed = re.sub(r",\s*([}\]])", r"\1", attempt)
+        try:
+            obj = json.loads(fixed)
+            if isinstance(obj, list):
+                return {"cases": obj}
+            return obj if isinstance(obj, dict) else {}
+        except json.JSONDecodeError:
+            pass
+    # 解析失败不抛错，返回空并打日志（便于排查「json 非法」指哪里）
+    preview = (raw[:200] + "…") if len(raw) > 200 else raw
+    print(f"⚠️ AI 返回无法解析为 JSON，已当空处理。内容预览: {preview!r}")
+    return {}
+
 
 class AIProvider:
     def __init__(self):
@@ -82,12 +163,24 @@ class AIProvider:
                 temperature=0.3
             )
             print(f"✅ AI 响应成功")
-            return json.loads(response.choices[0].message.content)
+            if not response.choices or not response.choices[0].message:
+                print("⚠️ AI 返回无内容，当空对象处理")
+                return {}
+            content = getattr(response.choices[0].message, "content", None) or ""
+            if not (content and str(content).strip()):
+                print("⚠️ AI 返回内容为空，当空对象处理")
+                return {}
+            return _parse_ai_json(str(content))
         except Exception as e:
             print(f"❌ AI 调用异常: {str(e)}")
             raise Exception(f"AI 服务不可用: {str(e)}")
 
 ai_client = AIProvider()
+
+# 初始化 API Planner（基于 apis.db 做接口测试计划）
+api_planner = ApiPlanner(DB_PATH)
+# API Healer（失败用例分析与自愈）
+healer_agent = HealerAgent(ai_client, DB_PATH)
 
 # ============= 数据库初始化 =============
 
@@ -137,13 +230,30 @@ def init_database():
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
     
-    # 测试用例表 (步骤序列)
+    # 测试用例表 (步骤序列) - 场景级用例
     cursor.execute('''CREATE TABLE IF NOT EXISTS test_cases (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT,
         steps TEXT, -- JSON 存储步骤
         project_id TEXT DEFAULT 'default-project',
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )''')
+
+    # API 级测试用例库（为单个接口保存的独立用例）
+    cursor.execute('''CREATE TABLE IF NOT EXISTS api_test_cases (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id TEXT NOT NULL,
+        api_id INTEGER,
+        method TEXT,
+        path TEXT,
+        source TEXT, -- ai / rule / manual
+        case_type TEXT,
+        name TEXT,
+        description TEXT,
+        request_template TEXT, -- JSON
+        expected_template TEXT, -- JSON
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
     
     # 执行记录表
@@ -154,7 +264,11 @@ def init_database():
         results TEXT, -- JSON 存储各步详情
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
-    
+    try:
+        cursor.execute("ALTER TABLE executions ADD COLUMN project_id TEXT DEFAULT 'default-project'")
+    except Exception:
+        pass
+
     # 项目环境配置表
     cursor.execute('''CREATE TABLE IF NOT EXISTS project_environments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -171,6 +285,16 @@ def init_database():
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         description TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )''')
+
+    # Healer 修复记录表（用于场景用例自愈）
+    cursor.execute('''CREATE TABLE IF NOT EXISTS healing_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        test_case_id INTEGER NOT NULL,
+        original_steps TEXT,
+        healed_steps TEXT,
+        analysis TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
     
@@ -555,6 +679,125 @@ class ExecutionRequest(BaseModel):
     environment: str = "test"
     base_url: str = "http://localhost:8000"
 
+
+def _get_value_by_path(data, path):
+    """支持 a.b.c 路径提取"""
+    if data is None or not path:
+        return None
+    parts = path.split(".")
+    curr = data
+    for p in parts:
+        if isinstance(curr, dict) and p in curr:
+            curr = curr[p]
+        elif isinstance(curr, list) and p.isdigit():
+            idx = int(p)
+            if idx < len(curr):
+                curr = curr[idx]
+            else:
+                return None
+        else:
+            return None
+    return curr
+
+
+async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
+    """执行步骤列表，返回每条步骤的请求/响应与 success（按 status_code < 400 判定）。"""
+    context = {}
+    step_results = []
+    base_url = (base_url or "http://localhost:8000").strip()
+
+    async with httpx.AsyncClient(verify=False) as client:
+        for i, step in enumerate(steps):
+            step_order = step.get("step_order", i + 1)
+            print(f"DEBUG: Starting step {step_order} [{step.get('api_method', 'GET')} {step.get('api_path')}]")
+            start_time = datetime.now()
+            current_base_url = (step.get("base_url") or "").strip() or base_url or "http://localhost:8000"
+            step_data = {
+                "step_order": step_order,
+                "url": "",
+                "method": step.get("api_method", step.get("method", "GET")).upper(),
+                "request_data": step.get("params", {}),
+                "request_headers": (step.get("headers") or {}).copy(),
+                "success": False,
+                "status_code": "Error",
+            }
+            try:
+                api_path = step.get("api_path", step.get("path", ""))
+                safe_path = urllib.parse.quote(api_path.lstrip("/"), safe="/?=&")
+                url = f"{current_base_url.rstrip('/')}/{safe_path}"
+                step_data["url"] = url
+                params_body = (step.get("params") or {}).copy()
+                params_query = (step.get("url_params") or {}).copy()
+                request_headers = (step.get("headers") or {}).copy()
+                method = step_data["method"]
+                extractions = []
+                for mapping in step.get("param_mappings", []):
+                    from_step_idx = mapping.get("from_step")
+                    from_field = mapping.get("from_field")
+                    to_field = mapping.get("to_field")
+                    to_type = mapping.get("to_type", "params")
+                    if from_step_idx is None or to_field is None:
+                        continue
+                    extraction = {
+                        "from_step": from_step_idx,
+                        "from_field": from_field,
+                        "to_field": to_field,
+                        "to_type": to_type,
+                        "success": False,
+                        "extracted_value": None,
+                        "error_msg": None,
+                    }
+                    from_data = context.get(f"step_{from_step_idx}", {}).get("response")
+                    field_val = _get_value_by_path(from_data, from_field)
+                    if field_val is not None:
+                        extraction["success"] = True
+                        extraction["extracted_value"] = str(field_val)[:100] if len(str(field_val)) > 100 else field_val
+                        if to_type == "headers":
+                            val_str = str(field_val)
+                            if to_field.lower() == "authorization" and not val_str.lower().startswith("bearer "):
+                                val_str = f"Bearer {val_str}"
+                            request_headers[to_field] = val_str
+                        elif to_type in ("url_params", "query"):
+                            params_query[to_field] = field_val
+                        else:
+                            params_body[to_field] = field_val
+                    else:
+                        extraction["error_msg"] = f"无法从步骤{from_step_idx}提取{from_field}"
+                    extractions.append(extraction)
+                step_data["request_data"] = params_body
+                step_data["url_params"] = params_query
+                step_data["request_headers"] = request_headers
+                step_data["extractions"] = extractions
+                res = await client.request(
+                    method,
+                    url,
+                    params=params_query if params_query else None,
+                    json=params_body if method != "GET" and params_body else None,
+                    headers=request_headers,
+                    timeout=15.0,
+                )
+                duration = (datetime.now() - start_time).total_seconds()
+                res_content = res.text
+                try:
+                    res_content = res.json()
+                except Exception:
+                    pass
+                step_data.update({
+                    "status_code": res.status_code,
+                    "duration": duration,
+                    "response": res_content,
+                    "success": res.status_code < 400,
+                })
+                context[f"step_{step_order}"] = json.loads(json.dumps(step_data, default=str))
+                step_results.append(step_data)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                step_data["error"] = f"{type(e).__name__}: {str(e)}"
+                step_results.append(step_data)
+    return step_results
+
+
 @app.post("/api/v1/executions")
 async def execute_case(req: ExecutionRequest):
     """万能执行引擎：支持场景用例和实时单接口执行"""
@@ -569,178 +812,29 @@ async def execute_case(req: ExecutionRequest):
             cursor.execute("SELECT * FROM test_cases WHERE id = ?", (req.test_case_id,))
             case = cursor.fetchone()
             conn.close()
-            if not case: raise HTTPException(status_code=404, detail="用例不存在")
+            if not case:
+                raise HTTPException(status_code=404, detail="用例不存在")
             steps = json.loads(case["steps"])
-            print(f"DEBUG: Loaded {len(steps)} steps from test_case {req.test_case_id}")
-            # 自动补齐 step_order (防止 context 冲突)
             for i, s in enumerate(steps):
-                if not s.get("step_order"): s["step_order"] = i + 1
+                if not s.get("step_order"):
+                    s["step_order"] = i + 1
         else:
             raise HTTPException(status_code=400, detail="必须提供 test_case_id 或 steps")
 
-        context = {} 
-        step_results = []
-        
-        def get_value_by_path(data, path):
-            """支持 a.b.c 路径提取"""
-            if data is None or not path: return None
-            parts = path.split('.')
-            curr = data
-            for p in parts:
-                if isinstance(curr, dict) and p in curr: curr = curr[p]
-                elif isinstance(curr, list) and p.isdigit(): # 支持数组索引
-                    idx = int(p)
-                    if idx < len(curr): curr = curr[idx]
-                    else: return None
-                else: return None
-            return curr
-
-        async with httpx.AsyncClient(verify=False) as client:
-            for i, step in enumerate(steps):
-                step_order = step.get("step_order", i + 1)
-                print(f"DEBUG: Starting step {step_order} [{step.get('api_method', 'GET')} {step.get('api_path')}]")
-                start_time = datetime.now()
-                
-                # 确定 Base URL
-                current_base_url = req.base_url.strip() if req.base_url else ""
-                if not current_base_url or current_base_url == "http://localhost:8000":
-                    current_base_url = (step.get("base_url") or "").strip()
-                if not current_base_url:
-                    current_base_url = "http://localhost:8000"
-
-                step_data = {
-                    "step_order": step_order,
-                    "url": "",
-                    "method": step.get("api_method", step.get("method", "GET")).upper(),
-                    "request_data": step.get("params", {}),
-                    "request_headers": step.get("headers", {}).copy(),
-                    "success": False,
-                    "status_code": "Error"
-                }
-                
-                try:
-                    api_path = step.get('api_path', step.get('path', ''))
-                    safe_path = urllib.parse.quote(api_path.lstrip('/'), safe="/?=&")
-                    url = f"{current_base_url.rstrip('/')}/{safe_path}"
-                    step_data["url"] = url
-                    
-                    params_body = (step.get("params") or {}).copy()
-                    params_query = (step.get("url_params") or {}).copy()
-                    request_headers = (step.get("headers") or {}).copy()
-                    method = step_data["method"]
-                    
-                    # 记录提取过程
-                    extractions = []
-                    
-                    # 深度依赖映射处理
-                    for mapping in step.get("param_mappings", []):
-                        from_step_idx = mapping.get("from_step")
-                        from_field = mapping.get("from_field")
-                        to_field = mapping.get("to_field")
-                        to_type = mapping.get("to_type", "params") 
-                        
-                        if from_step_idx is None or to_field is None: continue
-                        
-                        # 创建提取记录
-                        extraction = {
-                            "from_step": from_step_idx,
-                            "from_field": from_field,
-                            "to_field": to_field,
-                            "to_type": to_type,
-                            "success": False,
-                            "extracted_value": None,
-                            "error_msg": None
-                        }
-                        
-                        search_key = f"step_{from_step_idx}"
-                        from_data = context.get(search_key, {}).get("response")
-                        field_val = get_value_by_path(from_data, from_field)
-                        
-                        # 调试日志
-                        print(f"DEBUG: Extracting from step {from_step_idx}")
-                        print(f"DEBUG: from_field = {from_field}")
-                        print(f"DEBUG: extracted value = {str(field_val)[:50] if field_val else 'None'}...")
-                        
-                        if field_val is not None:
-                            extraction["success"] = True
-                            extraction["extracted_value"] = str(field_val)[:100] if len(str(field_val)) > 100 else field_val
-                            
-                            if to_type == "headers": 
-                                val_str = str(field_val)
-                                if to_field.lower() == "authorization" and not val_str.lower().startswith("bearer "):
-                                    val_str = f"Bearer {val_str}"
-                                request_headers[to_field] = val_str
-                                print(f"DEBUG: Set header {to_field} = {val_str[:50]}...")
-                            elif to_type == "url_params" or to_type == "query": 
-                                params_query[to_field] = field_val
-                            else: 
-                                params_body[to_field] = field_val
-                        else:
-                            extraction["error_msg"] = f"无法从步骤{from_step_idx}提取{from_field}"
-                            print(f"DEBUG: WARNING - Could not extract {from_field} from step {from_step_idx}")
-                        
-                        extractions.append(extraction)
-
-                    step_data["request_data"] = params_body
-                    step_data["url_params"] = params_query
-                    step_data["request_headers"] = request_headers
-                    step_data["extractions"] = extractions  # 添加提取记录
-                    
-                    # 2. 发送请求
-                    res = await client.request(
-                        method, 
-                        url, 
-                        params=params_query if params_query else None, 
-                        json=params_body if method != "GET" and params_body else None, 
-                        headers=request_headers,
-                        timeout=15.0
-                    )
-                    duration = (datetime.now() - start_time).total_seconds()
-                    print(f"DEBUG: Step {step_order} response status: {res.status_code}")
-                    
-                    res_content = res.text
-                    try: res_content = res.json()
-                    except: pass
-                    
-                    # 关键修复：深拷贝一份数据放入 context，防止后续引用修改
-                    step_data.update({
-                        "status_code": res.status_code,
-                        "duration": duration,
-                        "response": res_content,
-                        "success": res.status_code < 400
-                    })
-                    
-                    # 调试日志
-                    print(f"DEBUG: Saving step {step_order} to context")
-                    if isinstance(res_content, dict) and 'data' in res_content:
-                        if 'token' in res_content.get('data', {}):
-                            token_val = res_content['data']['token']
-                            print(f"DEBUG: Response contains token: {str(token_val)[:30]}...")
-                    
-                    context[f"step_{step_order}"] = json.loads(json.dumps(step_data, default=str)) 
-                    step_results.append(step_data)
-                except Exception as e:
-                    import traceback
-                    print(f"CRITICAL ERROR in Step {step_order}:")
-                    traceback.print_exc()
-                    step_data["error"] = f"{type(e).__name__}: {str(e)}"
-                    step_results.append(step_data)
-
-        # 4. 保存执行记录
+        step_results = await _run_steps(steps, req.base_url)
         final_status = "success" if all(s.get("success", False) for s in step_results) else "failed"
         try:
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO executions (test_case_id, status, results) VALUES (?, ?, ?)",
-                (req.test_case_id or 0, final_status, json.dumps(step_results))
+                (req.test_case_id or 0, final_status, json.dumps(step_results)),
             )
             exec_id = cursor.lastrowid
             conn.commit()
             conn.close()
-        except:
+        except Exception:
             exec_id = 0
-        
         return {"id": exec_id, "status": final_status, "results": step_results}
     except Exception as e:
         import traceback
@@ -833,47 +927,68 @@ async def import_swagger(project_id: str = Form("default-project"), source: str 
                 swagger_data = res.json()
         elif file:
             content = await file.read()
+            # 兼容 BOM 与编码：先按 utf-8-sig 解码再解析 JSON
+            if isinstance(content, bytes):
+                content = content.decode("utf-8-sig")
             swagger_data = json.loads(content)
-        
-        if not swagger_data: return {"success": False, "message": "无数据"}
-        
+        else:
+            return {"success": False, "message": "请提供 source（URL）或 file（文件）"}
+
+        if not swagger_data or not isinstance(swagger_data, dict):
+            return {"success": False, "message": "无效的 Swagger/OpenAPI 数据"}
+
+        # OpenAPI 3 用 paths，Swagger 2 用 path（此处统一用 paths）
+        paths = swagger_data.get("paths") or swagger_data.get("path")
+        if not paths:
+            return {"success": False, "message": "文档中未找到 paths，请确认是有效的 OpenAPI/Swagger JSON"}
+        if not isinstance(paths, dict):
+            return {"success": False, "message": f"paths 格式异常，应为对象，当前为 {type(paths).__name__}"}
+
         apis = []
-        paths = swagger_data.get("paths", {})
-        
-        # 提取域名 (Base URL)
         servers = swagger_data.get("servers", [])
         base_url = servers[0].get("url", "") if servers else ""
 
         for path, methods in paths.items():
+            if not isinstance(methods, dict):
+                continue
             for method, details in methods.items():
-                if method.lower() in ["get", "post", "put", "delete", "patch"]:
-                    # 提取参数
-                    params = details.get("parameters", [])
-                    # 提取请求体
-                    request_body = details.get("requestBody", {})
-                    
-                    apis.append((
-                        path, 
-                        method.upper(), 
-                        details.get("summary", ""), 
-                        details.get("description", ""), 
-                        base_url,
-                        json.dumps(params),
-                        json.dumps(request_body),
-                        project_id
-                    ))
-        
+                if method.lower() not in ["get", "post", "put", "delete", "patch"]:
+                    continue
+                if not isinstance(details, dict):
+                    continue
+                params = details.get("parameters", [])
+                request_body = details.get("requestBody", {})
+                apis.append((
+                    path,
+                    method.upper(),
+                    details.get("summary", ""),
+                    details.get("description", ""),
+                    base_url,
+                    json.dumps(params) if isinstance(params, (list, dict)) else "[]",
+                    json.dumps(request_body) if isinstance(request_body, dict) else "{}",
+                    project_id,
+                ))
+
+        if not apis:
+            return {
+                "success": False,
+                "message": "解析后未得到任何接口（paths 下需包含 get/post/put/delete/patch 之一）",
+                "paths_count": len(paths),
+            }
+
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("DELETE FROM apis WHERE project_id = ?", (project_id,))
         cursor.executemany("""
-            INSERT INTO apis (path, method, summary, description, base_url, parameters, request_body, project_id) 
+            INSERT INTO apis (path, method, summary, description, base_url, parameters, request_body, project_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, apis)
         conn.commit()
         conn.close()
-        
+
         return {"success": True, "indexed": len(apis), "total": len(apis), "project_id": project_id}
+    except json.JSONDecodeError as e:
+        return {"success": False, "message": f"JSON 解析失败: {e.msg}，请检查文件编码与格式"}
     except Exception as e:
         return {"success": False, "message": str(e)}
 
@@ -986,21 +1101,881 @@ async def list_apis():
     cursor.execute("SELECT * FROM apis ORDER BY created_at DESC")
     rows = cursor.fetchall()
     conn.close()
-    return {"apis": [
-        {
-            "id": r["id"], 
-            "path": r["path"], 
-            "method": r["method"], 
-            "name": r["summary"] or r["path"], 
-            "description": r["description"],
-            "base_url": r["base_url"],
-            "parameters": json.loads(r["parameters"] or "[]"),
-            "request_body": json.loads(r["request_body"] or "{}"),
-            "headers": json.loads(r["headers"] or "{}"),
-            "project_id": r["project_id"],
-            "tags": []
-        } for r in rows
-    ]}
+    return {
+        "apis": [
+            {
+                "id": r["id"],
+                "path": r["path"],
+                "method": r["method"],
+                "name": r["summary"] or r["path"],
+                "description": r["description"],
+                "base_url": r["base_url"],
+                "parameters": json.loads(r["parameters"] or "[]"),
+                "request_body": json.loads(r["request_body"] or "{}"),
+                "headers": json.loads(r["headers"] or "{}"),
+                "project_id": r["project_id"],
+                "tags": [],
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/api/v1/api-test-plan")
+async def generate_api_test_plan(
+    project_id: str = "default-project",
+    case_types: Optional[str] = None,
+    use_ai: bool = False,
+):
+    """
+    API Planner：基于当前项目已导入的 Swagger / API 列表，
+    生成每个接口的正向 / 边界 / 健壮 / 安全部分的测试计划。
+
+    - project_id: 项目 ID（默认 default-project）
+    - case_types: 可选，用逗号分隔的用例类型，如 "positive,boundary,robustness,security"
+    - use_ai: 为 true 时调用大模型为每个接口生成真实测试用例（边界/健壮/安全等含真实请求体），否则使用规则骨架
+    """
+    include_types: Optional[List[str]] = None
+    if case_types:
+        include_types = [t.strip().lower() for t in case_types.split(",") if t.strip()]
+
+    plan = api_planner.generate_plan(
+        project_id=project_id,
+        include_case_types=include_types,
+    )
+
+    if use_ai and plan.get("endpoints"):
+        enabled_types = list(include_types) if include_types else ["positive", "boundary", "robustness", "security"]
+        for ep in plan["endpoints"]:
+            try:
+                api_id = ep.get("id")
+                endpoint_for_ai = {
+                    "path": ep.get("path"),
+                    "method": ep.get("method"),
+                    "summary": ep.get("summary"),
+                    "description": ep.get("description"),
+                    "base_url": ep.get("base_url"),
+                    "parameters": _get_api_parameters(api_id),
+                    "request_body": _get_api_request_body(api_id),
+                }
+                ai_cases = await ai_generate_cases_for_endpoint(
+                    ai_client,
+                    endpoint_for_ai,
+                    include_types=enabled_types,
+                )
+                if ai_cases:
+                    ep["cases"] = ai_cases
+            except Exception as e:
+                print(f"AI 生成用例失败 endpoint {ep.get('path')}: {e}")
+                # 保留规则生成的 cases，不覆盖
+                pass
+    return plan
+
+
+class GenerateAiCaseRequest(BaseModel):
+    """单接口 AI 生成用例请求（便于前端按接口选择并展示进度）"""
+    project_id: str = "default-project"
+    api_id: int
+    case_types: Optional[str] = None  # 逗号分隔，如 "positive,boundary,robustness,security"
+
+
+@app.post("/api/v1/api-test-plan/generate-ai-case")
+async def generate_ai_case_for_api(req: GenerateAiCaseRequest):
+    """
+    为单个接口调用大模型生成测试用例。前端可对选中的接口逐个调用并展示进度。
+    """
+    include_types: Optional[List[str]] = None
+    if req.case_types:
+        include_types = [t.strip().lower() for t in req.case_types.split(",") if t.strip()]
+    else:
+        include_types = ["positive", "boundary", "robustness", "security"]
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, path, method, summary, description, base_url, parameters, request_body FROM apis WHERE id = ? AND project_id = ?",
+        (req.api_id, req.project_id),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="接口不存在或不属于当前项目")
+
+    endpoint_for_ai = {
+        "path": row["path"],
+        "method": row["method"],
+        "summary": row["summary"] or "",
+        "description": row["description"] or "",
+        "base_url": row["base_url"] or "",
+        "parameters": json.loads(row["parameters"] or "[]"),
+        "request_body": json.loads(row["request_body"] or "{}"),
+    }
+    try:
+        ai_cases = await ai_generate_cases_for_endpoint(
+            ai_client,
+            endpoint_for_ai,
+            include_types=include_types,
+        )
+    except Exception as e:
+        print(f"AI 生成用例失败 api_id={req.api_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"大模型生成失败: {str(e)}")
+    return {"api_id": req.api_id, "cases": ai_cases}
+
+
+def _get_api_parameters(api_id: Optional[int]) -> List[Dict]:
+    """从 apis 表读取 parameters（供 use_ai 时补齐 endpoint 信息）"""
+    if not api_id:
+        return []
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT parameters FROM apis WHERE id = ?", (api_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row and row["parameters"]:
+            return json.loads(row["parameters"] or "[]")
+    except Exception:
+        pass
+    return []
+
+
+def _get_api_request_body(api_id: Optional[int]) -> Dict:
+    """从 apis 表读取 request_body（供 use_ai 时补齐 endpoint 信息）"""
+    if not api_id:
+        return {}
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT request_body FROM apis WHERE id = ?", (api_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row and row["request_body"]:
+            return json.loads(row["request_body"] or "{}")
+    except Exception:
+        pass
+    return {}
+
+
+class ExecutePlanRequest(BaseModel):
+    """执行 API 测试计划的请求体。传入 plan 时使用前端当前计划（含 AI 用例），否则后端重新生成规则计划"""
+    project_id: str = "default-project"
+    base_url: str = ""
+    case_types: Optional[str] = None  # 逗号分隔，如 "positive,boundary"
+    environment: str = "test"
+    plan: Optional[Dict[str, Any]] = None  # 前端传入的当前计划（endpoints + cases），有则用其执行
+
+
+class ExecuteCaseRequest(BaseModel):
+    """执行单个用例的请求体（与计划中 endpoint + case 结构一致）"""
+    project_id: str = "default-project"
+    base_url: str = ""
+    environment: str = "test"
+    endpoint: Dict[str, Any]  # method, path, base_url?
+    case: Dict[str, Any]  # request_template, expected_template, case_type, name?
+
+
+class ApiTestCaseCreate(BaseModel):
+    """为单个接口保存一条用例到用例库"""
+    project_id: str = "default-project"
+    api_id: Optional[int] = None
+    method: str
+    path: str
+    source: Optional[str] = None  # ai / rule / manual
+    case_type: Optional[str] = None
+    name: str
+    description: Optional[str] = ""
+    request_template: Dict[str, Any]
+    expected_template: Dict[str, Any]
+
+
+class ApiTestCaseOut(BaseModel):
+    id: int
+    project_id: str
+    api_id: Optional[int]
+    method: str
+    path: str
+    source: Optional[str]
+    case_type: Optional[str]
+    name: str
+    description: Optional[str]
+    request_template: Dict[str, Any]
+    expected_template: Dict[str, Any]
+    created_at: str
+    updated_at: str
+
+
+@app.post("/api/v1/api-test-plan/execute-case")
+async def execute_single_case(req: ExecuteCaseRequest):
+    """
+    执行单个测试用例：根据传入的 endpoint + case 发一次请求，
+    按用例期望状态码判定通过/失败，返回该条结果。
+    """
+    try:
+        base_url = (req.base_url or "").strip()
+        if not base_url:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT base_url FROM project_environments WHERE project_id = ? AND (env_name = ? OR is_default = 1) ORDER BY is_default DESC LIMIT 1",
+                (req.project_id, req.environment),
+            )
+            row = cursor.fetchone()
+            conn.close()
+            base_url = (row["base_url"] or "").strip() if row else ""
+        if not base_url:
+            raise HTTPException(status_code=400, detail="请提供 base_url 或在项目环境中配置 base_url")
+
+        ep = req.endpoint
+        case = req.case
+        rt = case.get("request_template") or {}
+        et = case.get("expected_template") or {}
+        expected_status = et.get("status_code", 200)
+        api_path = case.get("path") or ep.get("path") or ""
+        api_method = (case.get("method") or ep.get("method") or "GET").upper()
+
+        steps = [{
+            "step_order": 1,
+            "api_path": api_path,
+            "api_method": api_method,
+            "params": rt.get("params") or {},
+            "url_params": rt.get("url_params") or {},
+            "headers": rt.get("headers") or {},
+            "param_mappings": [],
+            "base_url": (ep.get("base_url") or "").strip() or base_url,
+        }]
+        step_results = await _run_steps(steps, base_url)
+        sr = step_results[0] if step_results else {}
+        ct = case.get("case_type", "positive")
+        if hasattr(ct, "value"):
+            ct = ct.value
+        sr["case_type"] = ct
+        sr["expected_status"] = expected_status
+        sr["success"] = (sr.get("status_code") == expected_status)
+
+        return {"result": sr, "success": sr.get("success")}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/api-test-cases", response_model=ApiTestCaseOut)
+async def save_api_test_case(case_in: ApiTestCaseCreate):
+    """将当前计划中的某条接口用例保存到 API 级用例库"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        now = datetime.utcnow().isoformat() + "Z"
+        cursor.execute(
+            """
+            INSERT INTO api_test_cases
+            (project_id, api_id, method, path, source, case_type, name, description, request_template, expected_template, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                case_in.project_id,
+                case_in.api_id,
+                case_in.method,
+                case_in.path,
+                (case_in.source or "").lower() or None,
+                (case_in.case_type or "").lower() or None,
+                case_in.name,
+                case_in.description or "",
+                json.dumps(case_in.request_template or {}, ensure_ascii=False),
+                json.dumps(case_in.expected_template or {}, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        new_id = cursor.lastrowid
+        cursor.execute("SELECT * FROM api_test_cases WHERE id = ?", (new_id,))
+        row = cursor.fetchone()
+        conn.commit()
+        conn.close()
+        return {
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "api_id": row["api_id"],
+            "method": row["method"],
+            "path": row["path"],
+            "source": row["source"],
+            "case_type": row["case_type"],
+            "name": row["name"],
+            "description": row["description"],
+            "request_template": json.loads(row["request_template"] or "{}"),
+            "expected_template": json.loads(row["expected_template"] or "{}"),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/api-test-cases")
+async def list_api_test_cases(project_id: str = "default-project", api_id: Optional[int] = None):
+    """列出某项目下（可选按接口）已保存的 API 级测试用例"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        if api_id is not None:
+            cursor.execute(
+                "SELECT * FROM api_test_cases WHERE project_id = ? AND api_id = ? ORDER BY created_at DESC, id DESC",
+                (project_id, api_id),
+            )
+        else:
+            cursor.execute(
+                "SELECT * FROM api_test_cases WHERE project_id = ? ORDER BY created_at DESC, id DESC",
+                (project_id,),
+            )
+        rows = cursor.fetchall()
+        conn.close()
+        out = []
+        for row in rows:
+            try:
+                req_tpl = json.loads(row["request_template"] or "{}")
+            except Exception:
+                req_tpl = {}
+            try:
+                exp_tpl = json.loads(row["expected_template"] or "{}")
+            except Exception:
+                exp_tpl = {}
+            out.append(
+                {
+                    "id": row["id"],
+                    "project_id": row["project_id"],
+                    "api_id": row["api_id"],
+                    "method": row["method"],
+                    "path": row["path"],
+                    "source": row["source"],
+                    "case_type": row["case_type"],
+                    "name": row["name"],
+                    "description": row["description"],
+                    "request_template": req_tpl,
+                    "expected_template": exp_tpl,
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return out
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/v1/api-test-cases/{case_id}")
+async def delete_api_test_case(case_id: int):
+    """删除已保存的 API 级测试用例"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM api_test_cases WHERE id = ?", (case_id,))
+        conn.commit()
+        conn.close()
+        return {"success": True}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/api-test-plan/execute")
+async def execute_api_test_plan(req: ExecutePlanRequest):
+    """
+    执行 API 测试计划：根据 project_id 生成计划用例，逐条发请求，
+    按用例类型的期望状态码判定通过/失败，并返回汇总报告。
+    """
+    try:
+        base_url = (req.base_url or "").strip()
+        if not base_url:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT base_url FROM project_environments WHERE project_id = ? AND (env_name = ? OR is_default = 1) ORDER BY is_default DESC LIMIT 1",
+                (req.project_id, req.environment),
+            )
+            row = cursor.fetchone()
+            conn.close()
+            base_url = (row["base_url"] or "").strip() if row else ""
+        if not base_url:
+            raise HTTPException(status_code=400, detail="请提供 base_url 或在项目环境中配置 base_url")
+
+        # 优先使用前端传入的当前计划（含已生成的 AI 用例）
+        if req.plan and isinstance(req.plan, dict) and (req.plan.get("endpoints") or []):
+            endpoints = req.plan.get("endpoints") or []
+        else:
+            include_types = None
+            if req.case_types:
+                include_types = [t.strip().lower() for t in req.case_types.split(",") if t.strip()]
+            plan = api_planner.generate_plan(project_id=req.project_id, include_case_types=include_types)
+            endpoints = plan.get("endpoints") or []
+        steps = []
+        meta_list = []  # (case_type, expected_status) 与 steps 一一对应
+        for ep in endpoints:
+            base_url_ep = (ep.get("base_url") or "").strip() or base_url
+            for case in ep.get("cases") or []:
+                rt = case.get("request_template") or {}
+                et = case.get("expected_template") or {}
+                expected_status = et.get("status_code", 200)
+                steps.append({
+                    "step_order": len(steps) + 1,
+                    "api_path": case.get("path", ""),
+                    "api_method": (case.get("method") or "GET").upper(),
+                    "params": rt.get("params") or {},
+                    "url_params": rt.get("url_params") or {},
+                    "headers": rt.get("headers") or {},
+                    "param_mappings": [],
+                    "base_url": base_url_ep,
+                })
+                ct = case.get("case_type", "positive")
+                if hasattr(ct, "value"):
+                    ct = ct.value
+                meta_list.append((ct, expected_status))
+
+        if not steps:
+            raise HTTPException(status_code=400, detail="该项目下无可用接口或未生成任何用例，请先导入 Swagger 再生成计划")
+
+        step_results = await _run_steps(steps, base_url)
+        for i, sr in enumerate(step_results):
+            if i < len(meta_list):
+                case_type, expected_status = meta_list[i]
+                sr["case_type"] = case_type
+                sr["expected_status"] = expected_status
+                sr["success"] = (sr.get("status_code") == expected_status)
+
+        passed = sum(1 for s in step_results if s.get("success"))
+        failed = len(step_results) - passed
+        by_case_type = {}
+        for s in step_results:
+            ct = s.get("case_type", "unknown")
+            if ct not in by_case_type:
+                by_case_type[ct] = {"total": 0, "passed": 0, "failed": 0}
+            by_case_type[ct]["total"] += 1
+            if s.get("success"):
+                by_case_type[ct]["passed"] += 1
+            else:
+                by_case_type[ct]["failed"] += 1
+
+        final_status = "success" if failed == 0 else "failed"
+        exec_id = 0
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    "INSERT INTO executions (test_case_id, status, results, project_id) VALUES (?, ?, ?, ?)",
+                    (0, final_status, json.dumps(step_results), req.project_id),
+                )
+            except sqlite3.OperationalError:
+                cursor.execute(
+                    "INSERT INTO executions (test_case_id, status, results) VALUES (?, ?, ?)",
+                    (0, final_status, json.dumps(step_results)),
+                )
+            exec_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+        return {
+            "id": exec_id,
+            "status": final_status,
+            "project_id": req.project_id,
+            "summary": {
+                "total": len(step_results),
+                "passed": passed,
+                "failed": failed,
+                "by_case_type": by_case_type,
+            },
+            "results": step_results,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/executions/{execution_id}")
+async def get_execution(execution_id: int):
+    """根据执行 id 查询单次执行记录（含结果与各步详情）"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, test_case_id, status, results, created_at FROM executions WHERE id = ?", (execution_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="执行记录不存在")
+    results = []
+    try:
+        results = json.loads(row["results"] or "[]")
+    except Exception:
+        pass
+    return {
+        "id": row["id"],
+        "test_case_id": row["test_case_id"],
+        "status": row["status"],
+        "results": results,
+        "created_at": row["created_at"],
+    }
+
+
+# ============= 测试报告总览接口 =============
+
+def _parse_time_range(time_range: str) -> str:
+    """返回 SQLite 日期表达式，如 -7 days"""
+    if time_range == "90d":
+        return "-90 days"
+    if time_range == "30d":
+        return "-30 days"
+    return "-7 days"
+
+
+@app.get("/api/v1/reports/overview")
+async def reports_overview(project_id: str = "default-project", time_range: str = "7d"):
+    """总执行次数、成功/失败、成功率、平均响应时间、场景数"""
+    days = _parse_time_range(time_range)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        proj = project_id or "default-project"
+        cursor.execute(
+            """SELECT id, status, results FROM executions
+               WHERE created_at >= datetime('now', ?)
+               AND (project_id = ? OR (project_id IS NULL AND ? = 'default-project'))""",
+            (days, proj, proj),
+        )
+    except sqlite3.OperationalError:
+        cursor.execute(
+            "SELECT id, status, results FROM executions WHERE created_at >= datetime('now', ?)",
+            (days,),
+        )
+    rows = cursor.fetchall()
+    conn.close()
+
+    total_executions = len(rows)
+    success_count = sum(1 for r in rows if (r["status"] or "").lower() == "success")
+    failed_count = total_executions - success_count
+    success_rate = (success_count / total_executions) if total_executions else 0.0
+
+    total_duration = 0.0
+    step_count = 0
+    for r in rows:
+        try:
+            results = json.loads(r["results"] or "[]")
+            for s in results:
+                d = s.get("duration")
+                if d is not None and isinstance(d, (int, float)):
+                    total_duration += float(d)
+                    step_count += 1
+        except Exception:
+            pass
+    avg_response_time = round(total_duration / step_count * 1000, 0) if step_count else 0
+
+    cursor = sqlite3.connect(DB_PATH).cursor()
+    try:
+        cursor.execute("SELECT COUNT(*) FROM test_cases WHERE project_id = ?", (project_id,))
+        total_scenarios = cursor.fetchone()[0] or 0
+    except Exception:
+        total_scenarios = 0
+    try:
+        cursor.execute(
+            """SELECT COUNT(DISTINCT test_case_id) FROM executions
+               WHERE test_case_id > 0 AND created_at >= datetime('now', ?)""",
+            (days,),
+        )
+        active_scenarios = cursor.fetchone()[0] or 0
+    except Exception:
+        active_scenarios = 0
+
+    return {
+        "total_executions": total_executions,
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "success_rate": success_rate,
+        "avg_response_time": int(avg_response_time),
+        "total_scenarios": total_scenarios,
+        "active_scenarios": active_scenarios,
+    }
+
+
+@app.get("/api/v1/reports/trends")
+async def reports_trends(project_id: str = "default-project", metric: str = "success_rate", days: int = 30):
+    """成功率趋势：按日聚合"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        proj = project_id or "default-project"
+        cursor.execute(
+            """SELECT date(created_at) as d, status FROM executions
+               WHERE created_at >= datetime('now', ?)
+               AND (project_id = ? OR (project_id IS NULL AND ? = 'default-project'))""",
+            (f"-{days} days", proj, proj),
+        )
+    except sqlite3.OperationalError:
+        cursor.execute(
+            "SELECT date(created_at) as d, status FROM executions WHERE created_at >= datetime('now', ?)",
+            (f"-{days} days",),
+        )
+    rows = cursor.fetchall()
+    conn.close()
+
+    by_date: Dict[str, List[str]] = {}
+    for r in rows:
+        d = r["d"] or ""
+        if d not in by_date:
+            by_date[d] = []
+        by_date[d].append((r["status"] or "").lower())
+    out = []
+    for d in sorted(by_date.keys()):
+        vals = by_date[d]
+        total = len(vals)
+        success = sum(1 for v in vals if v == "success")
+        out.append({"date": d, "value": success / total if total else 0})
+    return out
+
+
+@app.get("/api/v1/reports/api-stats")
+async def reports_api_stats(project_id: str = "default-project", time_range: str = "7d"):
+    """接口统计 Top 20：按 url 聚合请求次数、涉及执行数、成功、失败、成功率（与总览时间范围一致）"""
+    days = _parse_time_range(time_range)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        proj = project_id or "default-project"
+        cursor.execute(
+            """SELECT id, results FROM executions
+               WHERE created_at >= datetime('now', ?)
+               AND (project_id = ? OR (project_id IS NULL AND ? = 'default-project'))""",
+            (days, proj, proj),
+        )
+    except sqlite3.OperationalError:
+        cursor.execute(
+            "SELECT id, results FROM executions WHERE created_at >= datetime('now', ?)",
+            (days,),
+        )
+    rows = cursor.fetchall()
+    conn.close()
+
+    agg: Dict[str, Dict[str, Any]] = {}
+    for idx, row in enumerate(rows):
+        exec_id = row[0] if len(row) > 1 else idx
+        try:
+            results = json.loads((row[1] if len(row) > 1 else row[0]) or "[]")
+            for s in results:
+                url = s.get("url") or s.get("api_path") or ""
+                method = (s.get("method") or "GET").upper()
+                key = f"{method} {url}"
+                if key not in agg:
+                    agg[key] = {
+                        "api_name": key,
+                        "request_count": 0,
+                        "run_count": set(),
+                        "success_count": 0,
+                        "failed_count": 0,
+                    }
+                agg[key]["request_count"] += 1
+                agg[key]["run_count"].add(exec_id)
+                if s.get("success"):
+                    agg[key]["success_count"] += 1
+                else:
+                    agg[key]["failed_count"] += 1
+        except Exception:
+            pass
+    list_out = []
+    for v in agg.values():
+        run_count = len(v["run_count"])
+        v.pop("run_count", None)
+        v["run_count"] = run_count
+        t = v["request_count"]
+        v["success_rate"] = (v["success_count"] / t) if t else 0
+        list_out.append(v)
+    list_out.sort(key=lambda x: -x["request_count"])
+    return list_out[:20]
+
+
+@app.get("/api/v1/reports/failures")
+async def reports_failures(project_id: str = "default-project", days: int = 7):
+    """失败分类：按状态码或错误类型聚合"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        proj = project_id or "default-project"
+        cursor.execute(
+            """SELECT results FROM executions
+               WHERE created_at >= datetime('now', ?)
+               AND (project_id = ? OR (project_id IS NULL AND ? = 'default-project'))""",
+            (f"-{days} days", proj, proj),
+        )
+    except sqlite3.OperationalError:
+        cursor.execute(
+            "SELECT results FROM executions WHERE created_at >= datetime('now', ?)",
+            (f"-{days} days",),
+        )
+    rows = cursor.fetchall()
+    conn.close()
+
+    by_category: Dict[str, int] = {}
+    for row in rows:
+        try:
+            results = json.loads(row[0] or "[]")
+            for s in results:
+                if s.get("success"):
+                    continue
+                code = s.get("status_code")
+                if code is not None:
+                    c = int(code)
+                    if 400 <= c < 500:
+                        cat = "4xx 客户端错误"
+                    elif 500 <= c < 600:
+                        cat = "5xx 服务端错误"
+                    elif 200 <= c < 300:
+                        cat = "断言失败(实际2xx)"
+                    else:
+                        cat = f"HTTP {code}"
+                else:
+                    cat = "异常/超时"
+                by_category[cat] = by_category.get(cat, 0) + 1
+        except Exception:
+            pass
+    failure_categories = [{"category": k, "count": v} for k, v in sorted(by_category.items(), key=lambda x: -x[1])]
+    return {"failure_categories": failure_categories}
+
+
+def _normalize_results_to_steps(results: List[Dict]) -> List[Dict]:
+    """将 executions.results 转为 Healer 期望的 steps 格式"""
+    steps = []
+    for r in results:
+        steps.append({
+            "step_order": r.get("step_order"),
+            "api_method": r.get("method"),
+            "api_path": r.get("url"),  # 完整 URL，便于 AI 分析
+            "url": r.get("url"),
+            "params": r.get("request_data") or r.get("params") or {},
+            "request_data": r.get("request_data"),
+            "request_headers": r.get("request_headers") or r.get("headers") or {},
+            "headers": r.get("request_headers") or {},
+            "status_code": r.get("status_code"),
+            "error_msg": r.get("error"),
+            "error": r.get("error"),
+            "response": r.get("response"),
+            "success": r.get("success"),
+            "expected_status": r.get("expected_status"),
+            "case_type": r.get("case_type"),
+            "assertions": r.get("assertions", []),
+        })
+    return steps
+
+
+# ============= API Healer：失败用例分析与自愈 =============
+
+class HealAnalyzeRequest(BaseModel):
+    """失败分析请求"""
+    execution_id: int
+    step_index: Optional[int] = None  # 只分析第几步，不传则分析所有失败步
+
+
+class HealApplyRequest(BaseModel):
+    """应用修复请求（仅场景用例 test_case_id > 0）"""
+    test_case_id: int
+    execution_id: Optional[int] = None  # 不传则需在下次执行后单独传 execution_result
+
+
+@app.post("/api/v1/heal/analyze")
+async def heal_analyze(req: HealAnalyzeRequest):
+    """
+    API Healer - 分析失败原因：根据某次执行记录，对失败步骤做根因分析并给出修复建议。
+    返回：失败类型、根因、是否可自愈、修复建议（含 patch_hint）。
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, test_case_id, status, results FROM executions WHERE id = ?", (req.execution_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise HTTPException(status_code=404, detail="执行记录不存在")
+        results = []
+        try:
+            results = json.loads(row["results"] or "[]")
+        except Exception:
+            pass
+        steps = _normalize_results_to_steps(results)
+        failed_steps = [s for s in steps if s.get("success") is False]
+        if req.step_index is not None:
+            idx = req.step_index
+            if idx < 0 or idx >= len(steps):
+                raise HTTPException(status_code=400, detail="step_index 越界")
+            if steps[idx].get("success") is True:
+                return {"status": "no_failure", "message": "该步骤已通过", "step_index": idx}
+            failed_steps = [steps[idx]]
+        if not failed_steps:
+            return {"status": "no_failure", "message": "无失败步骤"}
+        execution_result = {"steps": failed_steps}
+        analysis = await healer_agent.analyze_failure(execution_result)
+        analysis["execution_id"] = req.execution_id
+        if req.step_index is not None:
+            analysis["step_index"] = req.step_index
+        return analysis
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/heal/apply")
+async def heal_apply(req: HealApplyRequest):
+    """
+    API Healer - 应用修复：根据某次执行记录的分析结果，自动修改场景用例（test_cases 表）的步骤。
+    仅对 test_case_id > 0 的场景用例生效；计划执行（test_case_id=0）无对应用例可改，请用 analyze 查看建议后人工调整。
+    """
+    if req.test_case_id <= 0:
+        raise HTTPException(status_code=400, detail="仅支持对场景用例（test_case_id > 0）应用修复")
+    try:
+        execution_result = None
+        if req.execution_id:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT results FROM executions WHERE id = ?", (req.execution_id,))
+            row = cursor.fetchone()
+            conn.close()
+            if not row:
+                raise HTTPException(status_code=404, detail="执行记录不存在")
+            try:
+                results = json.loads(row["results"] or "[]")
+            except Exception:
+                results = []
+            execution_result = {"steps": _normalize_results_to_steps(results)}
+        if not execution_result or not execution_result.get("steps"):
+            raise HTTPException(status_code=400, detail="请提供 execution_id 以指定用于修复的执行记录")
+        result = await healer_agent.heal(req.test_case_id, execution_result)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     print(f"🚀 启动统一后端 (Unified Backend)... 数据库: {DB_PATH}")

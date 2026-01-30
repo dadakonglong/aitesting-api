@@ -248,21 +248,32 @@ export default function DataImportTab() {
                 <div style={{
                     marginTop: '2rem',
                     padding: '1.5rem',
-                    background: '#F0FDF4',
-                    border: '1px solid #86EFAC',
+                    background: result.success !== false ? '#F0FDF4' : '#FEF2F2',
+                    border: result.success !== false ? '1px solid #86EFAC' : '1px solid #FCA5A5',
                     borderRadius: '0.75rem'
                 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
-                        <CheckCircle size={20} style={{ color: '#16A34A' }} />
-                        <h4 style={{ fontSize: '1rem', fontWeight: '600', color: '#16A34A' }}>导入成功!</h4>
-                    </div>
-                    <p style={{ fontSize: '0.875rem', color: '#166534' }}>
-                        成功导入 {result.imported_count || result.count || 0} 个API
-                    </p>
-                    {result.message && (
-                        <p style={{ fontSize: '0.875rem', color: '#166534', marginTop: '0.5rem' }}>
-                            {result.message}
-                        </p>
+                    {result.success !== false ? (
+                        <>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
+                                <CheckCircle size={20} style={{ color: '#16A34A' }} />
+                                <h4 style={{ fontSize: '1rem', fontWeight: '600', color: '#16A34A' }}>导入成功!</h4>
+                            </div>
+                            <p style={{ fontSize: '0.875rem', color: '#166534' }}>
+                                成功导入 {result.indexed ?? result.total ?? result.imported_count ?? result.count ?? 0} 个API
+                            </p>
+                            {result.message && (
+                                <p style={{ fontSize: '0.875rem', color: '#166534', marginTop: '0.5rem' }}>
+                                    {result.message}
+                                </p>
+                            )}
+                        </>
+                    ) : (
+                        <>
+                            <h4 style={{ fontSize: '1rem', fontWeight: '600', color: '#B91C1C' }}>导入失败</h4>
+                            <p style={{ fontSize: '0.875rem', color: '#991B1B', marginTop: '0.5rem' }}>
+                                {result.message ?? '未知错误'}
+                            </p>
+                        </>
                     )}
                 </div>
             )}
