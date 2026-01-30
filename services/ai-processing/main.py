@@ -37,7 +37,110 @@ app.add_middleware(
 
 # 注册路由
 from routers import import_router
+import sqlite3
+import json
+import uuid
+from typing import Any
+
 app.include_router(import_router.router)
+
+# 路径配置
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_PATH = os.path.join(BASE_DIR, "data/apis.db")
+
+# ============= 项目管理路由 (同步自 main_sqlite.py) =============
+
+@app.get("/api/v1/projects")
+async def list_projects():
+    """获取系统中所有项目信息"""
+    if not os.path.exists(DB_PATH):
+        return []
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM projects ORDER BY created_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+@app.post("/api/v1/projects")
+async def create_project(project: BaseModel):
+    """创建新项目"""
+    try:
+        project_id = str(uuid.uuid4())[:8]
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO projects (id, name, description) VALUES (?, ?, ?)",
+            (project_id, project.name if hasattr(project, 'name') else getattr(project, 'dict')().get('name'), 
+             project.description if hasattr(project, 'description') else getattr(project, 'dict')().get('description'))
+        )
+        conn.commit()
+        conn.close()
+        return {"success": True, "project_id": project_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/projects/{project_id}/export")
+async def export_project(project_id: str):
+    """导出项目数据"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
+        project = dict(cursor.fetchone() or {})
+        if not project: raise HTTPException(status_code=404, detail="项目不存在")
+        cursor.execute("SELECT * FROM apis WHERE project_id = ?", (project_id,))
+        apis = [dict(row) for row in cursor.fetchall()]
+        cursor.execute("SELECT * FROM project_environments WHERE project_id = ?", (project_id,))
+        environments = [dict(row) for row in cursor.fetchall()]
+        cursor.execute("SELECT * FROM scenarios WHERE project_id = ?", (project_id,))
+        scenarios = [dict(row) for row in cursor.fetchall()]
+        cursor.execute("SELECT * FROM test_cases WHERE project_id = ?", (project_id,))
+        test_cases = [dict(row) for row in cursor.fetchall()]
+        cursor.execute("SELECT * FROM api_test_cases WHERE project_id = ?", (project_id,))
+        api_test_cases = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return {"version": "1.0", "project": project, "apis": apis, "environments": environments, "scenarios": scenarios, "test_cases": test_cases, "api_test_cases": api_test_cases}
+    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/projects/import")
+async def import_project(data: Dict[str, Any]):
+    """导入项目数据"""
+    try:
+        project = data.get("project")
+        if not project: raise HTTPException(status_code=400, detail="无效数据")
+        project_id = project["id"]
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM projects WHERE id = ?", (project_id,))
+        if cursor.fetchone():
+            project_id = f"{project_id}_imported_{uuid.uuid4().hex[:4]}"
+            project["id"] = project_id
+            project["name"] = f"{project['name']} (导入)"
+        cursor.execute("INSERT INTO projects (id, name, description, created_at) VALUES (?, ?, ?, ?)",
+                       (project["id"], project["name"], project.get("description", ""), project.get("created_at")))
+        def safe_json(v): return json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v
+        for item in data.get("apis", []):
+            cursor.execute("INSERT INTO apis (path, method, summary, description, base_url, parameters, request_body, headers, project_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           (item["path"], item["method"], item.get("summary"), item.get("description"), item.get("base_url"), safe_json(item.get("parameters")), safe_json(item.get("request_body")), safe_json(item.get("headers")), project_id, item.get("created_at")))
+        for item in data.get("environments", []):
+            cursor.execute("INSERT INTO project_environments (project_id, env_name, base_url, is_default, created_at) VALUES (?, ?, ?, ?, ?)",
+                           (project_id, item["env_name"], item["base_url"], item.get("is_default", 0), item.get("created_at")))
+        for item in data.get("scenarios", []):
+            cursor.execute("INSERT INTO scenarios (name, description, natural_language_input, project_id, nlu_result, test_case_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                           (item.get("name"), item.get("description"), item.get("natural_language_input"), project_id, safe_json(item.get("nlu_result")), item.get("test_case_id"), item.get("created_at")))
+        for item in data.get("test_cases", []):
+            cursor.execute("INSERT INTO test_cases (name, steps, project_id, created_at) VALUES (?, ?, ?, ?)",
+                           (item.get("name"), safe_json(item.get("steps")), project_id, item.get("created_at")))
+        for item in data.get("api_test_cases", []):
+            cursor.execute("INSERT INTO api_test_cases (project_id, api_id, method, path, source, case_type, name, description, request_template, expected_template, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           (project_id, item.get("api_id"), item.get("method"), item.get("path"), item.get("source"), item.get("case_type"), item.get("name"), item.get("description"), safe_json(item.get("request_template")), safe_json(item.get("expected_template")), item.get("created_at"), item.get("updated_at")))
+        conn.commit()
+        conn.close()
+        return {"success": True, "project_id": project_id, "message": f"项目 {project['name']} 已成功导入"}
+    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 # 初始化服务
 nlu_service = NLUService(

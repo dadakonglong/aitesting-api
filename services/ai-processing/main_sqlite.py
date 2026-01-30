@@ -38,7 +38,7 @@ app.add_middleware(
 )
 
 # 路径配置
-BASE_DIR = "D:/testc/aitesting-api"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DB_PATH = os.path.join(BASE_DIR, "data/apis.db")
 
 # ============= 模型适配层 =============
@@ -2030,6 +2030,87 @@ async def import_project(data: Dict[str, Any]):
         conn.commit()
         conn.close()
         return {"success": True, "project_id": project_id, "message": f"项目 {project['name']} 已成功导入"}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/heal/analyze")
+async def heal_analyze(req: HealAnalyzeRequest):
+    """
+    API Healer - 分析失败原因：根据某次执行记录，对失败步骤做根因分析并给出修复建议。
+    返回：失败类型、根因、是否可自愈、修复建议（含 patch_hint）。
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, test_case_id, status, results FROM executions WHERE id = ?", (req.execution_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise HTTPException(status_code=404, detail="执行记录不存在")
+        results = []
+        try:
+            results = json.loads(row["results"] or "[]")
+        except Exception:
+            pass
+        steps = _normalize_results_to_steps(results)
+        failed_steps = [s for s in steps if s.get("success") is False]
+        if req.step_index is not None:
+            idx = req.step_index
+            if idx < 0 or idx >= len(steps):
+                raise HTTPException(status_code=400, detail="step_index 越界")
+            if steps[idx].get("success") is True:
+                return {"status": "no_failure", "message": "该步骤已通过", "step_index": idx}
+            failed_steps = [steps[idx]]
+        if not failed_steps:
+            return {"status": "no_failure", "message": "无失败步骤"}
+        execution_result = {"steps": failed_steps}
+        analysis = await healer_agent.analyze_failure(execution_result)
+        analysis["execution_id"] = req.execution_id
+        if req.step_index is not None:
+            analysis["step_index"] = req.step_index
+        return analysis
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/heal/apply")
+async def heal_apply(req: HealApplyRequest):
+    """
+    API Healer - 应用修复：根据某次执行记录的分析结果，自动修改场景用例（test_cases 表）的步骤。
+    仅对 test_case_id > 0 的场景用例生效；计划执行（test_case_id=0）无对应用例可改，请用 analyze 查看建议后人工调整。
+    """
+    if req.test_case_id <= 0:
+        raise HTTPException(status_code=400, detail="仅支持对场景用例（test_case_id > 0）应用修复")
+    try:
+        execution_result = None
+        if req.execution_id:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT results FROM executions WHERE id = ?", (req.execution_id,))
+            row = cursor.fetchone()
+            conn.close()
+            if not row:
+                raise HTTPException(status_code=404, detail="执行记录不存在")
+            try:
+                results = json.loads(row["results"] or "[]")
+            except Exception:
+                results = []
+            execution_result = {"steps": _normalize_results_to_steps(results)}
+        if not execution_result or not execution_result.get("steps"):
+            raise HTTPException(status_code=400, detail="请提供 execution_id 以指定用于修复的执行记录")
+        result = await healer_agent.heal(req.test_case_id, execution_result)
+        return result
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
