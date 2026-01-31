@@ -424,12 +424,13 @@ class SingleApiGenerateCodeRequest(BaseModel):
 
 
 class SingleApiExecuteRequest(BaseModel):
-    """阶段4：执行（传入计划中的 endpoints 或 steps）"""
+    """阶段4：执行（优先用生成代码解析出的用例，否则用计划中的 endpoints 或 steps）"""
     project_id: str = "default-project"
     base_url: str = ""
     environment: str = "test"
     plan: Optional[Dict[str, Any]] = None  # 含 endpoints[].cases 的计划
     steps: Optional[List[Dict[str, Any]]] = None  # 或直接步骤列表
+    generated_code: Optional[str] = None  # 生成的 Playwright 代码，若提供则优先从中解析用例再执行
 
 
 class SingleApiAnalyzeRequest(BaseModel):
@@ -538,6 +539,109 @@ def _single_api_plan_to_steps(plan: Dict[str, Any]) -> List[Dict]:
     return steps
 
 
+def _parse_playwright_code_to_steps(
+    code: str, plan_fallback: Optional[Dict[str, Any]] = None
+) -> List[Dict]:
+    """
+    从生成的 Playwright 代码中解析出用例步骤，使「执行」与「代码里的用例」一致。
+    解析 path/method 与每个 test 的 request 选项；若某条解析不到 data 则用 plan_fallback 中对应用例补全。
+    """
+    if not code or not isinstance(code, str):
+        return []
+    code = code.strip()
+    # 1) 解析 API_PATH、BASE_URL（可选）
+    api_path = ""
+    for m in re.finditer(r"(?:const|let)\s+API_PATH\s*=\s*['\"]([^'\"]+)['\"]", code):
+        api_path = m.group(1).strip()
+        break
+    if not api_path:
+        for m in re.finditer(r"request\.(post|get)\s*\(\s*['\"]([^'\"]+)['\"]", code):
+            first_arg = m.group(2).strip()
+            if first_arg.startswith("http"):
+                api_path = re.sub(r"^https?://[^/]+", "", first_arg) or "/"
+            else:
+                api_path = first_arg if first_arg.startswith("/") else "/" + first_arg
+            break
+    if not api_path:
+        for m in re.finditer(r"request\.(post|get)\s*\(\s*`([^`]+)`", code):
+            # 模板字符串可能含 ${BASE_URL}${API_PATH}
+            tpl = m.group(2)
+            if "API_PATH" in tpl:
+                for m2 in re.finditer(r"(?:const|let)\s+API_PATH\s*=\s*['\"]([^'\"]+)['\"]", code):
+                    api_path = m2.group(1).strip()
+                    break
+            break
+    if not api_path:
+        api_path = "/"
+    # 2) 找出所有 request.(post|get)( ... , { ... }) 的第二个参数（选项对象）
+    method = "POST"
+    steps = []
+    # 按 test( 切分，每个块里找 request.post/get
+    blocks = re.split(r"\btest\s*\([\s\S]*?async\s*\([^)]*\)\s*=>\s*\{", code)
+    for bi, block in enumerate(blocks):
+        if bi == 0:
+            continue
+        # 在块内找 request.(post|get)( ... , { ... })
+        mo = re.search(r"request\.(post|get)\s*\(\s*[^,]+,?\s*\{", block)
+        if not mo:
+            continue
+        method = mo.group(1).upper()
+        start = mo.start()
+        brace_start = block.index("{", start)
+        depth = 1
+        i = brace_start + 1
+        while i < len(block) and depth > 0:
+            if block[i] == "{":
+                depth += 1
+            elif block[i] == "}":
+                depth -= 1
+            i += 1
+        opts_str = block[brace_start:i]
+        params = {}
+        headers = {}
+        # 从 opts_str 中提取 data: { ... } 和 headers: { ... }
+        data_m = re.search(r"data\s*:\s*(\{(?:[^{}]|\{[^{}]*\})*\})", opts_str)
+        if data_m:
+            try:
+                js = data_m.group(1).replace("'", '"')
+                params = json.loads(js)
+            except Exception:
+                pass
+        if not params and "data" in opts_str and plan_fallback:
+            # 代码里是 data: variable（如 defaultBody），用 plan 补全
+            endpoints = plan_fallback.get("endpoints") or []
+            cases = (endpoints[0].get("cases") or []) if endpoints else []
+            if bi - 1 < len(cases):
+                rt = cases[bi - 1].get("request_template") or {}
+                params = rt.get("params") or {}
+        headers_m = re.search(r"headers\s*:\s*(\{(?:[^{}]|\{[^{}]*\})*\})", opts_str)
+        if headers_m:
+            try:
+                js = headers_m.group(1).replace("'", '"')
+                headers = json.loads(js)
+            except Exception:
+                pass
+        # 若未解析到 params，用 plan_fallback 中同索引用例补全
+        if not params and plan_fallback:
+            endpoints = plan_fallback.get("endpoints") or []
+            cases = (endpoints[0].get("cases") or []) if endpoints else []
+            if bi - 1 < len(cases):
+                rt = cases[bi - 1].get("request_template") or {}
+                params = rt.get("params") or {}
+                headers = headers or rt.get("headers") or {}
+        steps.append({
+            "step_order": len(steps) + 1,
+            "api_path": api_path,
+            "api_method": method,
+            "params": params,
+            "url_params": {},
+            "headers": headers,
+            "param_mappings": [],
+            "base_url": "",
+        })
+    return steps
+
+
 @app.post("/api/v1/single-api/execute")
 async def single_api_execute(req: SingleApiExecuteRequest):
     """阶段4：执行 — 根据计划或步骤列表执行，返回 suite 结果（供阶段5 分析）"""
@@ -555,17 +659,77 @@ async def single_api_execute(req: SingleApiExecuteRequest):
             conn.close()
             base_url = (row["base_url"] or "").strip() if row else ""
         if not base_url:
-            raise HTTPException(status_code=400, detail="请配置 base_url 或项目环境")
+            raise HTTPException(
+                status_code=400,
+                detail="请配置接口基础地址：在「再次执行并分析」旁的输入框填写 base_url（如 https://api.example.com），或在项目环境中配置 base_url。",
+            )
 
         if req.steps:
             steps = req.steps
+        elif (req.generated_code or "").strip():
+            # 优先从「生成的代码」解析用例，使执行与代码里的用例一致；解析不到时用 plan 补全
+            steps = _parse_playwright_code_to_steps(req.generated_code.strip(), req.plan)
+            if not steps and req.plan:
+                steps = _single_api_plan_to_steps(req.plan)
         elif req.plan:
+            # Debug: 写日志文件
+            try:
+                eps = req.plan.get("endpoints") or []
+                log_msg = f"EXECUTE DEBUG: endpoints_count={len(eps)}"
+                if eps:
+                    c = eps[0].get("cases") or []
+                    log_msg += f", case_count={len(c)}"
+                    if c:
+                        log_msg += f", first_case_keys={list(c[0].keys())}"
+                
+                with open("pipeline_debug.log", "a", encoding="utf-8") as f:
+                    f.write(f"[{datetime.now()}] {log_msg}\n")
+            except Exception as e:
+                print(f"DEBUG: log error {e}")
+
             steps = _single_api_plan_to_steps(req.plan)
+            # 若计划中用例为空（如旧数据或持久化丢失），尝试从 ApiPlanner / ai_generate_cases 补全后再执行
+            if not steps and req.plan:
+                endpoints = req.plan.get("endpoints") or []
+                if endpoints:
+                    ep = endpoints[0]
+                    path = ep.get("path") or ""
+                    method = (ep.get("method") or "GET").upper()
+                    plan_full = api_planner.generate_plan(project_id=req.project_id)
+                    for e in plan_full.get("endpoints") or []:
+                        if (e.get("path") == path and
+                                (e.get("method") or "GET").upper() == method):
+                            ep["cases"] = e.get("cases") or []
+                            break
+                    if not ep.get("cases"):
+                        try:
+                            cases = await ai_generate_cases_for_endpoint(
+                                ai_client,
+                                {
+                                    "path": path,
+                                    "method": method,
+                                    "summary": ep.get("summary"),
+                                    "description": ep.get("description"),
+                                    "parameters": ep.get("parameters"),
+                                    "request_body": ep.get("request_body"),
+                                },
+                                include_types=["positive", "boundary", "robustness", "security"],
+                            )
+                            ep["cases"] = cases
+                        except Exception as _e:
+                            print(f"DEBUG: ai_generate_cases fallback failed: {_e}")
+                    steps = _single_api_plan_to_steps(req.plan)
         else:
             raise HTTPException(status_code=400, detail="请提供 plan 或 steps")
 
         if not steps:
-            raise HTTPException(status_code=400, detail="计划中无可用用例")
+            with open("pipeline_debug.log", "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.now()}] EXECUTE ERROR: Steps empty after conversion!\n")
+            print("DEBUG: Steps are empty after conversion!")
+            raise HTTPException(
+                status_code=400,
+                detail="计划中无可用用例（endpoints[0].cases 为空）。请重新在「AI生成」中生成该接口用例后再执行。",
+            )
 
         start_ts = datetime.now()
         step_results = await _run_steps(steps, base_url)
@@ -576,7 +740,7 @@ async def single_api_execute(req: SingleApiExecuteRequest):
         case_results = []
         for i, s in enumerate(step_results):
             case_results.append({
-                "case_id": f"TC{i+1:02d}",
+                "case_id": f"TC{i+1:03d}",  # 与生成代码中的 TC001/TC002 格式一致
                 "status": "passed" if s.get("success") else "failed",
                 "duration_ms": int((s.get("duration") or 0) * 1000),
             })
@@ -1120,6 +1284,55 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                 step_data["error"] = f"{type(e).__name__}: {str(e)}"
                 step_results.append(step_data)
     return step_results
+
+
+@app.get("/api/v1/executions")
+async def list_executions(
+    project_id: str = "default-project",
+    test_case_id: Optional[int] = None,
+    limit: int = 10
+):
+    """获取执行历史记录"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        query = "SELECT * FROM executions WHERE 1=1"
+        params = []
+        
+        if project_id and project_id != "default-project":
+            # 尝试通过 test_case_id 关联项目，或者如果 executions 表有 project_id 则直接过滤
+            # 这里的数据库结构可能不一，但我们优先尝试 project_id 过滤
+            query += " AND (project_id = ? OR test_case_id IN (SELECT id FROM test_cases WHERE project_id = ?))"
+            params.extend([project_id, project_id])
+
+        if test_case_id:
+            query += " AND test_case_id = ?"
+            params.append(test_case_id)
+        
+        # executions 表目前可能没有 project_id 列，我们在 init 已经加了迁移
+        # 如果是老数据 test_case_id 为 0 的，可能无法按 project_id 过滤
+        # 但我们尽量尝试
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+        
+        results = []
+        for r in rows:
+            results.append({
+                "id": r["id"],
+                "test_case_id": r["test_case_id"],
+                "status": r["status"],
+                "results": json.loads(r["results"] or "[]"),
+                "created_at": r["created_at"]
+            })
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/v1/executions")

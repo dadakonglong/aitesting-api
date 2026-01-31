@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { Sparkles, TestTube, Target, Clock, ClipboardList } from 'lucide-react'
 import AIGenerationTab from './components/AIGenerationTab'
@@ -56,17 +56,27 @@ export default function TestingCenterPage() {
     const [singleApiResults, setSingleApiResults] = useState<SingleApiCaseItem[]>([])
     const [selectedSingleApiId, setSelectedSingleApiId] = useState<string | null>(null)
 
+    // 记录当前是否已加载完当前项目的数据，防止初始空状态覆盖 localStorage
+    const [isLoaded, setIsLoaded] = useState(false)
+    const [lastProject, setLastProject] = useState<string | null>(null)
+
     // 按项目从 localStorage 恢复
     useEffect(() => {
+        setIsLoaded(false)
         const saved = loadSingleApiResultsFromStorage(currentProject)
         setSingleApiResults(saved)
         setSelectedSingleApiId(saved.length > 0 ? saved[0].id : null)
+        setLastProject(currentProject)
+        setIsLoaded(true)
     }, [currentProject])
 
-    // 列表变化后写回 localStorage（含空列表，以便删除全部后刷新仍为空）
+    // 列表变化后写回 localStorage
     useEffect(() => {
-        saveSingleApiResultsToStorage(currentProject, singleApiResults)
-    }, [currentProject, singleApiResults])
+        // 只有当数据已加载，且确实属于当前项目时，才允许写入
+        if (isLoaded && lastProject === currentProject) {
+            saveSingleApiResultsToStorage(currentProject, singleApiResults)
+        }
+    }, [currentProject, singleApiResults, isLoaded, lastProject])
 
     // 生成新的单接口测试时仅追加到列表，不覆盖、不删除之前的记录（会通过 useEffect 持久化）
     const addSingleApiResult = useCallback((data: any) => {

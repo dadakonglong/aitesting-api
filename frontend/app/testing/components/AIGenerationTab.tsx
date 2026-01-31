@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Sparkles, Loader2, CheckCircle2, ArrowRight, Target } from 'lucide-react'
 import Link from 'next/link'
 import { useProject } from '../../contexts/ProjectContext'
@@ -19,6 +19,26 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
     const [singleApiInput, setSingleApiInput] = useState('')
     const [loading, setLoading] = useState(false)
     const [result, setResult] = useState<any>(null)
+
+    // WIP 状态持久化：防止切 Tab 丢失输入
+    useEffect(() => {
+        const key = `wip-ai-gen-${currentProject}`
+        const saved = localStorage.getItem(key)
+        if (saved) {
+            try {
+                const { scenario: s, singleApiInput: sai, mode: m } = JSON.parse(saved)
+                if (s) setScenario(s)
+                if (sai) setSingleApiInput(sai)
+                if (m) setMode(m)
+            } catch (e) { /* ignore */ }
+        }
+    }, [currentProject])
+
+    useEffect(() => {
+        const key = `wip-ai-gen-${currentProject}`
+        const data = JSON.stringify({ scenario, singleApiInput, mode })
+        localStorage.setItem(key, data)
+    }, [currentProject, scenario, singleApiInput, mode])
 
     const handleGenerate = async () => {
         if (mode === 'scenario') {

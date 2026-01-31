@@ -11,7 +11,12 @@ AI 接口测试用例生成器 - 基于大模型分析接口定义，生成真�
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Dict, List, Optional
+from datetime import datetime
+
+# 保证日志文件写在当前文件同级目录
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_gen_debug.log")
 
 
 # 系统提示：约束大模型输出结构与测试领域规则
@@ -32,22 +37,27 @@ SYSTEM_PROMPT = """你是专业的接口测试专家，负责根据接口定义�
       },
       "expected_template": {
         "status_code": 200,
-        "description": "期望结果说明"
+        "description": "期望结果说明：请在此包含对返回包体 (Response Body) 的断言要求（如必须包含 token 字段）"
       }
     }
   ]
 }
 
 ## 规则
-1. **params**：请求体（POST/PUT 等 Body），对象；GET 无 body 则 {}。
-2. **url_params**：Query 参数，对象；无则 {}。
-3. **headers**：必须包含 Content-Type: application/json（当有 body 时）；鉴权类接口可含 Authorization。
-4. **正向用例**：使用符合业务语义的真实数据（如真实格式手机号、合理长度字符串、合理数字），预期 200/201。
-5. **边界用例**：必须与“边界”相关：空字符串、最大/最小长度、0、负数、最大整数、超长字符串、特殊字符等，并说明预期（200 或 4xx）。
-6. **健壮用例**：必须与“异常/健壮”相关：缺必填参数、类型错误（如数字字段传字符串）、非法枚举、格式错误等，预期 400/422。
-7. **安全用例**：无 Authorization、或 Bearer 错误/过期 token，预期 401/403。
-8. 每个用例的 request_template 必须与 case_type 和 name 一致，不要生成“名字是边界但请求与正向完全一样”的用例。
-9. 只输出 JSON，不要 markdown 代码块包裹。"""
+
+1. **业务真实性**：正向用例必须使用符合业务语义的真实数据（如符合正则的对象 ID、手机号、枚举值等）。
+2. **安全测试差异化**：
+    - **无鉴权**：`headers` 中必须不包含 `Authorization` 或为空。
+    - **错鉴权**：`headers` 中必须包含无效的 `Authorization`（如 `Bearer INVALID`）。
+    - **注意**：登录接口通常不需要 Authorization，请根据接口用途智能判断。
+3. **断言丰富化**：在 `expected_template.description` 中，明确要求对 Response Body 的关键字段进行校验。
+4. **覆盖度**：一次性生成 6 条以上用例，覆盖正向、边界、健壮和安全场景。
+5. **参数模板**：
+    - `params`：请求体（POST/PUT 等 Body），对象。
+    - `url_params`：Query 参数，对象。
+    - `headers`：确保包含必要的 `Content-Type`（若有 body）以及该用例特有的认证信息。
+
+只输出 JSON，不要 markdown 代码块包裹。"""
 
 
 USER_PROMPT_TEMPLATE = """请为以下接口生成测试用例，需包含类型：{case_types}。
@@ -59,8 +69,9 @@ USER_PROMPT_TEMPLATE = """请为以下接口生成测试用例，需包含类型
 - 描述: {description}
 - 参数(OpenAPI parameters): {parameters}
 - 请求体(OpenAPI requestBody): {request_body}
+- 请求头(OpenAPI headers): {headers}
 
-请为每种请求类型生成至少 1 条**真实**用例（请求体/参数要与类型匹配），直接返回上述格式的 JSON。"""
+请为每种请求类型生成至少 1 条**真实**用例（请求体/参数/请求头要与定义匹配），直接返回上述格式的 JSON。"""
 
 
 async def generate_cases_for_endpoint(
@@ -93,6 +104,7 @@ async def generate_cases_for_endpoint(
 
     parameters_str = json.dumps(parameters, ensure_ascii=False, indent=2)
     request_body_str = json.dumps(request_body, ensure_ascii=False, indent=2)
+    headers_str = json.dumps(endpoint.get("headers") or {}, ensure_ascii=False, indent=2)
 
     user_prompt = USER_PROMPT_TEMPLATE.format(
         case_types=case_types_str,
@@ -102,11 +114,25 @@ async def generate_cases_for_endpoint(
         description=description or "(无)",
         parameters=parameters_str,
         request_body=request_body_str,
+        headers=headers_str,
     )
 
     try:
         result = await ai_client.chat(SYSTEM_PROMPT, user_prompt)
+        # 写日志文件
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"\n\n=== {datetime.now()} ===\n")
+            f.write(f"PROMPT:\n{user_prompt}\n")
+            f.write(f"RESULT:\n{json.dumps(result, ensure_ascii=False)}\n")
+            
+        print(f"DEBUG: AI case generator response: {json.dumps(result, ensure_ascii=False)[:200]}...")
     except Exception as e:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"\n\n=== {datetime.now()} [ERROR] ===\n")
+            f.write(f"PROMPT:\n{user_prompt}\n")
+            f.write(f"EXCEPTION:\n{str(e)}\n")
+        print(f"DEBUG: AI case generator exception: {e}")
+        raise RuntimeError(f"大模型调用失败: {e}") from e
         raise RuntimeError(f"大模型调用失败: {e}") from e
 
     if not isinstance(result, dict):

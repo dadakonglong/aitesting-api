@@ -12,8 +12,22 @@ from __future__ import annotations
 
 import json
 import re
+import math
 import sqlite3
-from typing import Any, Dict, List, Optional, Tuple
+import os
+from datetime import datetime
+from typing import List, Dict, Any, Tuple, Optional
+
+# 保证日志文件写在当前文件同级目录 (services/ai-processing/services/...)
+# 注意：single_api_pipeline.py 在 services/ai-processing/services/ 下
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pipeline_debug.log")
+
+def _log(msg: str):
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now()}] {msg}\n")
+    except Exception:
+        pass
 
 from .api_planner import ApiPlanner
 from .ai_case_generator import generate_cases_for_endpoint as ai_generate_cases
@@ -76,45 +90,22 @@ GENERATOR_SYSTEM_PROMPT = """你是 pytest 测试代码生成专家。
 # Playwright 接口测试代码生成：Generator Agent 解析测试计划 + 用例列表，输出 Playwright 文件
 GENERATOR_PLAYWRIGHT_SYSTEM_PROMPT = """你是 Playwright 接口测试代码生成专家。你的任务是根据「测试计划」和「接口用例列表」生成可直接运行的 Playwright 接口测试文件。
 
+## 代码生成的质量要求（非常重要）
+
+1. **严格区分 Headers**：如果用例列表中包含了 `headers`（尤其是安全测试中的 Authorization），**必须**在 `request` 调用中显式配置它们。不要忽略 headers 差异。
+2. **增强断言逻辑**：不要只检查 `status().toBe(200)`。
+    - **正向用例**：必须先解析 JSON (`const body = await response.json()`)，然后检查关键业务字段（如 `expect(body).toHaveProperty('token')`）。
+    - **异常用例**：检查返回的错误消息 `message` 或 `code`。
+3. **理解业务逻辑**：登录接口通常不需要 Authorization，资源操作通常需要。
+4. **代码风格**：使用 TypeScript，代码整洁。
+
 ## 输出格式（必须严格遵循）
 
-- 使用 @playwright/test，仅生成一个 TypeScript/JavaScript 测试文件。
+- 仅输出一个完整的 TypeScript 测试文件代码。
 - 必须包含：import { test, expect } from '@playwright/test';
-- 使用 test.describe('接口名称测试', () => { ... }) 包裹整组用例。
-- 每个用例格式：test('TC001: 用例名称', async ({ request }) => { ... });
-- 用例编号连续：TC001, TC002, TC003...
-- 请求使用 request.post(path, { data: body }) 或 request.get(path, { params })。
-- 断言使用 expect(response.status()).toBe(200) 等；若需解析 JSON：const body = await response.json(); expect(body).toHaveProperty('token');
-- 不要使用 baseURL 拼接，path 使用完整路径如 '/api/v1/auth/login'（与接口定义一致）。
-
-## 示例结构
-
-import { test, expect } from '@playwright/test';
-
-test.describe('登录接口测试', () => {
-  test('TC001: 正常登录流程', async ({ request }) => {
-    const response = await request.post('/api/v1/auth/login', {
-      data: { username: 'testuser', password: 'Test@123' }
-    });
-    expect(response.status()).toBe(200);
-    const body = await response.json();
-    expect(body).toHaveProperty('token');
-  });
-
-  test('TC002: 错误的用户名', async ({ request }) => {
-    const response = await request.post('/api/v1/auth/login', {
-      data: { username: 'wronguser', password: 'Test@123' }
-    });
-    expect(response.status()).toBe(401);
-  });
-});
-
-## 规则（必须严格遵守）
-
-1. **用例列表是权威输入**：生成的 test() 必须与「用例列表」一一对应，数量、顺序、用例名、请求数据、预期状态码均不得偏离。每条用例对应且仅对应一个 test('TC001: 用例名', ...)、TC002、TC003…，不得遗漏、不得自行增加或合并用例。
-2. **请求数据**：每个 test 的请求体（data）和 query 参数（params）必须与用例列表中该条的 request_template.params、request_template.url_params 完全一致。
-3. **预期断言**：每个 test 必须包含 expect(response.status()).toBe(该用例的 expected_template.status_code)。
-4. 只输出一个完整的测试文件代码，不要解释。若返回 JSON，则必须包含键 "code"，值为上述完整代码字符串。不要用 markdown 代码块包裹 JSON。"""
+- 使用 test.describe() 包裹。
+- 每个用例对应一个 test()。
+- 不要解释，直接输出代码。"""
 
 EXECUTOR_SYSTEM_PROMPT = """你是测试执行专家。
 你的任务是执行 pytest 测试并收集结果。
@@ -253,10 +244,12 @@ def rag_query_data(
     - bypass: 直接查询（返回项目下全部接口，便于未命中时仍能选到）
     """
     all_apis = _load_apis_from_db(db_path, project_id, limit=None)
+    _log(f"RAG: project_id={project_id}, query={query}, all_apis_count={len(all_apis)}")
     if not all_apis:
         return []
 
     keywords = _extract_keywords_enhanced(query)
+    _log(f"RAG: keywords={keywords}")
     # 用于拼接检索的 API 文本（path/summary/description/method）
     def api_text(api: Dict[str, Any]) -> str:
         return " ".join(
@@ -392,7 +385,7 @@ async def requirement_understanding(
 
     # 2) 调用 RAG 检索 Agent：让大模型根据检索结果做结构化理解
     retrieval_context = json.dumps(
-        [{"path": a["path"], "method": a["method"], "summary": a.get("summary"), "description": a.get("description"), "parameters": a.get("parameters"), "request_body": a.get("request_body")} for a in api_candidates],
+        [{"path": a["path"], "method": a["method"], "summary": a.get("summary"), "description": a.get("description"), "parameters": a.get("parameters"), "request_body": a.get("request_body"), "headers": a.get("headers")} for a in api_candidates],
         ensure_ascii=False,
         indent=2,
     )
@@ -435,6 +428,7 @@ async def generate_test_plan_md(
     同时用 ApiPlanner + ai_generate_cases 生成可执行用例列表（供阶段 4 执行）。
     """
     api_candidates = structured_info.get("api_candidates") or []
+    _log(f"Plan: api_candidates count={len(api_candidates)}")
     entities = structured_info.get("entities") or []
     chunks = structured_info.get("chunks") or []
     intent = structured_info.get("intent") or ""
@@ -455,59 +449,43 @@ async def generate_test_plan_md(
     if not plan_md:
         plan_md = json.dumps(out or {}, ensure_ascii=False, indent=2)
 
-    # 生成可执行用例列表（供阶段 4 执行 + 阶段 3 代码生成）：优先用 ApiPlanner，不足时用 ai_generate_cases 补全
+    # --- 改进：直接使用 AI 生成高质量用例，不再使用 ApiPlanner 的规则骨架（它会生成前 3 个重复用例） ---
     target_api = api_candidates[0]
     target_path = target_api.get("path")
     target_method = (target_api.get("method") or "GET").upper()
-    plan = api_planner.generate_plan(project_id=project_id)
-    endpoints = plan.get("endpoints") or []
-    target_ep = None
-    for ep in endpoints:
-        if ep.get("path") == target_path and (ep.get("method") or "GET").upper() == target_method:
-            target_ep = ep
-            break
-    if not target_ep:
-        target_ep = {
-            "id": target_api.get("id"),
-            "path": target_path,
-            "method": target_method,
-            "summary": target_api.get("summary"),
-            "description": target_api.get("description"),
-            "base_url": target_api.get("base_url"),
-            "cases": [],
-        }
-    # 若用例为空或过少（ApiPlanner 可能因无 schema 返回少于 6 条），调用 ai_generate_cases 补全，保证代码生成有完整用例列表
-    existing_cases = target_ep.get("cases") or []
-    print(f"DEBUG: Initial existing_cases count: {len(existing_cases)}")
-    if len(existing_cases) < 6:
-        # 计算已有的类型，尽量补充缺失的
-        existing_types = {c.get("case_type") for c in existing_cases if c.get("case_type")}
-        needed_types = ["positive", "boundary", "robustness", "security"]
-        print(f"DEBUG: Triggering AI supplementation. Existing types: {existing_types}")
-        
-        cases = await ai_generate_cases(
-            ai_client,
-            {
-                "path": target_ep.get("path") or target_path,
-                "method": target_ep.get("method") or target_method,
-                "summary": target_ep.get("summary") or target_api.get("summary"),
-                "description": target_ep.get("description") or target_api.get("description"),
-                "parameters": target_ep.get("parameters") or target_api.get("parameters"),
-                "request_body": target_ep.get("request_body") or target_api.get("request_body"),
-            },
-            include_types=needed_types,
-        )
-        print(f"DEBUG: AI returned {len(cases)} cases")
-        # 合并用例，避免通过名称完全重复（简单去重）
-        existing_names = {c.get("name") for c in existing_cases}
-        added_count = 0
-        for c in cases:
-            if c.get("name") not in existing_names:
-                existing_cases.append(c)
-                added_count += 1
-        print(f"DEBUG: Added {added_count} unique cases. Final count: {len(existing_cases)}")
-        
-        target_ep["cases"] = existing_cases
+    
+    target_ep = {
+        "id": target_api.get("id"),
+        "path": target_path,
+        "method": target_method,
+        "summary": target_api.get("summary"),
+        "description": target_api.get("description"),
+        "base_url": target_api.get("base_url"),
+        "parameters": target_api.get("parameters"),
+        "request_body": target_api.get("request_body"),
+        "headers": target_api.get("headers"),
+        "cases": [],
+    }
+    
+    # 强制让 AI 至少生成 6 条覆盖各类场景（正向、边界、健壮、安全）的用例
+    needed_types = ["positive", "boundary", "robustness", "security"]
+    print(f"DEBUG: Generating AI cases for single API. Types: {needed_types}")
+    
+    all_ai_cases = await ai_generate_cases(
+        ai_client,
+        {
+            "path": target_ep.get("path") or target_path,
+            "method": target_ep.get("method") or target_method,
+            "summary": target_ep.get("summary") or target_api.get("summary"),
+            "description": target_ep.get("description") or target_api.get("description"),
+            "parameters": target_ep.get("parameters") or target_api.get("parameters"),
+            "request_body": target_ep.get("request_body") or target_api.get("request_body"),
+            "headers": target_ep.get("headers") or target_api.get("headers"),
+        },
+        include_types=needed_types,
+    )
+    print(f"DEBUG: AI generated {len(all_ai_cases)} cases")
+    target_ep["cases"] = all_ai_cases
 
     return plan_md, {"endpoints": [target_ep], "markdown": plan_md, "target_api": target_api}
 
@@ -564,16 +542,19 @@ def _extract_code_from_raw(raw: str) -> str:
                 return code
     # 3. Playwright：```typescript / ```javascript 或含 test.describe / request.post
     for pattern in (
-        r"```(?:typescript|ts|javascript|js)\s*\n([\s\S]*?)```",
-        r"```\s*\n([\s\S]*?)```",
+        r"```(?:typescript|ts|javascript|js|typescript|javascript)?\s*([\s\S]*?)```",
+        r"```\s*([\s\S]*?)```",
     ):
         m = re.search(pattern, raw)
         if m:
             code = m.group(1).strip()
-            if len(code) > 50 and (
+            if len(code) > 40 and (
                 "test.describe" in code or "test(" in code
-            ) and ("request.post" in code or "request.get" in code or "request." in code) and "expect(" in code:
+            ) and ("request." in code or "expect(" in code):
                 return code
+    # 4. 兜底：如果没用代码块，但看起来像 Playwright 代码
+    if "import { test, expect } from" in raw and "test.describe" in raw:
+        return raw.strip()
     return ""
 
 
@@ -590,22 +571,27 @@ def _build_playwright_user_prompt(plan_markdown: str, endpoint: Dict[str, Any]) 
         exp = c.get("expected_template") or {}
         body = req.get("params") or {}   # POST/PUT 请求体
         query = req.get("url_params") or {}  # GET query 或 URL 参数
+        headers = req.get("headers") or {} # 包含鉴权等
         status = exp.get("status_code", 200)
         cases_text += f"""
 【用例 {i+1}】TC{i+1:03d}: {name}
   - 请求体 data (body): {json.dumps(body, ensure_ascii=False)}
   - URL 参数 params (query): {json.dumps(query, ensure_ascii=False)}
+  - 请求头 headers: {json.dumps(headers, ensure_ascii=False)}
   - 预期状态码: {status}
 """
     cases_count = len(cases)
     if not cases_text:
-        cases_text = "\n（当前无预生成用例列表，请根据下方测试计划与接口定义自行设计至少 2 条用例：一条正向、一条异常/边界，并逐条生成对应的 test。）"
+        cases_text = "\n（当前无预生成用例列表，请根据下方测试计划与接口定义自行设计至少 6 条用例：涵盖正向、边界、健壮、安全，并逐条生成对应的 test。）"
         cases_count = 0
     count_instruction = f"本列表共 {cases_count} 条用例，你必须生成恰好 {cases_count} 个 test()，一个不能少、不能多。" if cases_count else "请至少生成 2 个 test()。"
     return f"""## 接口定义（当前接口）
 - path: {path}
 - method: {method}
 - summary: {summary}
+- parameters: {json.dumps(endpoint.get("parameters") or [], ensure_ascii=False)}
+- request_body: {json.dumps(endpoint.get("request_body") or {}, ensure_ascii=False)}
+- headers: {json.dumps(endpoint.get("headers") or {}, ensure_ascii=False)}
 
 ## 用例列表（权威输入：必须按此逐条生成，每条对应一个 test，不得遗漏或自行增加）
 {cases_text}
@@ -624,44 +610,28 @@ async def generate_playwright_code_from_plan(
     plan_payload: Dict[str, Any],
 ) -> str:
     """
-    阶段 3（Playwright）：Generator Agent 解析测试计划 + 调用用例列表，AI Prompt 编排生成 Playwright 测试文件。
-    必须输出：import { test, expect } from '@playwright/test'; test.describe(...); test('TC001:...', async ({ request }) => {...});
+    阶段 3（Playwright）：直接使用 chat_raw 获取代码，更稳定。
     """
     endpoints = plan_payload.get("endpoints") or []
     endpoint = endpoints[0] if endpoints else {}
     user_prompt = _build_playwright_user_prompt(plan_markdown, endpoint)
     code = ""
-    # 1) 先按 JSON 调用（期望 {"code": "..."}）
+    
     try:
-        result = await ai_client.chat(GENERATOR_PLAYWRIGHT_SYSTEM_PROMPT, user_prompt)
-        if isinstance(result, dict):
-            code = (
-                result.get("code")
-                or result.get("content")
-                or result.get("test_code")
-                or result.get("playwright_code")
-                or ""
-            )
-            if not code:
-                for v in result.values():
-                    if isinstance(v, str) and len(v) > 80 and ("test.describe" in v or "test(" in v) and "request." in v:
-                        code = v
-                        break
-        if code and "```" in code:
-            m = re.search(r"```(?:typescript|javascript|ts|js)?\s*([\s\S]*?)```", code)
-            if m:
-                code = m.group(1).strip()
-    except Exception:
-        pass
-    # 2) 若仍无代码，用原始响应再解析
-    if not code or len(code) < 100:
-        try:
-            chat_raw = getattr(ai_client, "chat_raw", None)
-            if callable(chat_raw):
-                raw = await chat_raw(GENERATOR_PLAYWRIGHT_SYSTEM_PROMPT, user_prompt)
-                code = _extract_code_from_raw(raw)
-        except Exception:
-            pass
+        # 直接使用 chat_raw 生成代码文本
+        raw = await ai_client.chat_raw(GENERATOR_PLAYWRIGHT_SYSTEM_PROMPT, user_prompt)
+        if not raw:
+            return ""
+        # 尝试提取
+        code = _extract_code_from_raw(raw)
+        if code:
+            return code
+        # 如果没匹配到，但看起来像代码，直接返回
+        if "import { test, expect }" in raw and "test(" in raw:
+            return raw.strip()
+    except Exception as e:
+        print(f"DEBUG: generate playwright code failed: {e}")
+    
     if not code or len(code) < 50:
         # 兜底：至少给出 Playwright 骨架，便于用户在此基础上修改
         path = endpoint.get("path") or "/api/example"

@@ -45,12 +45,38 @@ export default function TestScenariosTab() {
     const [newEnvUrl, setNewEnvUrl] = useState('')
 
     useEffect(() => {
-        fetchScenarios()
+        const init = async () => {
+            const scenarioData = await fetchScenarios()
+            if (scenarioData) {
+                fetchHistory(currentProject, scenarioData)
+            }
+        }
+        init()
     }, [currentProject])
 
     useEffect(() => {
         fetchEnvironments(currentProject)
     }, [currentProject])
+
+
+    const fetchHistory = async (projectId: string, scenarioData: any[]) => {
+        try {
+            const response = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/executions?project_id=${projectId}&limit=50`)
+            if (response.ok) {
+                const history = await response.json()
+                const resultsMap: Record<number, any> = {}
+                history.forEach((exec: any) => {
+                    const scenario = scenarioData.find(s => String(s.test_case_id) === String(exec.test_case_id))
+                    if (scenario && !resultsMap[scenario.id]) {
+                        resultsMap[scenario.id] = exec
+                    }
+                })
+                setExecutionResults(prev => ({ ...prev, ...resultsMap }))
+            }
+        } catch (error) {
+            console.error('获取执行历史失败:', error)
+        }
+    }
 
 
 
@@ -61,12 +87,14 @@ export default function TestScenariosTab() {
             if (response.ok) {
                 const data = await response.json()
                 setScenarios(data)
+                return data
             }
         } catch (error) {
             console.error('获取场景列表失败:', error)
         } finally {
             setLoading(false)
         }
+        return null
     }
 
     const fetchEnvironments = async (projectId: string) => {

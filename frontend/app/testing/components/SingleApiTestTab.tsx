@@ -39,6 +39,8 @@ export default function SingleApiTestTab({
     const { currentProject } = useProject()
     const [execLoading, setExecLoading] = useState(false)
     const [expanded, setExpanded] = useState<string | null>('phase1')
+    /** 执行时使用的接口基础地址（可选，不填则使用项目环境配置） */
+    const [execBaseUrl, setExecBaseUrl] = useState('')
 
     const selected = items.find((it) => it.id === selectedId)
     const result = selected?.data
@@ -55,9 +57,10 @@ export default function SingleApiTestTab({
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     project_id: currentProject,
-                    base_url: '',
+                    base_url: execBaseUrl.trim(),
                     environment: 'test',
                     plan: result.phase2_plan,
+                    generated_code: result.phase3_code || undefined,
                 }),
             })
             if (!execRes.ok) {
@@ -259,34 +262,54 @@ export default function SingleApiTestTab({
                                     {selected.name}
                                 </h2>
                             </div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                                 {result?.phase2_plan?.endpoints?.length > 0 && (
-                                    <button
-                                        type="button"
-                                        onClick={handleExecuteAndAnalyze}
-                                        disabled={execLoading}
-                                        style={{
-                                            padding: '0.5rem 1rem',
-                                            background: execLoading
-                                                ? '#9CA3AF'
-                                                : 'linear-gradient(to right, #10B981, #059669)',
-                                            color: 'white',
-                                            fontWeight: '600',
-                                            borderRadius: '0.5rem',
-                                            border: 'none',
-                                            cursor: execLoading ? 'not-allowed' : 'pointer',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '0.5rem',
-                                        }}
-                                    >
-                                        {execLoading ? (
-                                            <Loader2 className="animate-spin" size={18} />
-                                        ) : (
-                                            <Play size={18} />
-                                        )}
-                                        {execLoading ? '执行中...' : '再次执行并分析'}
-                                    </button>
+                                    <>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                            <label style={{ fontSize: '0.875rem', color: '#374151', whiteSpace: 'nowrap' }}>
+                                                接口基础地址：
+                                            </label>
+                                            <input
+                                                type="text"
+                                                value={execBaseUrl}
+                                                onChange={(e) => setExecBaseUrl(e.target.value)}
+                                                placeholder="如 https://api.example.com，不填则用项目环境"
+                                                style={{
+                                                    width: '280px',
+                                                    padding: '0.5rem 0.75rem',
+                                                    border: '1px solid #D1D5DB',
+                                                    borderRadius: '0.5rem',
+                                                    fontSize: '0.875rem',
+                                                }}
+                                            />
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={handleExecuteAndAnalyze}
+                                            disabled={execLoading}
+                                            style={{
+                                                padding: '0.5rem 1rem',
+                                                background: execLoading
+                                                    ? '#9CA3AF'
+                                                    : 'linear-gradient(to right, #10B981, #059669)',
+                                                color: 'white',
+                                                fontWeight: '600',
+                                                borderRadius: '0.5rem',
+                                                border: 'none',
+                                                cursor: execLoading ? 'not-allowed' : 'pointer',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: '0.5rem',
+                                            }}
+                                        >
+                                            {execLoading ? (
+                                                <Loader2 className="animate-spin" size={18} />
+                                            ) : (
+                                                <Play size={18} />
+                                            )}
+                                            {execLoading ? '执行中...' : '再次执行并分析'}
+                                        </button>
+                                    </>
                                 )}
                                 <button
                                     type="button"
@@ -409,6 +432,9 @@ export default function SingleApiTestTab({
                                                     {result.phase4_result.failed_cases}，耗时{' '}
                                                     {result.phase4_result.duration_ms} ms
                                                 </p>
+                                                <p style={{ fontSize: '0.8125rem', color: '#6B7280', marginTop: '0.25rem' }}>
+                                                    执行优先按「代码生成」中的用例（解析 Playwright 代码得到），与代码里的 test 数量一致；解析不到时按「测试计划」用例执行。
+                                                </p>
                                                 <pre
                                                     style={{
                                                         marginTop: '0.5rem',
@@ -421,7 +447,7 @@ export default function SingleApiTestTab({
                                             </div>
                                         ) : (
                                             <p style={{ color: '#6B7280' }}>
-                                                未执行（请点击上方「再次执行并分析」或先配置项目 base_url）
+                                                未执行。请在上方填写「接口基础地址」（如 https://api.example.com）后点击「再次执行并分析」，或先在项目环境中配置 base_url。
                                             </p>
                                         )}
                                     </div>
