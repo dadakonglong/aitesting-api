@@ -2,10 +2,9 @@
 
 import { useState } from 'react'
 import { useSearchParams } from 'next/navigation'
-import { FileJson, Upload, ClipboardList } from 'lucide-react'
+import { FileJson, Upload } from 'lucide-react'
 import APIListContent from './APIListContent'
 import DataImportTab from './components/DataImportTab'
-import ApiTestPlanTab from './components/ApiTestPlanTab'
 
 const tabStyle = (active: boolean) => ({
     padding: '0.75rem 0',
@@ -50,16 +49,11 @@ export default function APIManagementPage() {
                         <Upload size={18} />
                         数据导入
                     </button>
-                    <button onClick={() => setActiveTab('plan')} style={tabStyle(activeTab === 'plan')}>
-                        <ClipboardList size={18} />
-                        接口测试计划
-                    </button>
                 </div>
             </div>
 
             {/* Tab内容 */}
             {activeTab === 'import' && <DataImportTab />}
-            {activeTab === 'plan' && <ApiTestPlanTab />}
             {activeTab === 'list' && <APIListContent />}
         </div>
     )

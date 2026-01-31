@@ -2,10 +2,11 @@
 
 import { useState } from 'react'
 import { useSearchParams } from 'next/navigation'
-import { Sparkles, TestTube, Clock } from 'lucide-react'
+import { Sparkles, TestTube, Clock, ClipboardList } from 'lucide-react'
 import AIGenerationTab from './components/AIGenerationTab'
 import TestScenariosTab from './components/TestScenariosTab'
 import ScheduledTasksTab from './components/ScheduledTasksTab'
+import ApiTestPlanTab from '../apis/components/ApiTestPlanTab'
 
 export default function TestingCenterPage() {
     const searchParams = useSearchParams()
@@ -15,6 +16,7 @@ export default function TestingCenterPage() {
     const tabs = [
         { id: 'ai', name: 'AI生成', icon: Sparkles },
         { id: 'scenarios', name: '测试场景', icon: TestTube },
+        { id: 'plan', name: '接口测试计划', icon: ClipboardList },
         { id: 'scheduler', name: '定时任务', icon: Clock }
     ]
 
@@ -72,6 +74,7 @@ export default function TestingCenterPage() {
                 <div style={{ padding: '2rem', background: 'white', borderRadius: '0 0 1rem 1rem', minHeight: '60vh' }}>
                     {activeTab === 'ai' && <AIGenerationTab />}
                     {activeTab === 'scenarios' && <TestScenariosTab />}
+                    {activeTab === 'plan' && <ApiTestPlanTab />}
                     {activeTab === 'scheduler' && <ScheduledTasksTab />}
                 </div>
             </div>
