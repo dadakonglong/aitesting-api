@@ -8,7 +8,7 @@ import { useProject } from '../../contexts/ProjectContext'
 type Mode = 'scenario' | 'single-api'
 
 type Props = {
-    /** 单接口测试生成成功后调用，结果会放到「单接口测试」Tab 并自动切过去 */
+    /** 接口测试生成成功后调用，结果会放到「接口测试」Tab 并自动切过去 */
     onSingleApiGenerated?: (data: any) => void
 }
 
@@ -77,9 +77,9 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
             return
         }
 
-        // 单接口测试：生成后把结果交给「单接口测试」Tab 并切过去
+        // 接口测试：生成后把结果交给「接口测试」Tab 并切过去
         if (!singleApiInput.trim()) {
-            alert('请输入单接口测试描述，例如：为登录接口生成完整测试')
+            alert('请输入接口测试描述，例如：为登录接口生成完整测试')
             return
         }
         setLoading(true)
@@ -153,7 +153,7 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                     }}
                 >
                     <Target size={18} />
-                    单接口测试
+                    接口测试
                 </button>
             </div>
 
@@ -192,7 +192,7 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                     <>
                         <div style={{ marginBottom: '1.5rem' }}>
                             <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', color: '#374151', marginBottom: '0.75rem' }}>
-                                💬 单接口测试描述
+                                💬 接口测试描述
                             </label>
                             <textarea
                                 value={singleApiInput}
@@ -206,9 +206,6 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                                 placeholder="例如：为登录接口生成完整测试&#10;为手机登录接口生成测试用例"
                             />
                         </div>
-                        <p style={{ fontSize: '0.75rem', color: '#6B7280', textAlign: 'center', marginBottom: '1rem' }}>
-                            💡 生成后将自动跳转到「单接口测试」Tab 查看结果并执行、分析
-                        </p>
                     </>
                 )}
 
@@ -233,12 +230,12 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                     {loading ? (
                         <>
                             <Loader2 className="animate-spin mr-2" size={22} />
-                            <span>{mode === 'scenario' ? 'AI正在分析场景...' : 'AI 正在生成单接口测试...'}</span>
+                            <span>{mode === 'scenario' ? 'AI正在分析场景...' : 'AI 正在生成...'}</span>
                         </>
                     ) : (
                         <>
                             <Sparkles className="mr-2" size={22} />
-                            <span>{mode === 'scenario' ? '✨ 一键生成测试用例' : '✨ 生成单接口测试（结果在单接口测试 Tab）'}</span>
+                            <span>{mode === 'scenario' ? '✨ 一键生成测试用例' : '✨ 一键生成'}</span>
                         </>
                     )}
                 </button>
