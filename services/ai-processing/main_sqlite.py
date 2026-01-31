@@ -22,6 +22,15 @@ if _script_dir not in sys.path:
 from services.api_planner import ApiPlanner
 from services.ai_case_generator import generate_cases_for_endpoint as ai_generate_cases_for_endpoint
 from agents.healer import HealerAgent
+from services.single_api_pipeline import (
+    requirement_understanding,
+    generate_test_plan_md,
+    generate_playwright_code,
+    generate_test_code,
+    executor_agent,
+    analyze_suite_result,
+    rag_query_data,
+)
 
 # 加载环境变量
 load_dotenv()
@@ -174,6 +183,28 @@ class AIProvider:
         except Exception as e:
             print(f"❌ AI 调用异常: {str(e)}")
             raise Exception(f"AI 服务不可用: {str(e)}")
+
+    async def chat_raw(self, system_prompt: str, user_prompt: str, provider: str = None) -> str:
+        """返回原始文本（不强制 JSON），用于需从 markdown/代码块中提取内容的场景（如代码生成）"""
+        active_provider = provider or self.default_provider
+        client = self.get_client(active_provider)
+        model = self.deepseek_model if active_provider == "deepseek" else self.openai_model
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3
+            )
+            if not response.choices or not response.choices[0].message:
+                return ""
+            content = getattr(response.choices[0].message, "content", None) or ""
+            return str(content).strip()
+        except Exception as e:
+            print(f"❌ AI chat_raw 异常: {str(e)}")
+            raise
 
 ai_client = AIProvider()
 
@@ -368,6 +399,299 @@ async def delete_scenario(scenario_id: int):
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============= 单接口 AI 测试流水线（五阶段） =============
+
+class SingleApiUnderstandRequest(BaseModel):
+    """阶段1：需求理解"""
+    natural_language_input: str
+    project_id: str = "default-project"
+
+
+class SingleApiPlanRequest(BaseModel):
+    """阶段2：测试计划（可传入阶段1输出或直接 api_id）"""
+    project_id: str = "default-project"
+    structured_info: Optional[Dict[str, Any]] = None  # 阶段1输出
+    api_id: Optional[int] = None  # 或直接指定接口 id
+
+
+class SingleApiGenerateCodeRequest(BaseModel):
+    """阶段3：代码生成（可选 plan_payload 时按用例列表生成 Playwright）"""
+    plan_markdown: str
+    api_info: Dict[str, Any]
+    plan_payload: Optional[Dict[str, Any]] = None
+
+
+class SingleApiExecuteRequest(BaseModel):
+    """阶段4：执行（传入计划中的 endpoints 或 steps）"""
+    project_id: str = "default-project"
+    base_url: str = ""
+    environment: str = "test"
+    plan: Optional[Dict[str, Any]] = None  # 含 endpoints[].cases 的计划
+    steps: Optional[List[Dict[str, Any]]] = None  # 或直接步骤列表
+
+
+class SingleApiAnalyzeRequest(BaseModel):
+    """阶段5：结果分析"""
+    suite_result: Dict[str, Any]  # 阶段4 执行返回的汇总结果
+
+
+class SingleApiFullPipelineRequest(BaseModel):
+    """一键完整流水线"""
+    natural_language_input: str
+    project_id: str = "default-project"
+    base_url: str = ""
+    environment: str = "test"
+    run_execution: bool = True  # 是否执行并分析；False 则只做到代码生成
+
+
+@app.post("/api/v1/single-api/understand")
+async def single_api_understand(req: SingleApiUnderstandRequest):
+    """阶段1：需求理解 — 解析用户意图 + RAG 检索，返回结构化 API 信息"""
+    try:
+        result = await requirement_understanding(
+            ai_client, req.natural_language_input, req.project_id, DB_PATH
+        )
+        return result
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/single-api/plan")
+async def single_api_plan(req: SingleApiPlanRequest):
+    """阶段2：测试计划 — 根据结构化信息或 api_id 生成 Markdown 测试计划"""
+    try:
+        if req.api_id is not None:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, path, method, summary, description, base_url, parameters, request_body, headers FROM apis WHERE id = ? AND project_id = ?",
+                (req.api_id, req.project_id),
+            )
+            row = cursor.fetchone()
+            conn.close()
+            if not row:
+                raise HTTPException(status_code=404, detail="接口不存在")
+            api_candidates = [{
+                "id": row["id"], "path": row["path"], "method": row["method"],
+                "summary": row["summary"], "description": row["description"],
+                "base_url": row["base_url"],
+                "parameters": json.loads(row["parameters"] or "[]"),
+                "request_body": json.loads(row["request_body"] or "{}"),
+                "headers": json.loads(row["headers"] or "{}"),
+            }]
+            structured_info = {"api_candidates": api_candidates, "entities": [], "chunks": []}
+        else:
+            structured_info = req.structured_info or {}
+        plan_md, plan_payload = await generate_test_plan_md(
+            ai_client, structured_info, api_planner, req.project_id
+        )
+        return {"markdown": plan_md, "plan": plan_payload}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/single-api/generate-code")
+async def single_api_generate_code(req: SingleApiGenerateCodeRequest):
+    """阶段3：代码生成 — 根据测试计划与接口信息生成 Playwright 测试文件内容"""
+    try:
+        code = await generate_playwright_code(
+            ai_client, req.plan_markdown, req.api_info, req.plan_payload
+        )
+        return {"code": code, "filename": "api.spec.ts"}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _single_api_plan_to_steps(plan: Dict[str, Any]) -> List[Dict]:
+    """将单接口计划中的 endpoints[0].cases 转为 _run_steps 所需的 steps"""
+    endpoints = plan.get("endpoints") or []
+    if not endpoints:
+        return []
+    ep = endpoints[0]
+    path = ep.get("path") or ""
+    method = (ep.get("method") or "GET").upper()
+    base_url_ep = (ep.get("base_url") or "").strip()
+    steps = []
+    for i, c in enumerate(ep.get("cases") or []):
+        rt = c.get("request_template") or {}
+        steps.append({
+            "step_order": i + 1,
+            "api_path": path,
+            "api_method": method,
+            "params": rt.get("params") or {},
+            "url_params": rt.get("url_params") or {},
+            "headers": rt.get("headers") or {},
+            "param_mappings": [],
+            "base_url": base_url_ep,
+        })
+    return steps
+
+
+@app.post("/api/v1/single-api/execute")
+async def single_api_execute(req: SingleApiExecuteRequest):
+    """阶段4：执行 — 根据计划或步骤列表执行，返回 suite 结果（供阶段5 分析）"""
+    try:
+        base_url = (req.base_url or "").strip()
+        if not base_url:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT base_url FROM project_environments WHERE project_id = ? AND (env_name = ? OR is_default = 1) ORDER BY is_default DESC LIMIT 1",
+                (req.project_id, req.environment),
+            )
+            row = cursor.fetchone()
+            conn.close()
+            base_url = (row["base_url"] or "").strip() if row else ""
+        if not base_url:
+            raise HTTPException(status_code=400, detail="请配置 base_url 或项目环境")
+
+        if req.steps:
+            steps = req.steps
+        elif req.plan:
+            steps = _single_api_plan_to_steps(req.plan)
+        else:
+            raise HTTPException(status_code=400, detail="请提供 plan 或 steps")
+
+        if not steps:
+            raise HTTPException(status_code=400, detail="计划中无可用用例")
+
+        start_ts = datetime.now()
+        step_results = await _run_steps(steps, base_url)
+        duration_ms = int((datetime.now() - start_ts).total_seconds() * 1000)
+
+        passed = sum(1 for s in step_results if s.get("success"))
+        failed = len(step_results) - passed
+        case_results = []
+        for i, s in enumerate(step_results):
+            case_results.append({
+                "case_id": f"TC{i+1:02d}",
+                "status": "passed" if s.get("success") else "failed",
+                "duration_ms": int((s.get("duration") or 0) * 1000),
+            })
+
+        suite_result = {
+            "suite_id": "single-api-suite",
+            "total_cases": len(step_results),
+            "passed_cases": passed,
+            "failed_cases": failed,
+            "duration_ms": duration_ms,
+            "case_results": case_results,
+            "results": step_results,
+        }
+        return suite_result
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/single-api/analyze")
+async def single_api_analyze(req: SingleApiAnalyzeRequest):
+    """阶段5：结果分析 — 根据执行结果生成 Markdown 报告与图表数据"""
+    try:
+        report_md, chart_data = await analyze_suite_result(ai_client, req.suite_result)
+        return {"report": report_md, "chart_data": chart_data}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/single-api/full-pipeline")
+async def single_api_full_pipeline(req: SingleApiFullPipelineRequest):
+    """单接口完整流水线：需求理解 -> 测试计划 -> 代码生成 -> [执行 -> 结果分析]"""
+    try:
+        # 1. 需求理解
+        structured = await requirement_understanding(
+            ai_client, req.natural_language_input, req.project_id, DB_PATH
+        )
+        # 2. 测试计划
+        plan_md, plan_payload = await generate_test_plan_md(
+            ai_client, structured, api_planner, req.project_id
+        )
+        target_api = (plan_payload.get("endpoints") or [{}])[0] if plan_payload.get("endpoints") else {}
+        api_info = plan_payload.get("target_api") or target_api
+        if not api_info:
+            api_info = (structured.get("api_candidates") or [{}])[0] or {}
+        # 3. 代码生成：Generator Agent 解析测试计划 + plan_payload 用例列表，生成 Playwright 测试文件
+        code = await generate_playwright_code(ai_client, plan_md, api_info, plan_payload)
+
+        out = {
+            "phase1_structured": structured,
+            "phase2_plan_markdown": plan_md,
+            "phase2_plan": plan_payload,
+            "phase3_code": code,
+            "phase4_executor_summary": None,
+            "phase4_result": None,
+            "phase5_report": None,
+            "phase5_chart_data": None,
+        }
+
+        if req.run_execution and plan_payload.get("endpoints"):
+            endpoints = plan_payload.get("endpoints") or []
+            cases_count = sum(len(ep.get("cases") or []) for ep in endpoints)
+            ep_summary = "; ".join(f"{ep.get('method')} {ep.get('path')}" for ep in endpoints[:3])
+            try:
+                executor_out = await executor_agent(ai_client, plan_md, cases_count, ep_summary)
+                out["phase4_executor_summary"] = executor_out
+            except Exception as _e:
+                out["phase4_executor_summary"] = {"execution_summary": f"执行策略生成异常: {_e}", "cases_to_run": cases_count}
+
+            base_url = (req.base_url or "").strip()
+            if not base_url:
+                conn = sqlite3.connect(DB_PATH)
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT base_url FROM project_environments WHERE project_id = ? AND (env_name = ? OR is_default = 1) ORDER BY is_default DESC LIMIT 1",
+                    (req.project_id, req.environment),
+                )
+                row = cursor.fetchone()
+                conn.close()
+                base_url = (row["base_url"] or "").strip() if row else ""
+            if base_url:
+                steps = _single_api_plan_to_steps(plan_payload)
+                if steps:
+                    start_ts = datetime.now()
+                    step_results = await _run_steps(steps, base_url)
+                    duration_ms = int((datetime.now() - start_ts).total_seconds() * 1000)
+                    passed = sum(1 for s in step_results if s.get("success"))
+                    suite_result = {
+                        "suite_id": "single-api-suite",
+                        "total_cases": len(step_results),
+                        "passed_cases": passed,
+                        "failed_cases": len(step_results) - passed,
+                        "duration_ms": duration_ms,
+                        "case_results": [
+                            {"case_id": f"TC{i+1:02d}", "status": "passed" if s.get("success") else "failed", "duration_ms": int((s.get("duration") or 0) * 1000)}
+                            for i, s in enumerate(step_results)
+                        ],
+                        "results": step_results,
+                    }
+                    out["phase4_result"] = suite_result
+                    report_md, chart_data = await analyze_suite_result(ai_client, suite_result)
+                    out["phase5_report"] = report_md
+                    out["phase5_chart_data"] = chart_data
+        return out
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # --- 环境配置管理 ---
 

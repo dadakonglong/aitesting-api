@@ -1,21 +1,105 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { useSearchParams } from 'next/navigation'
-import { Sparkles, TestTube, Clock, ClipboardList } from 'lucide-react'
+import { Sparkles, TestTube, Target, Clock, ClipboardList } from 'lucide-react'
 import AIGenerationTab from './components/AIGenerationTab'
 import TestScenariosTab from './components/TestScenariosTab'
+import SingleApiTestTab from './components/SingleApiTestTab'
 import ScheduledTasksTab from './components/ScheduledTasksTab'
 import ApiTestPlanTab from '../apis/components/ApiTestPlanTab'
+import { useProject } from '../contexts/ProjectContext'
+
+const STORAGE_KEY_PREFIX = 'single-api-results-'
+
+export type SingleApiCaseItem = { id: string; name: string; data: any; createdAt: number }
+
+function loadSingleApiResultsFromStorage(projectId: string): SingleApiCaseItem[] {
+    if (typeof window === 'undefined') return []
+    try {
+        const raw = localStorage.getItem(STORAGE_KEY_PREFIX + projectId)
+        if (!raw) return []
+        const parsed = JSON.parse(raw)
+        return Array.isArray(parsed) ? parsed : []
+    } catch {
+        return []
+    }
+}
+
+function saveSingleApiResultsToStorage(projectId: string, items: SingleApiCaseItem[]) {
+    if (typeof window === 'undefined') return
+    try {
+        localStorage.setItem(STORAGE_KEY_PREFIX + projectId, JSON.stringify(items))
+    } catch (e) {
+        console.warn('接口用例保存到本地失败（可能超出容量）:', e)
+    }
+}
+
+/** 从流水线结果中提取展示名，如「登录接口测试用例」 */
+function getSingleApiDisplayName(data: any): string {
+    if (!data?.phase2_plan?.endpoints?.length) return '未命名接口测试用例'
+    const ep = data.phase2_plan.endpoints[0]
+    const summary = (ep?.summary || ep?.name || '') as string
+    const path = (ep?.path || '') as string
+    const pathPart = path ? (path.replace(/^\//, '').split('/').filter(Boolean).pop() || '') : ''
+    const part = summary.trim() || pathPart || '接口'
+    const name = (part.replace(/接口$/, '') || part) as string
+    return name + '接口测试用例'
+}
 
 export default function TestingCenterPage() {
     const searchParams = useSearchParams()
+    const { currentProject } = useProject()
     const initialTab = searchParams?.get('tab') || 'ai'
     const [activeTab, setActiveTab] = useState(initialTab)
+    // 接口用例列表：按项目持久化到 localStorage，不覆盖、可删除
+    const [singleApiResults, setSingleApiResults] = useState<SingleApiCaseItem[]>([])
+    const [selectedSingleApiId, setSelectedSingleApiId] = useState<string | null>(null)
+
+    // 按项目从 localStorage 恢复
+    useEffect(() => {
+        const saved = loadSingleApiResultsFromStorage(currentProject)
+        setSingleApiResults(saved)
+        setSelectedSingleApiId(saved.length > 0 ? saved[0].id : null)
+    }, [currentProject])
+
+    // 列表变化后写回 localStorage（含空列表，以便删除全部后刷新仍为空）
+    useEffect(() => {
+        saveSingleApiResultsToStorage(currentProject, singleApiResults)
+    }, [currentProject, singleApiResults])
+
+    // 生成新的单接口测试时仅追加到列表，不覆盖、不删除之前的记录（会通过 useEffect 持久化）
+    const addSingleApiResult = useCallback((data: any) => {
+        const name = getSingleApiDisplayName(data)
+        const id = `single-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+        const item: SingleApiCaseItem = { id, name, data, createdAt: Date.now() }
+        setSingleApiResults((prev) => [...prev, item])
+        setSelectedSingleApiId(id)
+        setActiveTab('single-api')
+    }, [])
+
+    const updateSingleApiResult = useCallback((id: string, data: any) => {
+        setSingleApiResults((prev) =>
+            prev.map((it) => (it.id === id ? { ...it, data, name: getSingleApiDisplayName(data) } : it))
+        )
+    }, [])
+
+    const removeSingleApiResult = useCallback((id: string) => {
+        setSingleApiResults((prev) => prev.filter((it) => it.id !== id))
+        setSelectedSingleApiId((cur) => (cur === id ? null : cur))
+    }, [])
+
+    // 有列表且当前未选或选中项已被删时，自动选中第一项
+    useEffect(() => {
+        if (singleApiResults.length === 0) return
+        const hasSelected = selectedSingleApiId && singleApiResults.some((it) => it.id === selectedSingleApiId)
+        if (!hasSelected) setSelectedSingleApiId(singleApiResults[0].id)
+    }, [singleApiResults, selectedSingleApiId])
 
     const tabs = [
         { id: 'ai', name: 'AI生成', icon: Sparkles },
         { id: 'scenarios', name: '测试场景', icon: TestTube },
+        { id: 'single-api', name: '接口用例', icon: Target },
         { id: 'plan', name: '接口测试计划', icon: ClipboardList },
         { id: 'scheduler', name: '定时任务', icon: Clock }
     ]
@@ -72,8 +156,19 @@ export default function TestingCenterPage() {
 
                 {/* Tab内容 */}
                 <div style={{ padding: '2rem', background: 'white', borderRadius: '0 0 1rem 1rem', minHeight: '60vh' }}>
-                    {activeTab === 'ai' && <AIGenerationTab />}
+                    {activeTab === 'ai' && (
+                        <AIGenerationTab onSingleApiGenerated={addSingleApiResult} />
+                    )}
                     {activeTab === 'scenarios' && <TestScenariosTab />}
+                    {activeTab === 'single-api' && (
+                        <SingleApiTestTab
+                            items={singleApiResults}
+                            selectedId={selectedSingleApiId}
+                            onSelect={setSelectedSingleApiId}
+                            onResultChange={updateSingleApiResult}
+                            onDelete={removeSingleApiResult}
+                        />
+                    )}
                     {activeTab === 'plan' && <ApiTestPlanTab />}
                     {activeTab === 'scheduler' && <ScheduledTasksTab />}
                 </div>
