@@ -203,7 +203,7 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                                     background: 'rgba(255, 255, 255, 0.9)', border: '2px solid #E5E7EB',
                                     borderRadius: '0.75rem', outline: 'none', resize: 'none',
                                 }}
-                                placeholder="例如：为登录接口生成完整测试&#10;为手机登录接口生成测试用例"
+                                placeholder="例如：为登录接口生成完整测试&#10;为登录、注册、忘记密码三个接口生成测试用例"
                             />
                         </div>
                     </>

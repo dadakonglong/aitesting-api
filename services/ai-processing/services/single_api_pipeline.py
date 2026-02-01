@@ -35,25 +35,28 @@ from .ai_case_generator import generate_cases_for_endpoint as ai_generate_cases
 
 # ============= Agent 系统提示词（用户提供） =============
 
-RAG_RETRIEVAL_SYSTEM_PROMPT = """你是接口分析专家。你的任务是对「当前目标接口」做结构化分析。
+RAG_RETRIEVAL_SYSTEM_PROMPT = """你是接口分析专家。你的任务是对用户要测试的接口做结构化分析。
 
 ## 分析范围
 
-- **只分析当前目标接口**：根据用户描述确定一个目标接口，对该接口做详细分析（实体、关系、文本块、请求参数、请求体、响应、认证等）。
-- **相关接口**：检索到的其他接口可以列出（作为相关接口），但不需要对它们做分析。
+- **单接口**：若用户描述仅针对一个接口（如「为登录接口生成测试」），分析该接口。
+- **多接口**：若用户描述明确提到多个接口（如「登录、注册、忘记密码」「用户和订单接口」），需识别所有目标接口并分析。
+- 根据用户描述判断是 1 个还是多个接口，通过 target_api_indices 指定检索结果中的目标索引。
 
 ## 输出格式
 
 请以 JSON 格式返回，包含：
-- entities：实体列表（每项含 entity_name, entity_type, description），仅针对当前目标接口。
+- entities：实体列表（每项含 entity_name, entity_type, description），针对目标接口。
 - relationships：关系列表。
-- chunks：文本块列表（每项含 content），仅针对当前目标接口的请求参数、请求体、响应格式、认证方式等。"""
+- chunks：文本块列表（每项含 content），针对目标接口的请求参数、请求体、响应格式、认证方式等。
+- target_api_indices：整数数组，表示用户要测试的接口在检索结果中的索引（0-based）。例如 [0] 表示只测第 1 个接口；[0,1,2] 表示测前 3 个接口。根据用户描述判断：若明确提到多个接口（如「登录、注册、忘记密码」「这三个接口」），则返回对应索引；否则默认 [0]。"""
 
-PLANNER_SYSTEM_PROMPT = """你是测试计划专家。你的任务是为「当前接口」制定测试计划。
+PLANNER_SYSTEM_PROMPT = """你是测试计划专家。你的任务是为目标接口制定测试计划。
 
 ## 范围
 
-- 仅针对当前目标接口制定计划，不包含其他接口的测试内容。
+- 若为单接口，仅针对该接口制定计划。
+- 若为多接口，需覆盖所有目标接口的测试内容。
 
 ## 测试类型
 
@@ -103,8 +106,8 @@ GENERATOR_PLAYWRIGHT_SYSTEM_PROMPT = """你是 Playwright 接口测试代码生�
 
 - 仅输出一个完整的 TypeScript 测试文件代码。
 - 必须包含：import { test, expect } from '@playwright/test';
-- 使用 test.describe() 包裹。
-- 每个用例对应一个 test()。
+- **单接口**：使用一个 test.describe() 包裹该接口的所有 test()。
+- **多接口**：使用多个 test.describe()，每个接口一个 describe 块，每个用例对应一个 test()。
 - 不要解释，直接输出代码。"""
 
 EXECUTOR_SYSTEM_PROMPT = """你是测试执行专家。
@@ -391,10 +394,13 @@ async def requirement_understanding(
     )
     user_prompt = f"""用户描述：{user_input}
 
-从知识库检索到的接口列表（第一个为当前目标接口，其余为相关接口）：
+从知识库检索到的接口列表（按相关性排序）：
 {retrieval_context}
 
-请只对「当前目标接口」（用户描述对应的那一个）做详细分析，提取其实体、关系、文本块，返回结构化 JSON：entities、relationships、chunks 均仅针对该接口。相关接口可简要列出，但不要对它们做分析。"""
+请分析用户描述：
+1. 判断用户要测试的是 1 个还是多个接口。若描述中明确提到多个接口（如「登录、注册、忘记密码」「这两个接口」「用户和订单接口」），则返回 target_api_indices 为对应接口的索引数组；否则返回 [0]。
+2. 对目标接口做详细分析，提取 entities、relationships、chunks。
+3. 必须返回 target_api_indices，格式如 [0] 或 [0,1,2]。"""
     out = await ai_client.chat(RAG_RETRIEVAL_SYSTEM_PROMPT, user_prompt)
     if not isinstance(out, dict):
         out = {}
@@ -411,6 +417,17 @@ async def requirement_understanding(
         ]
     out["api_candidates"] = api_candidates
     out["intent"] = out.get("intent") or user_input
+    # 解析 target_api_indices：用户要测试的接口索引
+    raw_indices = out.get("target_api_indices")
+    if isinstance(raw_indices, list) and len(raw_indices) > 0:
+        indices = [int(i) for i in raw_indices if isinstance(i, (int, float)) and 0 <= int(i) < len(api_candidates)]
+    elif isinstance(raw_indices, (int, float)) and 0 <= int(raw_indices) < len(api_candidates):
+        indices = [int(raw_indices)]
+    else:
+        indices = [0]
+    if not indices:
+        indices = [0]
+    out["target_api_indices"] = indices
     return out
 
 
@@ -428,7 +445,8 @@ async def generate_test_plan_md(
     同时用 ApiPlanner + ai_generate_cases 生成可执行用例列表（供阶段 4 执行）。
     """
     api_candidates = structured_info.get("api_candidates") or []
-    _log(f"Plan: api_candidates count={len(api_candidates)}")
+    target_indices = structured_info.get("target_api_indices") or [0]
+    _log(f"Plan: api_candidates count={len(api_candidates)}, target_indices={target_indices}")
     entities = structured_info.get("entities") or []
     chunks = structured_info.get("chunks") or []
     intent = structured_info.get("intent") or ""
@@ -439,55 +457,66 @@ async def generate_test_plan_md(
         md = (isinstance(out, dict) and out.get("markdown")) or json.dumps(out or {}, ensure_ascii=False, indent=2)
         return md, {"endpoints": [], "markdown": md, "target_api": None}
 
-    # 调用 Planner Agent：仅针对当前目标接口制定测试计划
-    context = f"用户意图：{intent}\n\n实体（当前接口）：{json.dumps(entities, ensure_ascii=False)}\n\n文本块/接口细节（当前接口）：{json.dumps(chunks, ensure_ascii=False)}"
+    # 获取要测试的目标接口列表（根据 target_api_indices）
+    target_apis = []
+    for i in target_indices:
+        if isinstance(i, int) and 0 <= i < len(api_candidates):
+            target_apis.append(api_candidates[i])
+        elif isinstance(i, (float, str)) and 0 <= int(i) < len(api_candidates):
+            target_apis.append(api_candidates[int(i)])
+
+    if not target_apis:
+        target_apis = [api_candidates[0]]
+
+    # 调用 Planner Agent 制定测试计划（单接口或多接口）
+    target_summary = "、".join(f"{a.get('method')} {a.get('path')}" for a in target_apis[:5])
+    context = f"用户意图：{intent}\n\n目标接口（共 {len(target_apis)} 个）：{target_summary}\n\n实体：{json.dumps(entities, ensure_ascii=False)}\n\n文本块/接口细节：{json.dumps(chunks, ensure_ascii=False)}"
+    scope_note = "仅针对该接口" if len(target_apis) == 1 else f"覆盖以上 {len(target_apis)} 个接口"
     user_prompt = f"""{context}
 
-请仅针对当前目标接口制定测试计划（Markdown），包含：测试目标与范围、功能/安全/边界/健壮性等测试类型、测试用例列表、测试数据与环境要求、预期结果与验收标准。不要包含其他接口的测试内容。"""
+请为上述目标接口制定测试计划（Markdown），{scope_note}，包含：测试目标与范围、功能/安全/边界/健壮性等测试类型、测试用例列表、测试数据与环境要求、预期结果与验收标准。"""
     out = await ai_client.chat(PLANNER_SYSTEM_PROMPT, user_prompt)
     plan_md = (isinstance(out, dict) and out.get("markdown")) or ""
     if not plan_md:
         plan_md = json.dumps(out or {}, ensure_ascii=False, indent=2)
 
-    # --- 改进：直接使用 AI 生成高质量用例，不再使用 ApiPlanner 的规则骨架（它会生成前 3 个重复用例） ---
-    target_api = api_candidates[0]
-    target_path = target_api.get("path")
-    target_method = (target_api.get("method") or "GET").upper()
-    
-    target_ep = {
-        "id": target_api.get("id"),
-        "path": target_path,
-        "method": target_method,
-        "summary": target_api.get("summary"),
-        "description": target_api.get("description"),
-        "base_url": target_api.get("base_url"),
-        "parameters": target_api.get("parameters"),
-        "request_body": target_api.get("request_body"),
-        "headers": target_api.get("headers"),
-        "cases": [],
-    }
-    
-    # 强制让 AI 至少生成 6 条覆盖各类场景（正向、边界、健壮、安全）的用例
+    # 为每个目标接口生成 AI 用例
     needed_types = ["positive", "boundary", "robustness", "security"]
-    print(f"DEBUG: Generating AI cases for single API. Types: {needed_types}")
-    
-    all_ai_cases = await ai_generate_cases(
-        ai_client,
-        {
-            "path": target_ep.get("path") or target_path,
-            "method": target_ep.get("method") or target_method,
-            "summary": target_ep.get("summary") or target_api.get("summary"),
-            "description": target_ep.get("description") or target_api.get("description"),
-            "parameters": target_ep.get("parameters") or target_api.get("parameters"),
-            "request_body": target_ep.get("request_body") or target_api.get("request_body"),
-            "headers": target_ep.get("headers") or target_api.get("headers"),
-        },
-        include_types=needed_types,
-    )
-    print(f"DEBUG: AI generated {len(all_ai_cases)} cases")
-    target_ep["cases"] = all_ai_cases
+    endpoints = []
+    for target_api in target_apis:
+        target_path = target_api.get("path")
+        target_method = (target_api.get("method") or "GET").upper()
+        target_ep = {
+            "id": target_api.get("id"),
+            "path": target_path,
+            "method": target_method,
+            "summary": target_api.get("summary"),
+            "description": target_api.get("description"),
+            "base_url": target_api.get("base_url"),
+            "parameters": target_api.get("parameters"),
+            "request_body": target_api.get("request_body"),
+            "headers": target_api.get("headers"),
+            "cases": [],
+        }
+        print(f"DEBUG: Generating AI cases for {target_method} {target_path}")
+        all_ai_cases = await ai_generate_cases(
+            ai_client,
+            {
+                "path": target_ep.get("path") or target_path,
+                "method": target_ep.get("method") or target_method,
+                "summary": target_ep.get("summary") or target_api.get("summary"),
+                "description": target_ep.get("description") or target_api.get("description"),
+                "parameters": target_ep.get("parameters") or target_api.get("parameters"),
+                "request_body": target_ep.get("request_body") or target_api.get("request_body"),
+                "headers": target_ep.get("headers") or target_api.get("headers"),
+            },
+            include_types=needed_types,
+        )
+        target_ep["cases"] = all_ai_cases
+        endpoints.append(target_ep)
+    print(f"DEBUG: Generated cases for {len(endpoints)} endpoints, total cases={sum(len(ep.get('cases') or []) for ep in endpoints)}")
 
-    return plan_md, {"endpoints": [target_ep], "markdown": plan_md, "target_api": target_api}
+    return plan_md, {"endpoints": endpoints, "markdown": plan_md, "target_api": target_apis[0] if target_apis else None}
 
 
 # ---------- 阶段 3：代码生成（Generator Agent） ----------
@@ -558,6 +587,56 @@ def _extract_code_from_raw(raw: str) -> str:
     return ""
 
 
+def _build_playwright_user_prompt_multi(plan_markdown: str, endpoints: List[Dict[str, Any]]) -> str:
+    """根据测试计划与多个 endpoint（含 cases）构建 Playwright 代码生成的 user prompt。"""
+    if len(endpoints) == 1:
+        return _build_playwright_user_prompt(plan_markdown, endpoints[0])
+    sections = []
+    total_cases = 0
+    for ep_idx, endpoint in enumerate(endpoints):
+        path = endpoint.get("path") or ""
+        method = (endpoint.get("method") or "GET").upper()
+        summary = endpoint.get("summary") or endpoint.get("name") or path or f"接口{ep_idx+1}"
+        cases = endpoint.get("cases") or []
+        cases_text = ""
+        for i, c in enumerate(cases):
+            name = c.get("name") or f"用例{i+1}"
+            req = c.get("request_template") or {}
+            exp = c.get("expected_template") or {}
+            body = req.get("params") or {}
+            query = req.get("url_params") or {}
+            headers = req.get("headers") or {}
+            status = exp.get("status_code", 200)
+            cases_text += f"""
+【用例 {i+1}】TC{ep_idx+1}_{i+1:02d}: {name}
+  - 请求体 data: {json.dumps(body, ensure_ascii=False)}
+  - URL 参数 params: {json.dumps(query, ensure_ascii=False)}
+  - 请求头 headers: {json.dumps(headers, ensure_ascii=False)}
+  - 预期状态码: {status}
+"""
+        total_cases += len(cases)
+        sections.append(f"""
+## 接口 {ep_idx+1}：{method} {path}（{summary}）
+- path: {path}
+- method: {method}
+- parameters: {json.dumps(endpoint.get("parameters") or [], ensure_ascii=False)}
+- request_body: {json.dumps(endpoint.get("request_body") or {}, ensure_ascii=False)}
+
+### 用例列表
+{cases_text if cases_text else "（请根据接口定义自行设计至少 4 条用例）"}
+""")
+    instructions = f"请为以上 {len(endpoints)} 个接口分别生成 test.describe 块，每个接口一个 describe，每个用例一个 test()。共约 {total_cases} 个 test()。" if total_cases else "请至少为每个接口生成 2 个 test()。"
+    return f"""## 目标接口与用例（共 {len(endpoints)} 个接口）
+{"".join(sections)}
+
+## 测试计划（背景参考）
+{plan_markdown[:4000]}
+
+---
+{instructions}
+请求体 data、URL 参数 params、预期 expect(response.status()).toBe(xxx) 与表中一致。path 使用完整路径。只输出代码或 JSON({{"code": "..."}})。"""
+
+
 def _build_playwright_user_prompt(plan_markdown: str, endpoint: Dict[str, Any]) -> str:
     """根据测试计划与单个 endpoint（含 cases）构建 Playwright 代码生成的 user prompt。用例列表为权威，生成的脚本必须逐条对应。"""
     path = endpoint.get("path") or ""
@@ -610,11 +689,11 @@ async def generate_playwright_code_from_plan(
     plan_payload: Dict[str, Any],
 ) -> str:
     """
-    阶段 3（Playwright）：直接使用 chat_raw 获取代码，更稳定。
+    阶段 3（Playwright）：直接使用 chat_raw 获取代码，支持单接口和多接口。
     """
     endpoints = plan_payload.get("endpoints") or []
     endpoint = endpoints[0] if endpoints else {}
-    user_prompt = _build_playwright_user_prompt(plan_markdown, endpoint)
+    user_prompt = _build_playwright_user_prompt_multi(plan_markdown, endpoints) if endpoints else _build_playwright_user_prompt(plan_markdown, endpoint)
     code = ""
     
     try:

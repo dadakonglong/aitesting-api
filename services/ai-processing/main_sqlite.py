@@ -515,27 +515,29 @@ async def single_api_generate_code(req: SingleApiGenerateCodeRequest):
 
 
 def _single_api_plan_to_steps(plan: Dict[str, Any]) -> List[Dict]:
-    """将单接口计划中的 endpoints[0].cases 转为 _run_steps 所需的 steps"""
+    """将计划中的 endpoints[].cases 转为 _run_steps 所需的 steps（支持单接口和多接口）"""
     endpoints = plan.get("endpoints") or []
     if not endpoints:
         return []
-    ep = endpoints[0]
-    path = ep.get("path") or ""
-    method = (ep.get("method") or "GET").upper()
-    base_url_ep = (ep.get("base_url") or "").strip()
     steps = []
-    for i, c in enumerate(ep.get("cases") or []):
-        rt = c.get("request_template") or {}
-        steps.append({
-            "step_order": i + 1,
-            "api_path": path,
-            "api_method": method,
-            "params": rt.get("params") or {},
-            "url_params": rt.get("url_params") or {},
-            "headers": rt.get("headers") or {},
-            "param_mappings": [],
-            "base_url": base_url_ep,
-        })
+    step_order = 1
+    for ep in endpoints:
+        path = ep.get("path") or ""
+        method = (ep.get("method") or "GET").upper()
+        base_url_ep = (ep.get("base_url") or "").strip()
+        for c in ep.get("cases") or []:
+            rt = c.get("request_template") or {}
+            steps.append({
+                "step_order": step_order,
+                "api_path": path,
+                "api_method": method,
+                "params": rt.get("params") or {},
+                "url_params": rt.get("url_params") or {},
+                "headers": rt.get("headers") or {},
+                "param_mappings": [],
+                "base_url": base_url_ep,
+            })
+            step_order += 1
     return steps
 
 
@@ -573,7 +575,19 @@ def _parse_playwright_code_to_steps(
             break
     if not api_path:
         api_path = "/"
-    # 2) 找出所有 request.(post|get)( ... , { ... }) 的第二个参数（选项对象）
+    # 2) 按 plan_fallback 构建「用例索引 -> (path, method)」映射，支持多接口
+    plan_endpoints = (plan_fallback or {}).get("endpoints") or []
+    def step_to_ep_info(step_idx: int):
+        idx = step_idx
+        for ep in plan_endpoints:
+            cases = ep.get("cases") or []
+            if idx < len(cases):
+                path = ep.get("path") or ""
+                m = (ep.get("method") or "GET").upper()
+                return path if path.startswith("/") else "/" + path.lstrip("/"), m
+            idx -= len(cases)
+        return api_path, "POST"
+
     method = "POST"
     steps = []
     # 按 test( 切分，每个块里找 request.post/get
@@ -586,6 +600,18 @@ def _parse_playwright_code_to_steps(
         if not mo:
             continue
         method = mo.group(1).upper()
+        # 支持多接口：从 plan 按顺序映射 path；或尝试从代码解析字面量 path
+        block_path = api_path
+        if plan_endpoints:
+            block_path, method = step_to_ep_info(bi - 1)
+        else:
+            path_mo = re.search(r'request\.(post|get)\s*\(\s*["\']([^"\']+)["\']', block)
+            if path_mo:
+                pa = path_mo.group(2).strip()
+                if pa.startswith("http"):
+                    block_path = re.sub(r"^https?://[^/]+", "", pa) or "/"
+                elif pa:
+                    block_path = pa if pa.startswith("/") else "/" + pa
         start = mo.start()
         brace_start = block.index("{", start)
         depth = 1
@@ -608,12 +634,16 @@ def _parse_playwright_code_to_steps(
             except Exception:
                 pass
         if not params and "data" in opts_str and plan_fallback:
-            # 代码里是 data: variable（如 defaultBody），用 plan 补全
-            endpoints = plan_fallback.get("endpoints") or []
-            cases = (endpoints[0].get("cases") or []) if endpoints else []
-            if bi - 1 < len(cases):
-                rt = cases[bi - 1].get("request_template") or {}
-                params = rt.get("params") or {}
+            # 代码里是 data: variable（如 defaultBody），用 plan 补全（支持多 endpoint）
+            step_idx = bi - 1
+            idx = step_idx
+            for ep in plan_endpoints:
+                cases = ep.get("cases") or []
+                if idx < len(cases):
+                    rt = cases[idx].get("request_template") or {}
+                    params = rt.get("params") or {}
+                    break
+                idx -= len(cases)
         headers_m = re.search(r"headers\s*:\s*(\{(?:[^{}]|\{[^{}]*\})*\})", opts_str)
         if headers_m:
             try:
@@ -621,17 +651,20 @@ def _parse_playwright_code_to_steps(
                 headers = json.loads(js)
             except Exception:
                 pass
-        # 若未解析到 params，用 plan_fallback 中同索引用例补全
+        # 若未解析到 params，用 plan_fallback 中同索引用例补全（支持多 endpoint）
         if not params and plan_fallback:
-            endpoints = plan_fallback.get("endpoints") or []
-            cases = (endpoints[0].get("cases") or []) if endpoints else []
-            if bi - 1 < len(cases):
-                rt = cases[bi - 1].get("request_template") or {}
-                params = rt.get("params") or {}
-                headers = headers or rt.get("headers") or {}
+            idx = bi - 1
+            for ep in plan_endpoints:
+                cases = ep.get("cases") or []
+                if idx < len(cases):
+                    rt = cases[idx].get("request_template") or {}
+                    params = rt.get("params") or {}
+                    headers = headers or rt.get("headers") or {}
+                    break
+                idx -= len(cases)
         steps.append({
             "step_order": len(steps) + 1,
-            "api_path": api_path,
+            "api_path": block_path,
             "api_method": method,
             "params": params,
             "url_params": {},
@@ -728,7 +761,7 @@ async def single_api_execute(req: SingleApiExecuteRequest):
             print("DEBUG: Steps are empty after conversion!")
             raise HTTPException(
                 status_code=400,
-                detail="计划中无可用用例（endpoints[0].cases 为空）。请重新在「AI生成」中生成该接口用例后再执行。",
+                detail="计划中无可用用例（endpoints 中无 cases）。请重新在「AI生成」中生成接口用例后再执行。",
             )
 
         start_ts = datetime.now()
