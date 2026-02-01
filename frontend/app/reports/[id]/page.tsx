@@ -43,7 +43,7 @@ export default function ReportDetailPage() {
     const id = params?.id as string
     const [report, setReport] = useState<any>(null)
     const [loading, setLoading] = useState(true)
-    const [activeTab, setActiveTab] = useState<'all' | 'failed' | 'summary'>('all')
+    const [activeTab, setActiveTab] = useState<'all' | 'failed' | 'summary'>('summary')
     const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set())
     const [stepDetailTab, setStepDetailTab] = useState<Record<number, StepDetailTab>>({})
 
@@ -253,26 +253,28 @@ export default function ReportDetailPage() {
                 {/* 标签页 */}
                 <div style={{ borderBottom: '2px solid #E5E7EB', marginBottom: '1rem' }}>
                     <div style={{ display: 'flex', gap: '1.5rem' }}>
-                        {(['all', 'failed', 'summary'] as const).map((tab) => (
-                            <button
-                                key={tab}
-                                type="button"
-                                onClick={() => setActiveTab(tab)}
-                                style={{
-                                    padding: '0.5rem 0',
-                                    border: 'none',
-                                    background: 'none',
-                                    cursor: 'pointer',
-                                    fontWeight: '600',
-                                    fontSize: '0.875rem',
-                                    color: activeTab === tab ? '#667eea' : '#6B7280',
-                                    borderBottom: activeTab === tab ? '2px solid #667eea' : '2px solid transparent',
-                                    marginBottom: '-2px',
-                                }}
-                            >
-                                {tab === 'all' ? '全部' : tab === 'failed' ? '失败' : '测试摘要'}
-                            </button>
-                        ))}
+                        <div style={{ display: 'flex', gap: '1.5rem' }}>
+                            {(['summary'] as const).map((tab) => (
+                                <button
+                                    key={tab}
+                                    type="button"
+                                    onClick={() => setActiveTab(tab as any)}
+                                    style={{
+                                        padding: '0.5rem 0',
+                                        border: 'none',
+                                        background: 'none',
+                                        cursor: 'pointer',
+                                        fontWeight: '600',
+                                        fontSize: '0.875rem',
+                                        color: activeTab === tab ? '#667eea' : '#6B7280',
+                                        borderBottom: activeTab === tab ? '2px solid #667eea' : '2px solid transparent',
+                                        marginBottom: '-2px',
+                                    }}
+                                >
+                                    测试摘要
+                                </button>
+                            ))}
+                        </div>
                     </div>
                 </div>
 
@@ -324,103 +326,9 @@ export default function ReportDetailPage() {
                                         {isExpanded && (
                                             <div style={{ padding: '1rem', borderTop: '1px solid #E5E7EB', background: '#F9FAFB' }}>
                                                 <div style={{ marginBottom: '1rem', padding: '1rem', background: 'white', borderRadius: '0.5rem', border: '1px solid #E5E7EB' }}>
-                                                    {(() => {
-                                                    const d = getStepData(r, i)
-                                                    const hasRequestContent = (d.urlParams && Object.keys(d.urlParams).length > 0) || (d.requestData && Object.keys(d.requestData).length > 0) || (d.requestHeaders && Object.keys(d.requestHeaders).length > 0)
-                                                    return (
-                                                        <>
-                                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', alignItems: 'center', marginBottom: '0.75rem' }}>
-                                                        <span style={{ fontWeight: '700', color: '#3B82F6', fontSize: '0.875rem' }}>{d.method}</span>
-                                                        <span style={{ fontSize: '0.8125rem', color: '#374151', wordBreak: 'break-all', flex: 1 }}>{d.fullUrl || `${d.method} ${r.api_path || r.url || ''}`}</span>
+                                                    <div style={{ padding: '1rem', color: '#6B7280', fontSize: '0.875rem' }}>
+                                                        详情已隐藏（仅显示测试摘要）
                                                     </div>
-                                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', fontSize: '0.8125rem', color: '#6B7280', marginBottom: '0.5rem' }}>
-                                                        <span>开始时间: {report.created_at || '-'}</span>
-                                                        <span>结束时间: {report.end_time || report.created_at || '-'}</span>
-                                                        <span style={{ color: (r.status_code ?? 200) < 400 ? '#10B981' : '#EF4444', fontWeight: '600' }}>HTTP {r.status_code ?? '-'}</span>
-                                                        <span>{(r.response_size ?? (typeof r.response === 'string' ? r.response.length : r.response != null ? JSON.stringify(r.response).length : 0))} 字节</span>
-                                                        <span style={{ padding: '0.2rem 0.5rem', borderRadius: '0.25rem', background: r.success ? '#D1FAE5' : '#FEE2E2', color: r.success ? '#065F46' : '#991B1B', fontWeight: '600' }}>{r.success ? '成功' : '失败'}</span>
-                                                    </div>
-                                                <div style={{ marginBottom: '0.5rem', display: 'flex', gap: '0.25rem', flexWrap: 'wrap' }}>
-                                                    {STEP_DETAIL_TABS.map((tab) => (
-                                                        <button
-                                                            key={tab}
-                                                            type="button"
-                                                            onClick={() => setStepTab(i, tab)}
-                                                            style={{
-                                                                padding: '0.35rem 0.75rem',
-                                                                fontSize: '0.8125rem',
-                                                                border: 'none',
-                                                                borderRadius: '0.25rem',
-                                                                cursor: 'pointer',
-                                                                background: getStepTab(i) === tab ? '#667eea' : '#E5E7EB',
-                                                                color: getStepTab(i) === tab ? 'white' : '#374151',
-                                                                fontWeight: getStepTab(i) === tab ? '600' : '400',
-                                                            }}
-                                                        >
-                                                            {STEP_TAB_LABELS[tab]}
-                                                        </button>
-                                                    ))}
-                                                </div>
-                                                <div style={{ minHeight: '120px' }}>
-                                                    {getStepTab(i) === 'responseBody' && (
-                                                        (d.response != null && d.response !== '') ? <JsonWithLines data={d.response} maxHeight={320} /> : <div style={{ padding: '1rem', color: '#6B7280' }}>暂无响应体（可能为旧版报告或数据未保存）</div>
-                                                    )}
-                                                    {getStepTab(i) === 'responseHeaders' && (
-                                                        d.responseHeaders && Object.keys(d.responseHeaders).length > 0
-                                                            ? <JsonWithLines data={d.responseHeaders} maxHeight={200} />
-                                                            : <div style={{ padding: '1rem', color: '#6B7280' }}>暂无响应头</div>
-                                                    )}
-                                                    {getStepTab(i) === 'assertions' && (
-                                                        <div style={{ padding: '1rem', color: '#6B7280', fontSize: '0.875rem' }}>
-                                                            {r.success ? '✓ 状态码检查通过' : `✗ 状态码 ${r.status_code} 未通过（期望 2xx）`}
-                                                        </div>
-                                                    )}
-                                                    {getStepTab(i) === 'extraction' && (
-                                                        d.extractions && d.extractions.length > 0
-                                                            ? <div style={{ overflowX: 'auto' }}>
-                                                                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8125rem' }}>
-                                                                    <thead><tr style={{ background: '#F3F4F6' }}><th style={{ padding: '0.5rem', textAlign: 'left' }}>目标字段</th><th style={{ padding: '0.5rem', textAlign: 'left' }}>来源步骤</th><th style={{ padding: '0.5rem', textAlign: 'left' }}>提取结果</th></tr></thead>
-                                                                    <tbody>
-                                                                        {d.extractions.map((ex: any, ei: number) => (
-                                                                            <tr key={ei} style={{ borderTop: '1px solid #E5E7EB' }}>
-                                                                                <td style={{ padding: '0.5rem' }}>{ex.to_field}</td>
-                                                                                <td style={{ padding: '0.5rem' }}>步骤 {ex.from_step}</td>
-                                                                                <td style={{ padding: '0.5rem' }}>{ex.success ? String(ex.extracted_value ?? '-') : (ex.error_msg || '失败')}</td>
-                                                                            </tr>
-                                                                        ))}
-                                                                    </tbody>
-                                                                </table>
-                                                            </div>
-                                                            : <div style={{ padding: '1rem', color: '#6B7280' }}>此步骤未从其他步骤提取数据</div>
-                                                    )}
-                                                    {getStepTab(i) === 'requestContent' && (
-                                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                                                            <div>
-                                                                <div style={{ fontWeight: '600', marginBottom: '0.35rem', fontSize: '0.8125rem', color: '#374151' }}>请求地址</div>
-                                                                <div style={{ fontSize: '0.8125rem', wordBreak: 'break-all', color: '#4B5563' }}>{d.fullUrl || `${d.method} ${r.api_path || r.url || '-'}`}</div>
-                                                            </div>
-                                                            {d.requestHeaders && Object.keys(d.requestHeaders).length > 0 && (
-                                                                <div>
-                                                                    <div style={{ fontWeight: '600', marginBottom: '0.35rem', fontSize: '0.8125rem', color: '#374151' }}>请求头</div>
-                                                                    <JsonWithLines data={d.requestHeaders} maxHeight={150} />
-                                                                </div>
-                                                            )}
-                                                            <div>
-                                                                <div style={{ fontWeight: '600', marginBottom: '0.35rem', fontSize: '0.8125rem', color: '#374151' }}>Body / 参数</div>
-                                                                {(d.requestData && Object.keys(d.requestData).length > 0) ? (
-                                                                    <JsonWithLines data={d.requestData} maxHeight={200} />
-                                                                ) : (d.urlParams && Object.keys(d.urlParams).length > 0) ? (
-                                                                    <JsonWithLines data={d.urlParams} maxHeight={120} />
-                                                                ) : (
-                                                                    <div style={{ padding: '0.75rem', color: '#9CA3AF', fontSize: '0.8125rem' }}>{d.method === 'GET' ? 'GET 请求通常无 Body，参数在 URL 中' : '无请求体'}</div>
-                                                                )}
-                                                            </div>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                                        </>
-                                                    )
-                                                })()}
                                                 </div>
                                                 {r.error && <div style={{ marginTop: '0.75rem', color: '#EF4444', fontSize: '0.875rem' }}>{r.error}</div>}
                                             </div>
@@ -446,53 +354,13 @@ export default function ReportDetailPage() {
                                             {isExpanded ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
                                             ① {getStepCaseName(i)} <XCircle size={18} color="#EF4444" />
                                         </button>
-                                        {isExpanded && (() => {
-                                            const d = getStepData(r, i)
-                                            const hasReq = (d.urlParams && Object.keys(d.urlParams).length > 0) || (d.requestData && Object.keys(d.requestData).length > 0) || (d.requestHeaders && Object.keys(d.requestHeaders).length > 0)
-                                            return (
+                                        {isExpanded && (
                                             <div style={{ padding: '1rem', borderTop: '1px solid #FECACA' }}>
-                                                <div style={{ marginBottom: '1rem', padding: '1rem', background: 'white', borderRadius: '0.5rem', border: '1px solid #E5E7EB' }}>
-                                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', alignItems: 'center', marginBottom: '0.75rem' }}>
-                                                        <span style={{ fontWeight: '700', color: '#3B82F6', fontSize: '0.875rem' }}>{d.method}</span>
-                                                        <span style={{ fontSize: '0.8125rem', color: '#374151', wordBreak: 'break-all', flex: 1 }}>{d.fullUrl || `${d.method} ${r.api_path || r.url || ''}`}</span>
-                                                    </div>
-                                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', fontSize: '0.8125rem', color: '#6B7280' }}>
-                                                        <span style={{ color: '#EF4444', fontWeight: '600' }}>HTTP {r.status_code ?? '-'}</span>
-                                                        <span style={{ padding: '0.2rem 0.5rem', borderRadius: '0.25rem', background: '#FEE2E2', color: '#991B1B', fontWeight: '600' }}>失败</span>
-                                                    </div>
+                                                <div style={{ padding: '1rem', color: '#6B7280', fontSize: '0.875rem' }}>
+                                                    详情已隐藏（仅显示测试摘要）
                                                 </div>
-                                                <div style={{ marginBottom: '0.5rem', display: 'flex', gap: '0.25rem', flexWrap: 'wrap' }}>
-                                                    {STEP_DETAIL_TABS.map((tab) => (
-                                                        <button key={tab} type="button" onClick={() => setStepTab(i, tab)} style={{ padding: '0.35rem 0.75rem', fontSize: '0.8125rem', border: 'none', borderRadius: '0.25rem', cursor: 'pointer', background: getStepTab(i) === tab ? '#667eea' : '#E5E7EB', color: getStepTab(i) === tab ? 'white' : '#374151', fontWeight: getStepTab(i) === tab ? '600' : '400' }}>
-                                                            {STEP_TAB_LABELS[tab]}
-                                                        </button>
-                                                    ))}
-                                                </div>
-                                                <div style={{ minHeight: '120px' }}>
-                                                    {getStepTab(i) === 'responseBody' && (d.response != null && d.response !== '' ? <JsonWithLines data={d.response} maxHeight={320} /> : <div style={{ padding: '1rem', color: '#6B7280' }}>暂无响应体</div>)}
-                                                    {getStepTab(i) === 'responseHeaders' && (d.responseHeaders && Object.keys(d.responseHeaders).length > 0 ? <JsonWithLines data={d.responseHeaders} maxHeight={200} /> : <div style={{ padding: '1rem', color: '#6B7280' }}>暂无响应头</div>)}
-                                                    {getStepTab(i) === 'assertions' && <div style={{ padding: '1rem', color: '#6B7280' }}>状态码 {r.status_code} 未通过</div>}
-                                                    {getStepTab(i) === 'extraction' && (d.extractions?.length > 0 ? <div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8125rem' }}><thead><tr style={{ background: '#F3F4F6' }}><th style={{ padding: '0.5rem', textAlign: 'left' }}>目标字段</th><th style={{ padding: '0.5rem', textAlign: 'left' }}>来源步骤</th><th style={{ padding: '0.5rem', textAlign: 'left' }}>提取结果</th></tr></thead><tbody>{d.extractions.map((ex: any, ei: number) => <tr key={ei} style={{ borderTop: '1px solid #E5E7EB' }}><td style={{ padding: '0.5rem' }}>{ex.to_field}</td><td style={{ padding: '0.5rem' }}>步骤 {ex.from_step}</td><td style={{ padding: '0.5rem' }}>{ex.success ? String(ex.extracted_value ?? '-') : (ex.error_msg || '失败')}</td></tr>)}</tbody></table></div> : <div style={{ padding: '1rem', color: '#6B7280' }}>此步骤未从其他步骤提取数据</div>)}
-                                                    {getStepTab(i) === 'requestContent' && (
-                                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                                                            <div>
-                                                                <div style={{ fontWeight: '600', marginBottom: '0.35rem', fontSize: '0.8125rem' }}>请求地址</div>
-                                                                <div style={{ fontSize: '0.8125rem', wordBreak: 'break-all' }}>{d.fullUrl || `${d.method} ${r.api_path || r.url || '-'}`}</div>
-                                                            </div>
-                                                            {d.requestHeaders && Object.keys(d.requestHeaders).length > 0 && (
-                                                                <div><div style={{ fontWeight: '600', marginBottom: '0.35rem', fontSize: '0.8125rem' }}>请求头</div><JsonWithLines data={d.requestHeaders} maxHeight={150} /></div>
-                                                            )}
-                                                            <div>
-                                                                <div style={{ fontWeight: '600', marginBottom: '0.35rem', fontSize: '0.8125rem' }}>Body / 参数</div>
-                                                                {(d.requestData && Object.keys(d.requestData).length > 0) ? <JsonWithLines data={d.requestData} maxHeight={200} /> : (d.urlParams && Object.keys(d.urlParams).length > 0) ? <JsonWithLines data={d.urlParams} maxHeight={120} /> : <div style={{ padding: '0.75rem', color: '#9CA3AF', fontSize: '0.8125rem' }}>无请求体</div>}
-                                                            </div>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                                {r.error && <div style={{ marginTop: '0.75rem', color: '#EF4444', fontSize: '0.875rem' }}>{r.error}</div>}
                                             </div>
-                                            )
-                                        })()}
+                                        )}
                                     </div>
                                 )
                             })
@@ -502,26 +370,9 @@ export default function ReportDetailPage() {
 
                 {activeTab === 'summary' && (
                     <div style={{ marginBottom: '2rem' }}>
-                        <div style={{ display: 'grid', gap: '1.5rem' }}>
-                            <div style={{ padding: '1rem', background: '#F9FAFB', borderRadius: '0.5rem', border: '1px solid #E5E7EB' }}>
-                                <h3 style={{ fontSize: '1rem', fontWeight: '600', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                    <FileText size={18} /> 测试摘要
-                                </h3>
-                                <div style={{ whiteSpace: 'pre-wrap', fontSize: '0.875rem', lineHeight: 1.6 }}>{phase5 || '暂无摘要'}</div>
-                            </div>
-                            <div style={{ padding: '1rem', background: '#FFFBEB', borderRadius: '0.5rem', border: '1px solid #FDE68A' }}>
-                                <h3 style={{ fontSize: '1rem', fontWeight: '600', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                    <AlertTriangle size={18} /> 失败分析
-                                </h3>
-                                <div style={{ fontSize: '0.875rem' }}>
-                                    {failed > 0 ? `共 ${failed} 个用例失败，详见「失败」Tab 及上方报告摘要中的分析。` : '无失败用例。'}
-                                </div>
-                            </div>
-                            <div style={{ padding: '1rem', background: '#ECFDF5', borderRadius: '0.5rem', border: '1px solid #A7F3D0' }}>
-                                <h3 style={{ fontSize: '1rem', fontWeight: '600', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                    <Lightbulb size={18} /> 优化建议
-                                </h3>
-                                <div style={{ whiteSpace: 'pre-wrap', fontSize: '0.875rem' }}>{phase5?.includes('建议') ? phase5 : '详见上方测试摘要中的建议部分。'}</div>
+                        <div style={{ padding: '1.5rem', background: '#F9FAFB', borderRadius: '0.5rem', border: '1px solid #E5E7EB' }}>
+                            <div className="prose max-w-none" style={{ whiteSpace: 'pre-wrap', fontSize: '0.875rem', lineHeight: 1.6, color: '#374151' }}>
+                                {phase5 || '暂无详细分析报告'}
                             </div>
                         </div>
                     </div>

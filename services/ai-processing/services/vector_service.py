@@ -211,3 +211,11 @@ class VectorService:
             }
             for point in results
         ]
+
+    def delete_api(self, api_id: str):
+        """删除API索引"""
+        point_id = self._generate_id(api_id)
+        self.qdrant.delete(
+            collection_name=self.collection_name,
+            points_selector=[point_id]
+        )

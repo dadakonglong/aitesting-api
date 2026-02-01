@@ -37,6 +37,9 @@ load_dotenv()
 
 app = FastAPI(title="AI Testing API - Unified Edition")
 
+from routers import api_management
+app.include_router(api_management.router)
+
 # CORS
 app.add_middleware(
     CORSMiddleware,
@@ -475,6 +478,15 @@ async def single_api_understand(req: SingleApiUnderstandRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _safe_json(s: Any, default: Any = None) -> Any:
+    if not s:
+        return True # Treat empty as safe to default logic
+    try:
+        json.loads(s)
+        return True
+    except:
+        return False
+
 @app.post("/api/v1/single-api/plan")
 async def single_api_plan(req: SingleApiPlanRequest):
     """阶段2：测试计划 — 根据结构化信息或 api_id 生成 Markdown 测试计划"""
@@ -495,9 +507,9 @@ async def single_api_plan(req: SingleApiPlanRequest):
                 "id": row["id"], "path": row["path"], "method": row["method"],
                 "summary": row["summary"], "description": row["description"],
                 "base_url": row["base_url"],
-                "parameters": json.loads(row["parameters"] or "[]"),
-                "request_body": json.loads(row["request_body"] or "{}"),
-                "headers": json.loads(row["headers"] or "{}"),
+                "parameters": json.loads(row["parameters"] or "[]") if _safe_json(row["parameters"]) else [],
+                "request_body": json.loads(row["request_body"] or "{}") if _safe_json(row["request_body"], default="{}") else {},
+                "headers": json.loads(row["headers"] or "{}") if _safe_json(row["headers"], default="{}") else {},
             }]
             structured_info = {"api_candidates": api_candidates, "entities": [], "chunks": []}
         else:
@@ -528,6 +540,17 @@ async def single_api_generate_code(req: SingleApiGenerateCodeRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _plan_has_cases(plan: Optional[Dict[str, Any]]) -> bool:
+    """检查 plan 是否包含可执行用例"""
+    if not plan:
+        return False
+    for ep in plan.get("endpoints") or []:
+        cases = ep.get("cases") or []
+        if cases:
+            return True
+    return False
+
+
 def _single_api_plan_to_steps(plan: Dict[str, Any]) -> List[Dict]:
     """将计划中的 endpoints[].cases 转为 _run_steps 所需的 steps（支持单接口和多接口）"""
     endpoints = plan.get("endpoints") or []
@@ -541,6 +564,7 @@ def _single_api_plan_to_steps(plan: Dict[str, Any]) -> List[Dict]:
         base_url_ep = (ep.get("base_url") or "").strip()
         for c in ep.get("cases") or []:
             rt = c.get("request_template") or {}
+            et = c.get("expected_template") or {}
             steps.append({
                 "step_order": step_order,
                 "api_path": path,
@@ -550,6 +574,7 @@ def _single_api_plan_to_steps(plan: Dict[str, Any]) -> List[Dict]:
                 "headers": rt.get("headers") or {},
                 "param_mappings": [],
                 "base_url": base_url_ep,
+                "expected_status": et.get("status_code", 200),
             })
             step_order += 1
     return steps
@@ -733,8 +758,11 @@ async def single_api_execute(req: SingleApiExecuteRequest):
 
         if req.steps:
             steps = req.steps
+        elif req.plan and _plan_has_cases(req.plan):
+            # 有 plan 且含用例时，直接用 plan 构建步骤（保证请求 body/headers/params 为真实数据，与 API 管理单测一致）
+            steps = _single_api_plan_to_steps(req.plan)
         elif (req.generated_code or "").strip():
-            # 优先从「生成的代码」解析用例，使执行与代码里的用例一致；解析不到时用 plan 补全
+            # 无有效 plan 时，从生成代码解析
             steps = _parse_playwright_code_to_steps(req.generated_code.strip(), req.plan)
             if not steps and req.plan:
                 steps = _single_api_plan_to_steps(req.plan)
@@ -1282,7 +1310,8 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                 "step_order": step_order,
                 "url": "",
                 "method": step.get("api_method", step.get("method", "GET")).upper(),
-                "request_data": step.get("params", {}),
+                "request_data": (step.get("params") or {}).copy(),
+                "url_params": (step.get("url_params") or {}).copy(),
                 "request_headers": (step.get("headers") or {}).copy(),
                 "success": False,
                 "status_code": "Error",
@@ -1334,6 +1363,11 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                 step_data["url_params"] = params_query
                 step_data["request_headers"] = request_headers
                 step_data["extractions"] = extractions
+                # 确保 JSON body 时有 Content-Type（与实际发送一致）
+                if method != "GET" and params_body and "Content-Type" not in [k.lower() for k in (request_headers or {}).keys()]:
+                    request_headers = dict(request_headers) if request_headers else {}
+                    request_headers["Content-Type"] = "application/json"
+                    step_data["request_headers"] = request_headers
                 res = await client.request(
                     method,
                     url,
@@ -1357,8 +1391,13 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                         resp_headers = {k: v for k, v in res.headers.items()}
                     except Exception:
                         pass
+                expected_status = step.get("expected_status")
+                if expected_status is None:
+                    expected_status = 200
+                success = res.status_code == expected_status if expected_status is not None else res.status_code < 400
                 step_data.update({
                     "status_code": res.status_code,
+                    "expected_status": expected_status,
                     "duration": duration,
                     "response": res_content,
                     "response_headers": resp_headers,
@@ -1366,7 +1405,7 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                     "full_url": full_url,
                     "api_path": step.get("api_path"),
                     "api_method": step.get("api_method", method),
-                    "success": res.status_code < 400,
+                    "success": success,
                 })
                 context[f"step_{step_order}"] = json.loads(json.dumps(step_data, default=str))
                 step_results.append(step_data)
@@ -2294,7 +2333,7 @@ async def create_test_report(req: TestReportCreate):
     cursor.execute(
         """INSERT INTO test_reports (project_id, name, report_type, creator, created_at, end_time, trigger_method, status, payload)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (req.project_id, req.name, req.report_type or "接口测试", req.creator or "", now, now, req.trigger_method or "手动触发", req.status, json.dumps(req.payload, ensure_ascii=False)),
+        (req.project_id, req.name, req.report_type or "接口测试", req.creator or "", now, now, req.trigger_method or "手动触发", req.status, json.dumps(req.payload, ensure_ascii=False, default=str)),
     )
     report_id = cursor.lastrowid
     conn.commit()

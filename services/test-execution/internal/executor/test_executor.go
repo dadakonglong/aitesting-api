@@ -72,6 +72,13 @@ type StepResult struct {
 	Response        map[string]interface{} `json:"response"`
 	ResponseHeaders map[string][]string    `json:"response_headers"`
 	ResponseTime    int64                  `json:"response_time_ms"`
+	
+	// 新增请求详情字段
+	RequestHeaders  map[string]string      `json:"request_headers"`
+	RequestURL      string                 `json:"request_url"`
+	RequestMethod   string                 `json:"request_method"`
+	RequestBody     interface{}            `json:"request_body"`
+	
 	Assertions      []AssertionResult      `json:"assertions"`
 	Extractions     []ExtractionRecord     `json:"extractions"`
 	ErrorMsg        string                 `json:"error_msg,omitempty"`
@@ -153,6 +160,12 @@ func (e *TestExecutor) executeStep(step *TestStep, execCtx *ExecutionContext) *S
 
 	// 2. 构建完整URL
 	fullURL := e.baseURL + step.APIPath
+	
+	// 记录请求详情
+	result.RequestURL = fullURL
+	result.RequestMethod = step.APIMethod
+	result.RequestBody = params
+	result.RequestHeaders = step.Headers
 
 	// 3. 发送HTTP请求
 	resp, err := e.sendRequest(step.APIMethod, fullURL, params, step.Headers, step.Timeout)

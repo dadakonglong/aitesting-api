@@ -52,10 +52,11 @@ SYSTEM_PROMPT = """你是专业的接口测试专家，负责根据接口定义�
     - **注意**：登录接口通常不需要 Authorization，请根据接口用途智能判断。
 3. **断言丰富化**：在 `expected_template.description` 中，明确要求对 Response Body 的关键字段进行校验。
 4. **覆盖度**：一次性生成 6 条以上用例，覆盖正向、边界、健壮和安全场景。
-5. **参数模板**：
-    - `params`：请求体（POST/PUT 等 Body），对象。
-    - `url_params`：Query 参数，对象。
-    - `headers`：确保包含必要的 `Content-Type`（若有 body）以及该用例特有的认证信息。
+5. **参数模板（必填，执行时直接使用）**：
+    - `params`：请求体（POST/PUT 等 Body），必须填满接口定义中的必填字段，每个用例根据 case_type 填不同的值。
+    - `url_params`：Query 参数。
+    - `headers`：必须包含 Content-Type（有 body 时）、以及该用例特有的认证信息。
+6. **禁止空 params**：POST/PUT/PATCH 接口的 params 不得为空对象，必须包含与接口定义一致的字段及具体值。每个用例的 params/headers 不同，用于验证不同请求的不同响应。
 
 只输出 JSON，不要 markdown 代码块包裹。"""
 
@@ -71,7 +72,7 @@ USER_PROMPT_TEMPLATE = """请为以下接口生成测试用例，需包含类型
 - 请求体(OpenAPI requestBody): {request_body}
 - 请求头(OpenAPI headers): {headers}
 
-请为每种请求类型生成至少 1 条**真实**用例（请求体/参数/请求头要与定义匹配），直接返回上述格式的 JSON。"""
+请为每种请求类型生成至少 1 条**真实**用例。每条用例的 request_template.params 必须包含接口定义中所有必填字段的**具体取值**，且不同用例类型（正向/边界/健壮/安全）的取值应不同，以验证不同请求的不同响应。直接返回上述格式的 JSON。"""
 
 
 async def generate_cases_for_endpoint(

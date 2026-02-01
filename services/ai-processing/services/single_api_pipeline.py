@@ -139,14 +139,20 @@ ANALYZER_SYSTEM_PROMPT = """你是测试结果分析专家。
 - 失败用例分析
 - 根因识别
 - 改进建议
+- **报告生成时间**: 必须在报告开头使用用户提供的 current_time，格式为 "*报告生成时间: YYYY-MM-DD HH:MM:SS*"
+
+- **禁止生成一级标题**: 报告不要包含 "# 标题", 因为系统会自动添加。可以直接从 ## 二级标题开始。
+- **禁止生成图表**: 严禁包含 mermaid、gantt、pie 等可视化图表代码块。
+- **禁止包含章节**: 严禁包含 "可视化图表"、"单接口" 等章节标题。
+- **报告生成时间**: 必须在报告开头使用我传给你的 json 数据中的 `current_time`，格式为 "*报告生成时间: {current_time}*"。严禁编造时间。
 
 ## 报告格式
 
-生成 Markdown 格式的分析报告，包含：
-- 测试摘要
-- 可视化图表（通过 Chart MCP）
-- 失败分析
-- 优化建议
+生成 Markdown 格式的分析报告，确保：
+1. 不要使用 # 一级标题。
+2. 不要包含“可视化图表”章节。
+3. 严格使用提供的 current_time。
+4. 包含：测试摘要、失败分析、根因识别、优化建议。
 
 请以 JSON 格式返回：{"report": "完整 Markdown 报告字符串"}。"""
 
@@ -175,6 +181,19 @@ def _load_apis_from_db(db_path: str, project_id: str, limit: Optional[int] = Non
     conn.close()
     apis = []
     for row in rows:
+        try:
+            parameters = json.loads(row["parameters"] or "[]")
+        except:
+            parameters = []
+        try:
+            request_body = json.loads(row["request_body"] or "{}")
+        except:
+            request_body = {}
+        try:
+            headers = json.loads(row["headers"] or "{}")
+        except:
+            headers = {}
+
         apis.append({
             "id": row["id"],
             "path": row["path"],
@@ -182,9 +201,9 @@ def _load_apis_from_db(db_path: str, project_id: str, limit: Optional[int] = Non
             "summary": row["summary"] or "",
             "description": row["description"] or "",
             "base_url": row["base_url"] or "",
-            "parameters": json.loads(row["parameters"] or "[]"),
-            "request_body": json.loads(row["request_body"] or "{}"),
-            "headers": json.loads(row["headers"] or "{}"),
+            "parameters": parameters,
+            "request_body": request_body,
+            "headers": headers,
         })
     if limit is not None:
         apis = apis[:limit]
@@ -851,15 +870,17 @@ async def analyze_suite_result(
         "cases": [{"case_id": r.get("case_id"), "status": r.get("status"), "duration_ms": r.get("duration_ms")} for r in case_results],
     }
 
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     user_prompt = json.dumps(
-        {"total_cases": total, "passed_cases": passed, "failed_cases": failed, "duration_ms": duration_ms, "case_results": case_results},
+        {"current_time": current_time, "total_cases": total, "passed_cases": passed, "failed_cases": failed, "duration_ms": duration_ms, "case_results": case_results},
         ensure_ascii=False,
         indent=2,
     )
+    _log(f"Analyzer prompt inputs: {user_prompt}")
     out = await ai_client.chat(ANALYZER_SYSTEM_PROMPT, user_prompt)
     if isinstance(out, dict):
         report_md = out.get("report") or out.get("content") or json.dumps(out, ensure_ascii=False)
     else:
         report_md = str(out)
-    report_md = f"# 单接口测试结果分析\n\n{report_md}"
+    report_md = f"# 接口测试结果分析\n\n{report_md}"
     return report_md, chart_data

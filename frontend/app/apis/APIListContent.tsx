@@ -265,10 +265,24 @@ export default function APIListContent() {
                 : `${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/apis`
             const method = isEditing ? 'PUT' : 'POST'
 
+            // 确保 parameters 是数组，防止因输入框为空对象 {} 导致后端 List 校验失败
+            let finalParams = newApi.parameters
+            if (!Array.isArray(finalParams)) {
+                // 如果是空对象或者其他非数组类型，且内容为空，则默认为 []
+                // 后端虽然已放宽校验，但前端保持严谨更好
+                finalParams = []
+            }
+
+            const payload = {
+                ...newApi,
+                parameters: finalParams,
+                request_body: newApi.request_body // 保持原样，后端支持 string/dict
+            }
+
             const response = await fetch(url, {
                 method: method,
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(newApi),
+                body: JSON.stringify(payload),
             })
 
             if (response.ok) {
@@ -356,9 +370,13 @@ export default function APIListContent() {
     const projects = Array.from(new Set(apis.map(api => api.project_id || 'default-project')))
 
     const filteredAPIs = apis.filter(api => {
-        const matchesSearch = api.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-            api.path.toLowerCase().includes(searchTerm.toLowerCase()) ||
-            api.description.toLowerCase().includes(searchTerm.toLowerCase())
+        const name = api.name || ''
+        const path = api.path || ''
+        const description = api.description || ''
+
+        const matchesSearch = name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+            path.toLowerCase().includes(searchTerm.toLowerCase()) ||
+            description.toLowerCase().includes(searchTerm.toLowerCase())
         const matchesMethod = selectedMethod === 'all' || api.method === selectedMethod
         const matchesProject = (api.project_id || 'default-project') === currentProject
         return matchesSearch && matchesMethod && matchesProject
@@ -1088,7 +1106,56 @@ export default function APIListContent() {
                                     />
                                 </div>
                                 <div>
-                                    <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', color: '#374151', marginBottom: '0.5rem' }}>请求体 (RequestBody JSON)</label>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                                        <label style={{ fontSize: '0.875rem', fontWeight: '600', color: '#374151' }}>请求体 (RequestBody JSON)</label>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                const val = (typeof newApi.request_body === 'string' ? newApi.request_body : '').trim()
+                                                if (!val) {
+                                                    alert('请先输入 Form Data 字符串')
+                                                    return
+                                                }
+                                                // 尝试检测是否为 key=value 格式
+                                                if (val.includes('=') && !val.trim().startsWith('{') && !val.trim().startsWith('[')) {
+                                                    try {
+                                                        const parts = val.split('&')
+                                                        const obj: Record<string, string> = {}
+                                                        let isForm = false
+                                                        for (const part of parts) {
+                                                            const [rawK, rawV] = part.split('=')
+                                                            if (rawK) {
+                                                                const k = decodeURIComponent(rawK.trim())
+                                                                const v = rawV ? decodeURIComponent(rawV.trim()) : ''
+                                                                obj[k] = v
+                                                                isForm = true
+                                                            }
+                                                        }
+                                                        if (isForm && Object.keys(obj).length > 0) {
+                                                            setNewApi({ ...newApi, request_body: obj })
+                                                        } else {
+                                                            alert('未识别到有效的 key=value 格式')
+                                                        }
+                                                    } catch (err) {
+                                                        alert('转换失败: ' + String(err))
+                                                    }
+                                                } else {
+                                                    alert('当前内容似乎不是 Form Data 格式 (key=value&...)')
+                                                }
+                                            }}
+                                            style={{
+                                                fontSize: '0.75rem',
+                                                padding: '0.25rem 0.5rem',
+                                                background: '#E0F2FE',
+                                                color: '#0284C7',
+                                                border: '1px solid #7DD3FC',
+                                                borderRadius: '0.25rem',
+                                                cursor: 'pointer'
+                                            }}
+                                        >
+                                            格式化 Form Data
+                                        </button>
+                                    </div>
                                     <textarea
                                         value={typeof newApi.request_body === 'string' ? newApi.request_body : JSON.stringify(newApi.request_body, null, 2)}
                                         onChange={(e) => {
@@ -1097,6 +1164,32 @@ export default function APIListContent() {
                                                 setNewApi({ ...newApi, request_body: parsed })
                                             } catch (err) {
                                                 setNewApi({ ...newApi, request_body: e.target.value as any })
+                                            }
+                                        }}
+                                        onBlur={(e) => {
+                                            const val = e.target.value.trim()
+                                            if (!val) return
+                                            // 尝试检测是否为 key=value 格式 (简单的启发式检测)
+                                            if (val.includes('=') && !val.trim().startsWith('{') && !val.trim().startsWith('[')) {
+                                                try {
+                                                    const parts = val.split('&')
+                                                    const obj: Record<string, string> = {}
+                                                    let isForm = false
+                                                    for (const part of parts) {
+                                                        const [rawK, rawV] = part.split('=')
+                                                        if (rawK) {
+                                                            const k = decodeURIComponent(rawK.trim())
+                                                            const v = rawV ? decodeURIComponent(rawV.trim()) : ''
+                                                            obj[k] = v
+                                                            isForm = true
+                                                        }
+                                                    }
+                                                    if (isForm && Object.keys(obj).length > 0) {
+                                                        setNewApi({ ...newApi, request_body: obj })
+                                                    }
+                                                } catch (err) {
+                                                    console.warn('Auto convert form data failed', err)
+                                                }
                                             }
                                         }}
                                         placeholder="{}"

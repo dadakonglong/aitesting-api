@@ -58,7 +58,7 @@ function formatAgentSummary(result: any): string {
     }
     lines.push('检索 API 文档信息...')
     if (moduleNames.length > 0) {
-        lines.push(`   ✓ 找到 ${moduleNames.length} 个模块：${moduleNames.slice(0, 5).join('、')}${moduleNames.length > 5 ? '...' : ''}`)
+        lines.push(`   ✓ 识别 ${moduleNames.length} 个相关实体：${moduleNames.slice(0, 5).join('、')}${moduleNames.length > 5 ? '...' : ''}`)
     } else if (entities.length > 0) {
         lines.push(`   ✓ 识别 ${entities.length} 个实体`)
     }
@@ -226,7 +226,14 @@ export default function SingleApiTestTab({
             }
             onResultChange(selectedId, newData)
 
-            const timeStr = new Date().toISOString().slice(0, 19).replace('T', ' ')
+            const now = new Date()
+            const year = now.getFullYear()
+            const month = String(now.getMonth() + 1).padStart(2, '0')
+            const day = String(now.getDate()).padStart(2, '0')
+            const hour = String(now.getHours()).padStart(2, '0')
+            const minute = String(now.getMinutes()).padStart(2, '0')
+            const second = String(now.getSeconds()).padStart(2, '0')
+            const timeStr = `${year}-${month}-${day} ${hour}:${minute}:${second}`
             const reportName = `${getSingleApiDisplayName(newData)}-${timeStr}`
             try {
                 await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/test-reports`, {

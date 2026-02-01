@@ -21,6 +21,18 @@ type Scenario struct {
 	UpdatedAt           time.Time              `json:"updated_at"`
 }
 
+// API 接口定义（用于数据生成时获取Schema）
+type API struct {
+	ID          int64  `gorm:"primary_key" json:"id"`
+	Path        string `json:"path"`
+	Method      string `json:"method"`
+	Summary     string `json:"summary"`
+	Description string `json:"description"`
+	Parameters  string `json:"parameters"`   // JSON string
+	RequestBody string `json:"request_body"` // JSON string
+	Headers     string `json:"headers"`      // JSON string
+}
+
 // TestCase 测试用例
 type TestCase struct {
 	ID           uuid.UUID  `gorm:"type:uuid;primary_key" json:"id"`

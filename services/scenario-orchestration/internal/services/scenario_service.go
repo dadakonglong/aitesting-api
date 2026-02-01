@@ -82,8 +82,46 @@ func (s *ScenarioService) GenerateTestCase(scenarioID uuid.UUID, dataStrategy st
 	for i, stepData := range steps {
 		stepMap := stepData.(map[string]interface{})
 		
+
 		// 调用AI生成测试数据
-		testData, err := s.callAIGenerateData(stepMap, dataStrategy)
+        // 直接传递 api_path 和 api_method，由 Python 服务的 generate-data 接口负责查找 Schema
+        generatePayload := map[string]interface{}{}
+        
+        // 传递 path 和 method
+        if p, ok := stepMap["api_path"].(string); ok {
+            generatePayload["api_path"] = p
+        }
+        if m, ok := stepMap["api_method"].(string); ok {
+            generatePayload["api_method"] = m
+        }
+        
+        // 传递 params_schema 作为 fallback (如果上游注入了的话)
+        paramSchema := make(map[string]interface{})
+        if ps, ok := stepMap["params_schema"].([]interface{}); ok {
+             for _, p := range ps {
+                 if pMap, ok := p.(map[string]interface{}); ok {
+                     if name, ok := pMap["name"].(string); ok {
+                         paramSchema[name] = pMap
+                     }
+                 }
+             }
+        }
+        if len(paramSchema) > 0 {
+            generatePayload["param_schema"] = paramSchema
+        } else if p, ok := stepMap["params"].(map[string]interface{}); ok {
+             // Fallback to basic params if available
+             generatePayload["param_schema"] = p
+        } else {
+             generatePayload["param_schema"] = map[string]interface{}{}
+        }
+        
+        // 获取 Scenario 的 ProjectID (需从 Scenario 对象获取，这里假设已加载或可以传)
+        // 注意：GenerateTestCase 签名里没传 projectID，但我们可以从 Scenario 获取
+        // 为了方便，这里暂时假设 default-project 或者需要修改 GenerateTestCase 签名
+        // 查看 GenerateTestCase 代码：它是先查了 Scenario
+        generatePayload["project_id"] = scenario.ProjectID.String()
+
+		testData, err := s.callAIGenerateData(generatePayload, dataStrategy)
 		if err != nil {
 			return nil, fmt.Errorf("生成测试数据失败: %w", err)
 		}

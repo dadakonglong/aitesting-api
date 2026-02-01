@@ -43,6 +43,8 @@ import uuid
 from typing import Any
 
 app.include_router(import_router.router)
+from routers import api_management
+app.include_router(api_management.router)
 
 # 路径配置
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -193,6 +195,10 @@ class DataGenerationRequest(BaseModel):
     business_rules: List[Dict] = []
     strategy: str = "smart"
     count: int = 1
+    # 新增选填字段，用于后端查找 Schema
+    api_path: Optional[str] = None
+    method: Optional[str] = None
+    project_id: str = "default-project"
 
 class AssertionGenerationRequest(BaseModel):
     api_info: Dict
@@ -257,7 +263,8 @@ async def parse_scenario(request: ScenarioParseRequest):
     try:
         result = await scenario_parser.parse_scenario(
             nlu_result=request.nlu_result,
-            project_id=request.project_id
+            project_id=request.project_id,
+            db_path=DB_PATH
         )
         return result
     except Exception as e:
@@ -273,8 +280,53 @@ async def generate_data(request: DataGenerationRequest):
     根据参数schema和业务规则生成测试数据
     """
     try:
+    try:
+        # 如果 schema 为空但提供了 path/method，尝试从 DB 加载
+        target_schema = request.param_schema
+        if not target_schema and request.api_path:
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                
+                # 尝试多条件查找
+                query = "SELECT parameters, request_body FROM apis WHERE project_id = ? AND path = ?"
+                args = [request.project_id, request.api_path]
+                if request.method:
+                    query += " AND method = ?"
+                    args.append(request.method)
+                
+                cursor.execute(query, tuple(args))
+                row = cursor.fetchone()
+                conn.close()
+
+                if row:
+                    target_schema = {}
+                    # 合并 parameters
+                    if row['parameters']:
+                        params = json.loads(row['parameters'])
+                        for p in params:
+                             if isinstance(p, dict) and 'name' in p:
+                                 target_schema[p['name']] = p
+                    
+                    # 合并 request_body
+                    if row['request_body']:
+                        body = json.loads(row['request_body'])
+                        # 尝试提取 properties
+                        props = {}
+                        if 'content' in body and 'application/json' in body['content']:
+                             schema = body['content']['application/json'].get('schema', {})
+                             props = schema.get('properties', {})
+                        elif 'properties' in body:
+                             props = body['properties']
+                        
+                        target_schema.update(props)
+            except Exception as e:
+                print(f"Schema lookup failed: {e}")
+                # Fallback to empty schema
+
         result = await data_generator.generate_data(
-            param_schema=request.param_schema,
+            param_schema=target_schema,
             business_rules=request.business_rules,
             strategy=request.strategy,
             count=request.count
@@ -363,21 +415,7 @@ async def enhance_scenario(request: RAGEnhanceRequest):
 
 # === API管理相关 ===
 
-@app.get("/api/v1/apis")
-async def list_apis(project_id: Optional[str] = None, limit: int = 100):
-    """
-    获取已导入的API列表
-    
-    返回所有已索引到向量数据库的API
-    """
-    try:
-        apis = vector_service.list_apis(project_id=project_id, limit=limit)
-        return {
-            "total": len(apis),
-            "apis": apis
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     import uvicorn
