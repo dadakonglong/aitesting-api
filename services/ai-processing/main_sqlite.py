@@ -328,6 +328,20 @@ def init_database():
         analysis TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
+
+    # 接口测试报告表（执行后保存，供测试报告页面展示）
+    cursor.execute('''CREATE TABLE IF NOT EXISTS test_reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        report_type TEXT DEFAULT '接口测试',
+        creator TEXT DEFAULT '',
+        created_at TEXT DEFAULT (datetime('now', 'localtime')),
+        end_time TEXT DEFAULT (datetime('now', 'localtime')),
+        trigger_method TEXT DEFAULT '手动触发',
+        status TEXT DEFAULT 'success',
+        payload TEXT
+    )''')
     
     # 兼容性处理：如果 api 表中存在 default-project 但 projects 表中没有，则插入
     cursor.execute("SELECT COUNT(*) FROM projects WHERE id = 'default-project'")
@@ -541,6 +555,34 @@ def _single_api_plan_to_steps(plan: Dict[str, Any]) -> List[Dict]:
     return steps
 
 
+def _parse_js_like_object(s: str) -> Optional[Dict]:
+    """尝试将 JS 风格对象字符串解析为 dict，支持 { key: 'val' } 和标准 JSON"""
+    if not s or not isinstance(s, str):
+        return None
+    s = s.strip()
+    if not s.startswith("{"):
+        return None
+    # 1) 直接 JSON 解析
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    # 2) 单引号改双引号后再试（简单替换可能破坏字符串内的引号，仅对简单结构有效）
+    try:
+        t = s.replace("'", '"')
+        return json.loads(t)
+    except Exception:
+        pass
+    # 3) 将未加引号的键名加上双引号：, key : -> , "key" :
+    try:
+        t = re.sub(r"([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)", r'\1"\2"\3', s)
+        t = t.replace("'", '"')
+        return json.loads(t)
+    except Exception:
+        pass
+    return None
+
+
 def _parse_playwright_code_to_steps(
     code: str, plan_fallback: Optional[Dict[str, Any]] = None
 ) -> List[Dict]:
@@ -624,50 +666,42 @@ def _parse_playwright_code_to_steps(
             i += 1
         opts_str = block[brace_start:i]
         params = {}
+        url_params = {}
         headers = {}
-        # 从 opts_str 中提取 data: { ... } 和 headers: { ... }
-        data_m = re.search(r"data\s*:\s*(\{(?:[^{}]|\{[^{}]*\})*\})", opts_str)
-        if data_m:
-            try:
-                js = data_m.group(1).replace("'", '"')
-                params = json.loads(js)
-            except Exception:
-                pass
-        if not params and "data" in opts_str and plan_fallback:
-            # 代码里是 data: variable（如 defaultBody），用 plan 补全（支持多 endpoint）
-            step_idx = bi - 1
-            idx = step_idx
-            for ep in plan_endpoints:
-                cases = ep.get("cases") or []
-                if idx < len(cases):
-                    rt = cases[idx].get("request_template") or {}
-                    params = rt.get("params") or {}
+        # 从 opts_str 中提取 data/form/formData: { ... } 和 headers: { ... }
+        for data_key in ("data", "form", "formData"):
+            data_m = re.search(rf"{data_key}\s*:\s*(\{{(?:[^{{}}]|\{{[^{{}}]*\}})*\}})", opts_str)
+            if data_m:
+                parsed = _parse_js_like_object(data_m.group(1))
+                if parsed and isinstance(parsed, dict):
+                    params = parsed
                     break
-                idx -= len(cases)
         headers_m = re.search(r"headers\s*:\s*(\{(?:[^{}]|\{[^{}]*\})*\})", opts_str)
         if headers_m:
-            try:
-                js = headers_m.group(1).replace("'", '"')
-                headers = json.loads(js)
-            except Exception:
-                pass
-        # 若未解析到 params，用 plan_fallback 中同索引用例补全（支持多 endpoint）
-        if not params and plan_fallback:
-            idx = bi - 1
-            for ep in plan_endpoints:
-                cases = ep.get("cases") or []
-                if idx < len(cases):
-                    rt = cases[idx].get("request_template") or {}
-                    params = rt.get("params") or {}
-                    headers = headers or rt.get("headers") or {}
-                    break
-                idx -= len(cases)
+            parsed = _parse_js_like_object(headers_m.group(1))
+            if parsed and isinstance(parsed, dict):
+                headers = parsed
+        # 始终用 plan 的 request_template 作为权威来源（测试用例由 plan 生成，body/headers 必须一致）
+        rt = {}
+        step_idx = bi - 1
+        idx = step_idx
+        for ep in plan_endpoints:
+            cases = ep.get("cases") or []
+            if idx < len(cases):
+                rt = cases[idx].get("request_template") or {}
+                break
+            idx -= len(cases)
+        if rt:
+            # plan 有数据时，以 plan 为准（测试用例由 plan 生成，请求内容必须与 plan 一致）
+            params = rt.get("params") or params or {}
+            url_params = rt.get("url_params") or {}
+            headers = rt.get("headers") or headers or {}
         steps.append({
             "step_order": len(steps) + 1,
             "api_path": block_path,
             "api_method": method,
             "params": params,
-            "url_params": {},
+            "url_params": url_params,
             "headers": headers,
             "param_mappings": [],
             "base_url": "",
@@ -853,13 +887,24 @@ async def single_api_full_pipeline(req: SingleApiFullPipelineRequest):
                 conn = sqlite3.connect(DB_PATH)
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
+                # 1) 优先：env_name=environment 或 is_default=1
                 cursor.execute(
                     "SELECT base_url FROM project_environments WHERE project_id = ? AND (env_name = ? OR is_default = 1) ORDER BY is_default DESC LIMIT 1",
                     (req.project_id, req.environment),
                 )
                 row = cursor.fetchone()
+                if row:
+                    base_url = (row["base_url"] or "").strip()
+                # 2) 兜底：该项目下任意环境
+                if not base_url:
+                    cursor.execute(
+                        "SELECT base_url FROM project_environments WHERE project_id = ? AND base_url IS NOT NULL AND base_url != '' ORDER BY is_default DESC, id LIMIT 1",
+                        (req.project_id,),
+                    )
+                    row = cursor.fetchone()
+                    if row:
+                        base_url = (row["base_url"] or "").strip()
                 conn.close()
-                base_url = (row["base_url"] or "").strip() if row else ""
             if base_url:
                 steps = _single_api_plan_to_steps(plan_payload)
                 if steps:
@@ -1303,10 +1348,24 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                     res_content = res.json()
                 except Exception:
                     pass
+                full_url = url
+                if params_query:
+                    full_url = url + ("&" if "?" in url else "?") + urllib.parse.urlencode(params_query)
+                resp_headers = {}
+                if hasattr(res, "headers"):
+                    try:
+                        resp_headers = {k: v for k, v in res.headers.items()}
+                    except Exception:
+                        pass
                 step_data.update({
                     "status_code": res.status_code,
                     "duration": duration,
                     "response": res_content,
+                    "response_headers": resp_headers,
+                    "response_size": len(res.text) if hasattr(res, "text") else 0,
+                    "full_url": full_url,
+                    "api_path": step.get("api_path"),
+                    "api_method": step.get("api_method", method),
                     "success": res.status_code < 400,
                 })
                 context[f"step_{step_order}"] = json.loads(json.dumps(step_data, default=str))
@@ -2212,6 +2271,102 @@ def _parse_time_range(time_range: str) -> str:
     if time_range == "30d":
         return "-30 days"
     return "-7 days"
+
+
+# ============= 接口测试报告 CRUD =============
+
+class TestReportCreate(BaseModel):
+    project_id: str = "default-project"
+    name: str
+    report_type: Optional[str] = "接口测试"
+    creator: Optional[str] = ""
+    trigger_method: Optional[str] = "手动触发"
+    status: str = "success"
+    payload: Dict[str, Any]
+
+
+@app.post("/api/v1/test-reports")
+async def create_test_report(req: TestReportCreate):
+    """保存接口测试执行报告"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute(
+        """INSERT INTO test_reports (project_id, name, report_type, creator, created_at, end_time, trigger_method, status, payload)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (req.project_id, req.name, req.report_type or "接口测试", req.creator or "", now, now, req.trigger_method or "手动触发", req.status, json.dumps(req.payload, ensure_ascii=False)),
+    )
+    report_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return {"id": report_id, "name": req.name, "created_at": now}
+
+
+@app.get("/api/v1/test-reports")
+async def list_test_reports(project_id: str = "default-project"):
+    """获取项目下所有测试报告列表"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, project_id, name, report_type, creator, created_at, end_time, trigger_method, status FROM test_reports WHERE project_id = ? ORDER BY created_at DESC",
+        (project_id or "default-project",),
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+@app.get("/api/v1/test-reports/{report_id}")
+async def get_test_report(report_id: int):
+    """获取报告详情"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM test_reports WHERE id = ?", (report_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    d = dict(row)
+    if d.get("payload"):
+        try:
+            d["payload"] = json.loads(d["payload"])
+        except Exception:
+            d["payload"] = {}
+    return d
+
+
+class TestReportUpdate(BaseModel):
+    name: str
+
+
+@app.put("/api/v1/test-reports/{report_id}")
+async def update_test_report(report_id: int, req: TestReportUpdate):
+    """更新报告名称"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE test_reports SET name = ? WHERE id = ?", (req.name, report_id))
+    conn.commit()
+    updated = cursor.rowcount
+    conn.close()
+    if updated == 0:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    return {"success": True}
+
+
+@app.delete("/api/v1/test-reports/{report_id}")
+async def delete_test_report(report_id: int):
+    """删除报告"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM test_reports WHERE id = ?", (report_id,))
+    conn.commit()
+    deleted = cursor.rowcount
+    conn.close()
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    return {"success": True}
 
 
 @app.get("/api/v1/reports/overview")

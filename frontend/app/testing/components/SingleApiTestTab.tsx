@@ -15,6 +15,7 @@ import {
 } from 'lucide-react'
 import { useProject } from '../../contexts/ProjectContext'
 import type { SingleApiCaseItem } from '../page'
+import { getSingleApiDisplayName } from '../page'
 
 interface EnvItem {
     id: number
@@ -217,12 +218,32 @@ export default function SingleApiTestTab({
                 return
             }
             const analyzeData = await analyzeRes.json()
-            onResultChange(selectedId, {
+            const newData = {
                 ...result,
                 phase4_result: suiteResult,
                 phase5_report: analyzeData.report ?? null,
                 phase5_chart_data: analyzeData.chart_data ?? null,
-            })
+            }
+            onResultChange(selectedId, newData)
+
+            const timeStr = new Date().toISOString().slice(0, 19).replace('T', ' ')
+            const reportName = `${getSingleApiDisplayName(newData)}-${timeStr}`
+            try {
+                await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/test-reports`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        project_id: currentProject,
+                        name: reportName,
+                        report_type: '接口测试',
+                        trigger_method: '手动触发',
+                        status: suiteResult.failed_cases > 0 ? 'error' : 'success',
+                        payload: { phase2_plan: result.phase2_plan, phase4_result: suiteResult, phase5_report: analyzeData.report, phase5_chart_data: analyzeData.chart_data },
+                    }),
+                })
+            } catch (_e) {
+                /* 保存报告失败不影响主流程 */
+            }
             setExpanded('phase4')
             setStepsExpanded(true)
         } catch (error: any) {

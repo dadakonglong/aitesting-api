@@ -4,8 +4,16 @@ import { useState, useEffect } from 'react'
 import { Sparkles, Loader2, CheckCircle2, ArrowRight, Target } from 'lucide-react'
 import Link from 'next/link'
 import { useProject } from '../../contexts/ProjectContext'
+import { getSingleApiDisplayName } from '../page'
 
 type Mode = 'scenario' | 'single-api'
+
+interface EnvItem {
+    id: number
+    env_name: string
+    base_url: string
+    is_default?: number
+}
 
 type Props = {
     /** 接口测试生成成功后调用，结果会放到「接口测试」Tab 并自动切过去 */
@@ -19,6 +27,40 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
     const [singleApiInput, setSingleApiInput] = useState('')
     const [loading, setLoading] = useState(false)
     const [result, setResult] = useState<any>(null)
+    const [environments, setEnvironments] = useState<EnvItem[]>([])
+    const [selectedEnvId, setSelectedEnvId] = useState<number | 'custom' | null>(null)
+    const [execBaseUrl, setExecBaseUrl] = useState('')
+
+    // 接口测试模式：加载项目环境
+    useEffect(() => {
+        if (mode !== 'single-api') return
+        const load = async () => {
+            try {
+                const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/projects/${encodeURIComponent(currentProject)}/environments`)
+                if (!res.ok) return
+                const data = await res.json()
+                const list: EnvItem[] = Array.isArray(data) ? data : []
+                setEnvironments(list)
+                const defaultEnv = list.find((e) => e.is_default === 1)
+                const first = list[0]
+                if (defaultEnv) {
+                    setSelectedEnvId(defaultEnv.id)
+                    setExecBaseUrl(defaultEnv.base_url || '')
+                } else if (first) {
+                    setSelectedEnvId(first.id)
+                    setExecBaseUrl(first.base_url || '')
+                } else {
+                    setSelectedEnvId(null)
+                    setExecBaseUrl('')
+                }
+            } catch {
+                setEnvironments([])
+                setSelectedEnvId(null)
+                setExecBaseUrl('')
+            }
+        }
+        load()
+    }, [currentProject, mode])
 
     // WIP 状态持久化：防止切 Tab 丢失输入
     useEffect(() => {
@@ -85,13 +127,32 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
         setLoading(true)
         setResult(null)
         try {
+            // 获取 base_url：优先用选中项，否则从环境列表取
+            let baseUrl = execBaseUrl.trim()
+            if (!baseUrl && environments.length > 0) {
+                const env = (typeof selectedEnvId === 'number'
+                    ? environments.find((e) => e.id === selectedEnvId)
+                    : null) || environments.find((e) => e.is_default === 1) || environments[0]
+                baseUrl = (env?.base_url || '').trim()
+            }
+            if (!baseUrl) {
+                const envRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/projects/${encodeURIComponent(currentProject)}/environments`)
+                if (envRes.ok) {
+                    const envList: EnvItem[] = await envRes.json()
+                    if (Array.isArray(envList) && envList.length > 0) {
+                        const env = envList.find((e) => e.is_default === 1) || envList[0]
+                        baseUrl = (env?.base_url || '').trim()
+                    }
+                }
+            }
+
             const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/single-api/full-pipeline`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     natural_language_input: singleApiInput.trim(),
                     project_id: currentProject,
-                    base_url: '',
+                    base_url: baseUrl,
                     environment: 'test',
                     run_execution: true,
                 }),
@@ -100,7 +161,102 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                 const err = await res.json().catch(() => ({}))
                 throw new Error(err.detail || err.message || '单接口流水线失败')
             }
-            const data = await res.json()
+            let data = await res.json()
+
+            // 若流水线未执行（无 base_url 或后端未找到），自动补跑 execute + analyze
+            if (data.phase2_plan?.endpoints?.length && !data.phase4_result) {
+                let runBaseUrl = baseUrl
+                if (!runBaseUrl && environments.length > 0) {
+                    const env = environments.find((e) => e.is_default === 1) || environments[0]
+                    runBaseUrl = (env?.base_url || '').trim()
+                }
+                if (!runBaseUrl) {
+                    const envRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/projects/${encodeURIComponent(currentProject)}/environments`)
+                    if (envRes.ok) {
+                        const envList: EnvItem[] = await envRes.json()
+                        if (Array.isArray(envList) && envList.length > 0) {
+                            runBaseUrl = ((envList.find((e) => e.is_default === 1) || envList[0])?.base_url || '').trim()
+                        }
+                    }
+                }
+                if (runBaseUrl) {
+                    try {
+                        const execRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/single-api/execute`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                project_id: currentProject,
+                                base_url: runBaseUrl,
+                                environment: 'test',
+                                plan: data.phase2_plan,
+                                generated_code: data.phase3_code || undefined,
+                            }),
+                        })
+                        if (execRes.ok) {
+                            const suiteResult = await execRes.json()
+                            const analyzeRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/single-api/analyze`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ suite_result: suiteResult }),
+                            })
+                            if (analyzeRes.ok) {
+                                const analyzeData = await analyzeRes.json()
+                                data = {
+                                    ...data,
+                                    phase4_result: suiteResult,
+                                    phase5_report: analyzeData.report ?? null,
+                                    phase5_chart_data: analyzeData.chart_data ?? null,
+                                }
+                                const timeStr = new Date().toISOString().slice(0, 19).replace('T', ' ')
+                                const reportName = `${getSingleApiDisplayName(data)}-${timeStr}`
+                                try {
+                                    await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/test-reports`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({
+                                            project_id: currentProject,
+                                            name: reportName,
+                                            report_type: '接口测试',
+                                            trigger_method: '手动触发',
+                                            status: suiteResult.failed_cases > 0 ? 'error' : 'success',
+                                            payload: { phase2_plan: data.phase2_plan, phase4_result: suiteResult, phase5_report: analyzeData.report, phase5_chart_data: analyzeData.chart_data },
+                                        }),
+                                    })
+                                    data._reportSaved = true
+                                } catch (_e) {
+                                    /* 保存报告失败不影响主流程 */
+                                }
+                            } else {
+                                data = { ...data, phase4_result: suiteResult, phase5_report: null, phase5_chart_data: null }
+                            }
+                        }
+                    } catch (_e) {
+                        /* 补跑失败时仍返回原始数据 */
+                    }
+                }
+            }
+
+            if (data.phase4_result && data.phase2_plan && !data._reportSaved) {
+                const timeStr = new Date().toISOString().slice(0, 19).replace('T', ' ')
+                const reportName = `${getSingleApiDisplayName(data)}-${timeStr}`
+                try {
+                    await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/test-reports`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            project_id: currentProject,
+                            name: reportName,
+                            report_type: '接口测试',
+                            trigger_method: '手动触发',
+                            status: (data.phase4_result.failed_cases || 0) > 0 ? 'error' : 'success',
+                            payload: { phase2_plan: data.phase2_plan, phase4_result: data.phase4_result, phase5_report: data.phase5_report, phase5_chart_data: data.phase5_chart_data },
+                        }),
+                    })
+                } catch (_e) {
+                    /* 保存报告失败不影响主流程 */
+                }
+            }
+
             if (onSingleApiGenerated) {
                 onSingleApiGenerated(data)
             } else {
@@ -205,6 +361,79 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                                 }}
                                 placeholder="例如：为登录接口生成完整测试&#10;为登录、注册、忘记密码三个接口生成测试用例"
                             />
+                        </div>
+                        <div style={{ marginBottom: '1rem' }}>
+                            <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', color: '#374151', marginBottom: '0.5rem' }}>
+                                🌐 接口基础地址（用于生成后自动执行）
+                            </label>
+                            {environments.length > 0 ? (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                    <select
+                                        value={selectedEnvId === 'custom' ? 'custom' : (selectedEnvId ?? '')}
+                                        onChange={(e) => {
+                                            const v = e.target.value
+                                            if (v === 'custom') {
+                                                setSelectedEnvId('custom')
+                                                setExecBaseUrl('')
+                                            } else {
+                                                const id = Number(v)
+                                                const env = environments.find((ep) => ep.id === id)
+                                                if (env) {
+                                                    setSelectedEnvId(id)
+                                                    setExecBaseUrl(env.base_url || '')
+                                                }
+                                            }
+                                        }}
+                                        style={{
+                                            minWidth: '200px',
+                                            padding: '0.5rem 0.75rem',
+                                            border: '1px solid #D1D5DB',
+                                            borderRadius: '0.5rem',
+                                            fontSize: '0.875rem',
+                                            background: 'white',
+                                        }}
+                                    >
+                                        {environments.map((env) => (
+                                            <option key={env.id} value={env.id}>
+                                                {env.env_name} — {env.base_url}
+                                            </option>
+                                        ))}
+                                        <option value="custom">自定义输入...</option>
+                                    </select>
+                                    {selectedEnvId === 'custom' && (
+                                        <input
+                                            type="text"
+                                            value={execBaseUrl}
+                                            onChange={(e) => setExecBaseUrl(e.target.value)}
+                                            placeholder="如 https://api.example.com"
+                                            style={{
+                                                width: '280px',
+                                                padding: '0.5rem 0.75rem',
+                                                border: '1px solid #D1D5DB',
+                                                borderRadius: '0.5rem',
+                                                fontSize: '0.875rem',
+                                            }}
+                                        />
+                                    )}
+                                </div>
+                            ) : (
+                                <input
+                                    type="text"
+                                    value={execBaseUrl}
+                                    onChange={(e) => setExecBaseUrl(e.target.value)}
+                                    placeholder="如 https://api.example.com，或在项目设置中配置环境"
+                                    style={{
+                                        width: '100%',
+                                        padding: '0.5rem 0.75rem',
+                                        border: '1px solid #D1D5DB',
+                                        borderRadius: '0.5rem',
+                                        fontSize: '0.875rem',
+                                    }}
+                                />
+                            )}
+                            <p style={{ fontSize: '0.75rem', color: '#6B7280', marginTop: '0.25rem' }}>
+                                💡 选择或填写后，一键生成将自动执行测试并生成分析报告
+                            </p>
                         </div>
                     </>
                 )}

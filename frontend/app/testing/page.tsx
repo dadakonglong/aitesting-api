@@ -36,7 +36,7 @@ function saveSingleApiResultsToStorage(projectId: string, items: SingleApiCaseIt
 }
 
 /** 从流水线结果中提取展示名，单接口如「登录接口测试用例」，多接口如「登录、注册、忘记密码 接口测试用例」 */
-function getSingleApiDisplayName(data: any): string {
+export function getSingleApiDisplayName(data: any): string {
     if (!data?.phase2_plan?.endpoints?.length) return '未命名接口测试用例'
     const endpoints = data.phase2_plan.endpoints
     const parts = endpoints.slice(0, 5).map((ep: any) => {
