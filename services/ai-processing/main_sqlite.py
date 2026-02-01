@@ -1363,17 +1363,36 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                 step_data["url_params"] = params_query
                 step_data["request_headers"] = request_headers
                 step_data["extractions"] = extractions
-                # 确保 JSON body 时有 Content-Type（与实际发送一致）
-                if method != "GET" and params_body and "Content-Type" not in [k.lower() for k in (request_headers or {}).keys()]:
-                    request_headers = dict(request_headers) if request_headers else {}
-                    request_headers["Content-Type"] = "application/json"
-                    step_data["request_headers"] = request_headers
+                # 根据 Content-Type 选择 body 格式：form-urlencoded 用 data=，否则用 json=
+                req_headers = dict(request_headers) if request_headers else {}
+                ct = (req_headers.get("Content-Type") or req_headers.get("content-type") or "").lower()
+                if method != "GET" and params_body:
+                    if "Content-Type" not in [k for k in req_headers.keys()]:
+                        req_headers["Content-Type"] = "application/json"
+                        ct = "application/json"
+                    step_data["request_headers"] = req_headers
+                use_form = "x-www-form-urlencoded" in ct or "form-urlencoded" in ct
+                body_data = None
+                if method != "GET" and params_body:
+                    if use_form:
+                        # form 编码前，将 dict/list 转为 JSON 字符串（如 parm 字段），否则会变成 Python repr 格式
+                        body_data = {}
+                        for k, v in params_body.items():
+                            if isinstance(v, (dict, list)):
+                                body_data[k] = json.dumps(v, ensure_ascii=False)
+                            elif v is not None:
+                                body_data[k] = str(v) if not isinstance(v, str) else v
+                            else:
+                                body_data[k] = ""
+                    else:
+                        body_data = params_body
                 res = await client.request(
                     method,
                     url,
                     params=params_query if params_query else None,
-                    json=params_body if method != "GET" and params_body else None,
-                    headers=request_headers,
+                    data=body_data if use_form and body_data else None,
+                    json=body_data if not use_form and body_data else None,
+                    headers=req_headers,
                     timeout=15.0,
                 )
                 duration = (datetime.now() - start_time).total_seconds()
@@ -1585,6 +1604,41 @@ async def delete_project(project_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+def _flatten_request_body_from_openapi(request_body: Dict) -> Optional[Dict]:
+    """
+    从 OpenAPI requestBody 提取扁平的 Body 参数（供执行使用）。
+    支持 content.application/json、multipart/form-data、x-www-form-urlencoded。
+    保持 example 原始类型：parm 的 example 为 JSON 字符串则存为字符串，不解析成对象。
+    """
+    if not request_body or not isinstance(request_body, dict):
+        return None
+    content = request_body.get("content") or request_body.get("Content")
+    if not isinstance(content, dict):
+        return None
+    for _ct_key, mediatype in content.items():
+        if not isinstance(mediatype, dict):
+            continue
+        schema = mediatype.get("schema") or mediatype.get("Schema")
+        if not isinstance(schema, dict):
+            continue
+        props = schema.get("properties") or schema.get("Properties") or {}
+        if not isinstance(props, dict) or not props:
+            continue
+        out = {}
+        for k, v in props.items():
+            if not isinstance(v, dict):
+                continue
+            ex = v.get("example") if "example" in v else v.get("default")
+            if ex is None:
+                ex = ""
+            if isinstance(ex, (dict, list)):
+                out[k] = json.dumps(ex, ensure_ascii=False)
+            else:
+                out[k] = ex
+        return out if out else None
+    return None
+
+
 @app.post("/api/v1/import/swagger")
 async def import_swagger(project_id: str = Form("default-project"), source: str = Form(None), file: UploadFile = File(None)):
     try:
@@ -1625,7 +1679,9 @@ async def import_swagger(project_id: str = Form("default-project"), source: str 
                 if not isinstance(details, dict):
                     continue
                 params = details.get("parameters", [])
-                request_body = details.get("requestBody", {})
+                request_body_raw = details.get("requestBody", {})
+                request_body_flat = _flatten_request_body_from_openapi(request_body_raw) if isinstance(request_body_raw, dict) else None
+                request_body_to_store = request_body_flat if request_body_flat else (request_body_raw if isinstance(request_body_raw, dict) else {})
                 apis.append((
                     path,
                     method.upper(),
@@ -1633,7 +1689,7 @@ async def import_swagger(project_id: str = Form("default-project"), source: str 
                     details.get("description", ""),
                     base_url,
                     json.dumps(params) if isinstance(params, (list, dict)) else "[]",
-                    json.dumps(request_body) if isinstance(request_body, dict) else "{}",
+                    json.dumps(request_body_to_store, ensure_ascii=False) if isinstance(request_body_to_store, dict) else "{}",
                     project_id,
                 ))
 

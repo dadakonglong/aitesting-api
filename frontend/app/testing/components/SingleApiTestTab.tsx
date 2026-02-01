@@ -12,7 +12,39 @@ import {
     FileText,
     Trash2,
     List,
+    CheckCircle,
+    XCircle,
 } from 'lucide-react'
+
+const STEP_DETAIL_TABS = ['responseBody', 'responseHeaders', 'assertions', 'extraction', 'requestContent'] as const
+type StepDetailTab = (typeof STEP_DETAIL_TABS)[number]
+const STEP_TAB_LABELS: Record<StepDetailTab, string> = {
+    responseBody: '响应体',
+    responseHeaders: '响应头',
+    assertions: '断言',
+    extraction: '提取',
+    requestContent: '请求内容',
+}
+
+function JsonWithLines({ data, maxHeight = 300 }: { data: any; maxHeight?: number }) {
+    let str = ''
+    try {
+        str = typeof data === 'object' ? JSON.stringify(data, null, 2) : String(data ?? '')
+    } catch {
+        str = String(data)
+    }
+    const lines = str.split('\n')
+    return (
+        <div style={{ display: 'flex', fontFamily: 'ui-monospace, monospace', fontSize: '0.8125rem', background: '#1E293B', color: '#E2E8F0', borderRadius: '0.375rem', overflow: 'auto', maxHeight: `${maxHeight}px` }}>
+            <div style={{ padding: '0.5rem 0.75rem', background: '#334155', color: '#94A3B8', minWidth: '2.5rem', userSelect: 'none', textAlign: 'right' }}>
+                {lines.map((_, i) => (
+                    <div key={i} style={{ lineHeight: 1.5 }}>{i + 1}</div>
+                ))}
+            </div>
+            <pre style={{ margin: 0, padding: '0.5rem 0.75rem', flex: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-all', lineHeight: 1.5 }}>{str}</pre>
+        </div>
+    )
+}
 import { useProject } from '../../contexts/ProjectContext'
 import type { SingleApiCaseItem } from '../page'
 import { getSingleApiDisplayName } from '../page'
@@ -142,6 +174,8 @@ export default function SingleApiTestTab({
     const [execLoading, setExecLoading] = useState(false)
     const [stepsExpanded, setStepsExpanded] = useState(false) // 总折叠：默认不展开 5 步骤详情
     const [expanded, setExpanded] = useState<string | null>(null) // 当前展开的 phase
+    const [phase4ExpandedSteps, setPhase4ExpandedSteps] = useState<Set<number>>(new Set())
+    const [phase4StepDetailTab, setPhase4StepDetailTab] = useState<Record<number, StepDetailTab>>({})
     const [environments, setEnvironments] = useState<EnvItem[]>([])
     const [selectedEnvId, setSelectedEnvId] = useState<number | 'custom' | null>(null)
     /** 执行时使用的接口基础地址：从下拉选择或自定义输入 */
@@ -679,24 +713,116 @@ export default function SingleApiTestTab({
                                                 )}
                                                 {result.phase4_result ? (
                                                     <div>
-                                                        <p style={{ fontWeight: '600' }}>
+                                                        <p style={{ fontWeight: '600', marginBottom: '0.25rem' }}>
                                                             执行结果：通过 {result.phase4_result.passed_cases} /{' '}
                                                             {result.phase4_result.total_cases}，失败{' '}
                                                             {result.phase4_result.failed_cases}，耗时{' '}
                                                             {result.phase4_result.duration_ms} ms
                                                         </p>
-                                                        <p style={{ fontSize: '0.8125rem', color: '#6B7280', marginTop: '0.25rem' }}>
-                                                            执行优先按「代码生成」中的用例（解析 Playwright 代码得到），与代码里的 test 数量一致；解析不到时按「测试计划」用例执行。
+                                                        <p style={{ fontSize: '0.8125rem', color: '#6B7280', marginBottom: '0.75rem' }}>
+                                                            执行优先按「代码生成」中的用例；解析不到时按「测试计划」用例执行。
                                                         </p>
-                                                        <pre
-                                                            style={{
-                                                                marginTop: '0.5rem',
-                                                                whiteSpace: 'pre-wrap',
-                                                                fontSize: '0.8rem',
-                                                            }}
-                                                        >
-                                                            {JSON.stringify(result.phase4_result.case_results || [], null, 2)}
-                                                        </pre>
+                                                        {(result.phase4_result.results || []).length > 0 ? (
+                                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                                                                {(result.phase4_result.results as any[]).map((r: any, i: number) => {
+                                                                    const isFailed = !r.success
+                                                                    const isExp = phase4ExpandedSteps.has(i)
+                                                                    const planCases = (result.phase2_plan?.endpoints || []).flatMap((ep: any) => ep.cases || [])
+                                                                    const caseName = planCases[i]?.name || `步骤 ${i + 1}`
+                                                                    const d = {
+                                                                        requestData: r?.request_data ?? r?.params ?? planCases[i]?.request_template?.params ?? {},
+                                                                        urlParams: r?.url_params ?? planCases[i]?.request_template?.url_params ?? {},
+                                                                        requestHeaders: r?.request_headers ?? r?.headers ?? planCases[i]?.request_template?.headers ?? {},
+                                                                        response: r?.response,
+                                                                        responseHeaders: r?.response_headers ?? {},
+                                                                        extractions: r?.extractions ?? [],
+                                                                        fullUrl: r?.full_url ?? r?.url ?? '',
+                                                                        method: r?.api_method ?? r?.method ?? 'GET',
+                                                                    }
+                                                                    const getTab = () => phase4StepDetailTab[i] || 'responseBody'
+                                                                    const setTab = (t: StepDetailTab) => setPhase4StepDetailTab((p) => ({ ...p, [i]: t }))
+                                                                    return (
+                                                                        <div
+                                                                            key={i}
+                                                                            style={{
+                                                                                border: '1px solid #E5E7EB',
+                                                                                borderRadius: '0.5rem',
+                                                                                overflow: 'hidden',
+                                                                                background: isFailed ? '#FEF2F2' : 'white',
+                                                                            }}
+                                                                        >
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={() => setPhase4ExpandedSteps((prev) => {
+                                                                                    const next = new Set(prev)
+                                                                                    if (next.has(i)) next.delete(i)
+                                                                                    else next.add(i)
+                                                                                    return next
+                                                                                })}
+                                                                                style={{
+                                                                                    width: '100%',
+                                                                                    display: 'flex',
+                                                                                    alignItems: 'center',
+                                                                                    justifyContent: 'space-between',
+                                                                                    padding: '0.75rem 1rem',
+                                                                                    border: 'none',
+                                                                                    background: 'none',
+                                                                                    cursor: 'pointer',
+                                                                                    textAlign: 'left',
+                                                                                    fontSize: '0.875rem',
+                                                                                }}
+                                                                            >
+                                                                                <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                                                                    {isExp ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                                                                                    <span style={{ fontWeight: '500' }}>① {isFailed ? '' : '√'} {caseName}</span>
+                                                                                    {isFailed ? <XCircle size={18} color="#EF4444" /> : <CheckCircle size={18} color="#10B981" />}
+                                                                                </span>
+                                                                                <span style={{ color: isFailed ? '#EF4444' : '#10B981', fontWeight: '500' }}>{isFailed ? '失败' : '成功'}</span>
+                                                                            </button>
+                                                                            {isExp && (
+                                                                                <div style={{ padding: '1rem', borderTop: '1px solid #E5E7EB', background: '#F9FAFB' }}>
+                                                                                    <div style={{ marginBottom: '1rem', padding: '1rem', background: 'white', borderRadius: '0.5rem', border: '1px solid #E5E7EB' }}>
+                                                                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', alignItems: 'center', marginBottom: '0.5rem' }}>
+                                                                                            <span style={{ fontWeight: '700', color: '#3B82F6', fontSize: '0.875rem' }}>{d.method}</span>
+                                                                                            <span style={{ fontSize: '0.8125rem', color: '#374151', wordBreak: 'break-all', flex: 1 }}>{d.fullUrl || `${d.method} ${r.api_path || r.url || ''}`}</span>
+                                                                                        </div>
+                                                                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', fontSize: '0.8125rem', color: '#6B7280' }}>
+                                                                                            {r.duration != null && <span>响应时间 {(r.duration * 1000).toFixed(0)} ms</span>}
+                                                                                            <span style={{ color: (r.status_code ?? 200) < 400 ? '#10B981' : '#EF4444', fontWeight: '600' }}>HTTP {r.status_code ?? '-'}</span>
+                                                                                            <span>{(r.response_size ?? 0)} 字节</span>
+                                                                                            <span style={{ padding: '0.2rem 0.5rem', borderRadius: '0.25rem', background: r.success ? '#D1FAE5' : '#FEE2E2', color: r.success ? '#065F46' : '#991B1B', fontWeight: '600' }}>{r.success ? '成功' : '失败'}</span>
+                                                                                        </div>
+                                                                                    </div>
+                                                                                    <div style={{ marginBottom: '0.5rem', display: 'flex', gap: '0.25rem', flexWrap: 'wrap' }}>
+                                                                                        {STEP_DETAIL_TABS.map((tab) => (
+                                                                                            <button key={tab} type="button" onClick={() => setTab(tab)} style={{ padding: '0.35rem 0.75rem', fontSize: '0.8125rem', border: 'none', borderRadius: '0.25rem', cursor: 'pointer', background: getTab() === tab ? '#667eea' : '#E5E7EB', color: getTab() === tab ? 'white' : '#374151', fontWeight: getTab() === tab ? '600' : '400' }}>
+                                                                                                {STEP_TAB_LABELS[tab]}
+                                                                                            </button>
+                                                                                        ))}
+                                                                                    </div>
+                                                                                    <div style={{ minHeight: '120px' }}>
+                                                                                        {getTab() === 'responseBody' && ((d.response != null && d.response !== '') ? <JsonWithLines data={d.response} maxHeight={280} /> : <div style={{ padding: '1rem', color: '#6B7280' }}>暂无响应体</div>)}
+                                                                                        {getTab() === 'responseHeaders' && (d.responseHeaders && Object.keys(d.responseHeaders).length > 0 ? <JsonWithLines data={d.responseHeaders} maxHeight={180} /> : <div style={{ padding: '1rem', color: '#6B7280' }}>暂无响应头</div>)}
+                                                                                        {getTab() === 'assertions' && <div style={{ padding: '1rem', color: '#6B7280', fontSize: '0.875rem' }}>{r.success ? `✓ 状态码 ${r.status_code} 与期望 ${r.expected_status ?? 200} 一致` : `✗ 状态码 ${r.status_code} 未通过（期望 ${r.expected_status ?? '2xx'})`}</div>}
+                                                                                        {getTab() === 'extraction' && (d.extractions?.length > 0 ? <div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8125rem' }}><thead><tr style={{ background: '#F3F4F6' }}><th style={{ padding: '0.5rem', textAlign: 'left' }}>目标字段</th><th style={{ padding: '0.5rem', textAlign: 'left' }}>来源步骤</th><th style={{ padding: '0.5rem', textAlign: 'left' }}>提取结果</th></tr></thead><tbody>{d.extractions.map((ex: any, ei: number) => <tr key={ei} style={{ borderTop: '1px solid #E5E7EB' }}><td style={{ padding: '0.5rem' }}>{ex.to_field}</td><td style={{ padding: '0.5rem' }}>步骤 {ex.from_step}</td><td style={{ padding: '0.5rem' }}>{ex.success ? String(ex.extracted_value ?? '-') : (ex.error_msg || '失败')}</td></tr>)}</tbody></table></div> : <div style={{ padding: '1rem', color: '#6B7280' }}>此步骤未提取数据</div>)}
+                                                                                        {getTab() === 'requestContent' && (
+                                                                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                                                                                                <div><div style={{ fontWeight: '600', marginBottom: '0.35rem', fontSize: '0.8125rem' }}>请求地址</div><div style={{ fontSize: '0.8125rem', wordBreak: 'break-all' }}>{d.fullUrl || `${d.method} ${r.api_path || r.url || '-'}`}</div></div>
+                                                                                                {d.requestHeaders && Object.keys(d.requestHeaders).length > 0 && <div><div style={{ fontWeight: '600', marginBottom: '0.35rem', fontSize: '0.8125rem' }}>请求头</div><JsonWithLines data={d.requestHeaders} maxHeight={150} /></div>}
+                                                                                                <div><div style={{ fontWeight: '600', marginBottom: '0.35rem', fontSize: '0.8125rem' }}>Body / 参数</div>{(d.requestData && Object.keys(d.requestData).length > 0) ? <JsonWithLines data={d.requestData} maxHeight={180} /> : (d.urlParams && Object.keys(d.urlParams).length > 0) ? <JsonWithLines data={d.urlParams} maxHeight={120} /> : <div style={{ padding: '0.75rem', color: '#9CA3AF', fontSize: '0.8125rem' }}>无请求体</div>}</div>
+                                                                                            </div>
+                                                                                        )}
+                                                                                    </div>
+                                                                                    {r.error && <div style={{ marginTop: '0.75rem', color: '#EF4444', fontSize: '0.875rem' }}>{r.error}</div>}
+                                                                                </div>
+                                                                            )}
+                                                                        </div>
+                                                                    )
+                                                                })}
+                                                            </div>
+                                                        ) : (
+                                                            <pre style={{ marginTop: '0.5rem', whiteSpace: 'pre-wrap', fontSize: '0.8rem' }}>{JSON.stringify(result.phase4_result.case_results || [], null, 2)}</pre>
+                                                        )}
                                                     </div>
                                                 ) : (
                                                     <p style={{ color: '#6B7280' }}>
