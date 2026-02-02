@@ -805,7 +805,26 @@ export default function SingleApiTestTab({
                                                                                     <div style={{ minHeight: '120px' }}>
                                                                                         {getTab() === 'responseBody' && ((d.response != null && d.response !== '') ? <JsonWithLines data={d.response} maxHeight={280} /> : <div style={{ padding: '1rem', color: '#6B7280' }}>暂无响应体</div>)}
                                                                                         {getTab() === 'responseHeaders' && (d.responseHeaders && Object.keys(d.responseHeaders).length > 0 ? <JsonWithLines data={d.responseHeaders} maxHeight={180} /> : <div style={{ padding: '1rem', color: '#6B7280' }}>暂无响应头</div>)}
-                                                                                        {getTab() === 'assertions' && <div style={{ padding: '1rem', color: '#6B7280', fontSize: '0.875rem' }}>{r.success ? `✓ 状态码 ${r.status_code} 与期望 ${r.expected_status ?? 200} 一致` : `✗ 状态码 ${r.status_code} 未通过（期望 ${r.expected_status ?? '2xx'})`}</div>}
+                                                                                        {getTab() === 'assertions' && (
+                                                                                            <div style={{ padding: '1rem', color: '#374151', fontSize: '0.875rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                                                                                                {(r.assertions && Array.isArray(r.assertions) && r.assertions.length > 0)
+                                                                                                    ? r.assertions.map((a: any, ai: number) => (
+                                                                                                        <div key={ai} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem' }}>
+                                                                                                            <span style={{ color: a.passed ? '#10B981' : '#EF4444', fontWeight: 600 }}>{a.passed ? '✓' : '✗'}</span>
+                                                                                                            <span style={{ fontWeight: 600, color: '#6B7280' }}>{a.type === 'http' ? 'HTTP 断言' : '业务断言'}</span>
+                                                                                                            <span>{a.message}</span>
+                                                                                                            {a.details && a.details.length > 0 && (
+                                                                                                                <div style={{ marginTop: '0.25rem', marginLeft: '1.25rem', fontSize: '0.8125rem', color: '#6B7280' }}>
+                                                                                                                    {a.details.map((d: any, di: number) => (
+                                                                                                                        <div key={di}>{d.field}: 期望 {JSON.stringify(d.expected)}，实际 {JSON.stringify(d.actual)} {d.passed ? '✓' : '✗'}</div>
+                                                                                                                    ))}
+                                                                                                                </div>
+                                                                                                            )}
+                                                                                                        </div>
+                                                                                                    ))
+                                                                                                    : (r.success ? `✓ 状态码 ${r.status_code} 与期望 ${r.expected_status ?? 200} 一致` : `✗ 状态码 ${r.status_code} 未通过（期望 ${r.expected_status ?? '2xx'})`)}
+                                                                                            </div>
+                                                                                        )}
                                                                                         {getTab() === 'extraction' && (d.extractions?.length > 0 ? <div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8125rem' }}><thead><tr style={{ background: '#F3F4F6' }}><th style={{ padding: '0.5rem', textAlign: 'left' }}>目标字段</th><th style={{ padding: '0.5rem', textAlign: 'left' }}>来源步骤</th><th style={{ padding: '0.5rem', textAlign: 'left' }}>提取结果</th></tr></thead><tbody>{d.extractions.map((ex: any, ei: number) => <tr key={ei} style={{ borderTop: '1px solid #E5E7EB' }}><td style={{ padding: '0.5rem' }}>{ex.to_field}</td><td style={{ padding: '0.5rem' }}>步骤 {ex.from_step}</td><td style={{ padding: '0.5rem' }}>{ex.success ? String(ex.extracted_value ?? '-') : (ex.error_msg || '失败')}</td></tr>)}</tbody></table></div> : <div style={{ padding: '1rem', color: '#6B7280' }}>此步骤未提取数据</div>)}
                                                                                         {getTab() === 'requestContent' && (
                                                                                             <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>

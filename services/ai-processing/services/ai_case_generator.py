@@ -40,7 +40,8 @@ SYSTEM_PROMPT = """你是专业的接口测试专家，负责根据接口定义�
       },
       "expected_template": {
         "status_code": 200,
-        "description": "期望结果说明：请在此包含对返回包体 (Response Body) 的断言要求（如必须包含 token 字段）"
+        "description": "期望结果说明：请在此包含对返回包体 (Response Body) 的断言要求（如必须包含 token 字段）",
+        "response_body": {}
       }
     }
   ]
@@ -60,6 +61,7 @@ SYSTEM_PROMPT = """你是专业的接口测试专家，负责根据接口定义�
     - `url_params`：Query 参数。
     - `headers`：必须包含 Content-Type（有 body 时）、以及该用例特有的认证信息。
 6. **禁止空 params**：POST/PUT/PATCH 接口的 params 不得为空对象，必须包含与接口定义一致的字段及具体值。每个用例的 params/headers 不同，用于验证不同请求的不同响应。
+7. **业务断言 response_body**：边界/健壮/安全用例中，接口可能返回 HTTP 200 但 body 为业务错误。请在 expected_template.response_body 中填写期望的响应体字段，例如：空密码/错误密码填 {"code": 401, "message": "密码错误"}；无效手机号填 {"code": 400, "message": "无效手机号"}；缺参填 {"code": 400}。正向用例可省略 response_body 或填 {"code": 0}。
 
 只输出 JSON，不要 markdown 代码块包裹。"""
 
@@ -210,7 +212,9 @@ async def generate_cases_for_endpoint(
         if not isinstance(req_tpl, dict):
             req_tpl = {"params": {}, "url_params": {}, "headers": {}}
         if not isinstance(exp_tpl, dict):
-            exp_tpl = {"status_code": 200, "description": ""}
+            exp_tpl = {"status_code": 200, "description": "", "response_body": {}}
+        if "response_body" not in exp_tpl:
+            exp_tpl["response_body"] = exp_tpl.get("expected_response") or {}
         if "params" not in req_tpl:
             req_tpl["params"] = {}
         if "url_params" not in req_tpl:

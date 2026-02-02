@@ -575,6 +575,7 @@ def _single_api_plan_to_steps(plan: Dict[str, Any]) -> List[Dict]:
                 "param_mappings": [],
                 "base_url": base_url_ep,
                 "expected_status": et.get("status_code", 200),
+                "expected_response_body": et.get("response_body") or et.get("expected_response") or {},
             })
             step_order += 1
     return steps
@@ -1454,7 +1455,43 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                 expected_status = step.get("expected_status")
                 if expected_status is None:
                     expected_status = 200
-                success = res.status_code == expected_status if expected_status is not None else res.status_code < 400
+                http_passed = res.status_code == expected_status if expected_status is not None else res.status_code < 400
+                # 业务断言：校验响应体中的字段（如 code、message），与 HTTP 断言二选一通过即视为成功
+                expected_response_body = step.get("expected_response_body") or {}
+                business_passed = True
+                business_details = []
+                if expected_response_body and isinstance(expected_response_body, dict):
+                    resp_obj = res_content if isinstance(res_content, dict) else {}
+                    if not isinstance(res_content, dict) and isinstance(res_content, str):
+                        try:
+                            resp_obj = json.loads(res_content) if res_content else {}
+                        except Exception:
+                            resp_obj = {}
+                    for field_path, expected_val in expected_response_body.items():
+                        actual = _get_value_by_path(resp_obj, field_path)
+                        match = actual == expected_val if expected_val is not None else (actual is not None)
+                        business_details.append({
+                            "field": field_path,
+                            "expected": expected_val,
+                            "actual": actual,
+                            "passed": match,
+                        })
+                        if not match:
+                            business_passed = False
+                else:
+                    business_details = []
+                # 保留 HTTP 断言；若配置了业务断言且业务断言通过，则即使 HTTP 状态码与期望不符也视为通过（如 200 但 body 中 code=401、message=密码错误）
+                success = http_passed or (bool(expected_response_body) and business_passed)
+                assertions = [
+                    {"type": "http", "passed": http_passed, "message": f"状态码 {res.status_code} 与期望 {expected_status} {'一致' if http_passed else '不一致'}"},
+                ]
+                if expected_response_body:
+                    assertions.append({
+                        "type": "business",
+                        "passed": business_passed,
+                        "message": "业务字段符合预期" if business_passed else f"业务字段校验未通过: {business_details}",
+                        "details": business_details,
+                    })
                 step_data.update({
                     "status_code": res.status_code,
                     "expected_status": expected_status,
@@ -1466,6 +1503,9 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                     "api_path": step.get("api_path"),
                     "api_method": step.get("api_method", method),
                     "success": success,
+                    "assertions": assertions,
+                    "http_assertion_passed": http_passed,
+                    "business_assertion_passed": business_passed if expected_response_body else None,
                 })
                 context[f"step_{step_order}"] = json.loads(json.dumps(step_data, default=str))
                 step_results.append(step_data)
@@ -2307,6 +2347,8 @@ async def execute_api_test_plan(req: ExecutePlanRequest):
                     "headers": rt.get("headers") or {},
                     "param_mappings": [],
                     "base_url": base_url_ep,
+                    "expected_status": expected_status,
+                    "expected_response_body": et.get("response_body") or et.get("expected_response") or {},
                 })
                 ct = case.get("case_type", "positive")
                 if hasattr(ct, "value"):
@@ -2322,7 +2364,7 @@ async def execute_api_test_plan(req: ExecutePlanRequest):
                 case_type, expected_status = meta_list[i]
                 sr["case_type"] = case_type
                 sr["expected_status"] = expected_status
-                sr["success"] = (sr.get("status_code") == expected_status)
+                # 不覆盖 success：_run_steps 已按 HTTP 断言 + 业务断言（expected_response_body）计算，保留其结果
 
         passed = sum(1 for s in step_results if s.get("success"))
         failed = len(step_results) - passed
