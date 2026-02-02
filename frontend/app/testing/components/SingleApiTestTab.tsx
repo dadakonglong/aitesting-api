@@ -728,8 +728,10 @@ export default function SingleApiTestTab({
                                                                     const isFailed = !r.success
                                                                     const isExp = phase4ExpandedSteps.has(i)
                                                                     const planCases = (result.phase2_plan?.endpoints || []).flatMap((ep: any) => ep.cases || [])
-                                                                    const caseName = planCases[i]?.name || `步骤 ${i + 1}`
+                                                                    // 优先用执行结果中带回的用例名（正向/边界/健壮等），其次用计划中的名称，避免只显示「步骤1」
+                                                                    const caseName = (r?.name || planCases[i]?.name || '').trim() || `步骤 ${i + 1}`
                                                                     const d = {
+                                                                        // 优先用执行结果中的 request_data/request_headers（后端已从 plan 注入），保证有请求头与 body
                                                                         requestData: r?.request_data ?? r?.params ?? planCases[i]?.request_template?.params ?? {},
                                                                         urlParams: r?.url_params ?? planCases[i]?.request_template?.url_params ?? {},
                                                                         requestHeaders: r?.request_headers ?? r?.headers ?? planCases[i]?.request_template?.headers ?? {},

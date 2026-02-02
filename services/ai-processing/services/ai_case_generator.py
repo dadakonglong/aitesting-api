@@ -18,6 +18,9 @@ from datetime import datetime
 # 保证日志文件写在当前文件同级目录
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_gen_debug.log")
 
+# 用例类型中文名，保证重新生成时始终有「正向/边界/健壮/安全」等显示名
+CASE_TYPE_CN = {"positive": "正向", "boundary": "边界", "robustness": "健壮", "security": "安全"}
+
 
 # 系统提示：约束大模型输出结构与测试领域规则
 SYSTEM_PROMPT = """你是专业的接口测试专家，负责根据接口定义生成**真实可执行**的接口测试用例。
@@ -28,7 +31,7 @@ SYSTEM_PROMPT = """你是专业的接口测试专家，负责根据接口定义�
   "cases": [
     {
       "case_type": "positive | boundary | robustness | security",
-      "name": "用例名称，如 [正向] POST /api/login 正常登录",
+      "name": "用例名称，必须用中文类型：如 [正向] POST /api/login 正常登录、[边界] POST /api/login 空密码、[健壮] POST /api/login 缺参、[安全] POST /api/login 无鉴权。不要使用英文 [positive] 等。",
       "description": "简短说明",
       "request_template": {
         "params": {},
@@ -143,6 +146,50 @@ async def generate_cases_for_endpoint(
     if not isinstance(raw_cases, list):
         return []
 
+    # 从 request_body 抽必填字段并生成占位值，用于大模型返回空 params 时兜底，避免重新生成后无 body
+    def _default_params_from_body(rb: Any) -> Dict[str, Any]:
+        if not isinstance(rb, dict):
+            return {}
+        # OpenAPI: request_body.content["application/json"].schema 或直接 request_body.properties
+        schema = rb.get("schema") or (rb.get("content") or {}).get("application/json") or {}
+        if isinstance(schema, dict):
+            pass
+        else:
+            schema = {}
+        props = (rb.get("properties") or schema.get("properties") or {})
+        required = rb.get("required") or schema.get("required") or []
+        out_params = {}
+        for k in required:
+            if k not in props:
+                out_params[k] = ""
+                continue
+            p = props[k] if isinstance(props.get(k), dict) else {}
+            ex = p.get("example")
+            if ex is not None:
+                out_params[k] = ex
+                continue
+            t = (p.get("type") or "").lower()
+            if t == "string":
+                out_params[k] = p.get("default") if p.get("default") is not None else "placeholder"
+            elif t in ("integer", "number"):
+                out_params[k] = p.get("default") if p.get("default") is not None else 0
+            elif t == "boolean":
+                out_params[k] = p.get("default") if p.get("default") is not None else False
+            else:
+                out_params[k] = p.get("default") if p.get("default") is not None else ""
+        # 若无 required 则从 properties 取全部 key 给占位
+        if not out_params and props:
+            for k, v in (props or {}).items():
+                if isinstance(v, dict) and v.get("example") is not None:
+                    out_params[k] = v["example"]
+                else:
+                    out_params[k] = "placeholder"
+        return out_params
+
+    request_body = endpoint.get("request_body")
+    if not isinstance(request_body, dict):
+        request_body = {}
+
     out: List[Dict[str, Any]] = []
     for c in raw_cases:
         if not isinstance(c, dict):
@@ -150,7 +197,13 @@ async def generate_cases_for_endpoint(
         case_type = (c.get("case_type") or "positive").lower()
         if case_type not in include_types:
             continue
-        name = c.get("name") or f"[{case_type}] {method} {path}"
+        name_raw = (c.get("name") or "").strip()
+        # 重新生成时始终用中文显示名：若大模型返回空或英文类型名则用「正向/边界/健壮/安全」+ 方法路径
+        if not name_raw or any(name_raw.startswith(f"[{t}]") for t in CASE_TYPE_CN):
+            type_cn = CASE_TYPE_CN.get(case_type, case_type)
+            name = f"[{type_cn}] {method} {path}".strip()
+        else:
+            name = name_raw
         description = c.get("description") or ""
         req_tpl = c.get("request_template")
         exp_tpl = c.get("expected_template")
@@ -158,13 +211,15 @@ async def generate_cases_for_endpoint(
             req_tpl = {"params": {}, "url_params": {}, "headers": {}}
         if not isinstance(exp_tpl, dict):
             exp_tpl = {"status_code": 200, "description": ""}
-        # 补齐字段，便于执行层使用
         if "params" not in req_tpl:
             req_tpl["params"] = {}
         if "url_params" not in req_tpl:
             req_tpl["url_params"] = {}
         if "headers" not in req_tpl:
             req_tpl["headers"] = {}
+        # 重新生成时若大模型返回空 params 但接口需要 body，用 request_body 兜底，避免执行/展示无 body
+        if method in ("POST", "PUT", "PATCH") and not (req_tpl.get("params") or {}):
+            req_tpl["params"] = _default_params_from_body(request_body)
         if method in ("POST", "PUT", "PATCH") and req_tpl.get("params") and "Content-Type" not in {
             k.lower() for k in (req_tpl.get("headers") or {}).keys()
         }:
@@ -173,6 +228,8 @@ async def generate_cases_for_endpoint(
             "case_type": case_type,
             "name": name,
             "description": description,
+            "path": path,
+            "method": method,
             "request_template": req_tpl,
             "expected_template": exp_tpl,
             "source": "ai",

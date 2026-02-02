@@ -580,6 +580,44 @@ def _single_api_plan_to_steps(plan: Dict[str, Any]) -> List[Dict]:
     return steps
 
 
+_CASE_TYPE_CN = {"positive": "正向", "boundary": "边界", "robustness": "健壮", "security": "安全"}
+
+
+def _enrich_step_results_with_plan(step_results: List[Dict], plan: Optional[Dict] = None) -> None:
+    """用计划中的用例名称和 request_template 补全每条执行结果，便于前端显示「正向/边界/健壮」等名称及请求头/body。"""
+    if not plan:
+        return
+    plan_cases = []
+    for ep in plan.get("endpoints") or []:
+        plan_cases.extend(ep.get("cases") or [])
+    for i, sr in enumerate(step_results):
+        if i < len(plan_cases):
+            pc = plan_cases[i]
+            name_from_plan = (pc.get("name") or "").strip()
+            # 若计划中无名称或为英文类型名（如 [positive]），用中文类型 + 方法路径 生成名称
+            if not name_from_plan or any(name_from_plan.startswith(f"[{t}]") for t in _CASE_TYPE_CN):
+                ct = (pc.get("case_type") or "positive").lower()
+                if hasattr(ct, "value"):
+                    ct = getattr(ct, "value", ct)
+                type_cn = _CASE_TYPE_CN.get(ct, ct)
+                path = pc.get("path") or ""
+                if not path:
+                    for ep in plan.get("endpoints") or []:
+                        if pc in (ep.get("cases") or []):
+                            path = ep.get("path") or ""
+                            break
+                method = (pc.get("method") or "GET").upper()
+                name_from_plan = f"[{type_cn}] {method} {path}".strip()
+            sr["name"] = name_from_plan or sr.get("name") or f"步骤{i + 1}"
+            rt = pc.get("request_template") or {}
+            if not (sr.get("request_data") or {}):
+                sr["request_data"] = rt.get("params") or {}
+            if not (sr.get("request_headers") or {}):
+                sr["request_headers"] = rt.get("headers") or {}
+        else:
+            sr["name"] = sr.get("name") or f"步骤{i + 1}"
+
+
 def _parse_js_like_object(s: str) -> Optional[Dict]:
     """尝试将 JS 风格对象字符串解析为 dict，支持 { key: 'val' } 和标准 JSON"""
     if not s or not isinstance(s, str):
@@ -829,6 +867,8 @@ async def single_api_execute(req: SingleApiExecuteRequest):
         start_ts = datetime.now()
         step_results = await _run_steps(steps, base_url)
         duration_ms = int((datetime.now() - start_ts).total_seconds() * 1000)
+        # 用计划中的用例名称和 request_template 补全每条结果，前端可显示「正向/边界/健壮」等及请求头/body
+        _enrich_step_results_with_plan(step_results, req.plan)
 
         passed = sum(1 for s in step_results if s.get("success"))
         failed = len(step_results) - passed
@@ -939,6 +979,7 @@ async def single_api_full_pipeline(req: SingleApiFullPipelineRequest):
                     start_ts = datetime.now()
                     step_results = await _run_steps(steps, base_url)
                     duration_ms = int((datetime.now() - start_ts).total_seconds() * 1000)
+                    _enrich_step_results_with_plan(step_results, plan_payload)
                     passed = sum(1 for s in step_results if s.get("success"))
                     suite_result = {
                         "suite_id": "single-api-suite",
@@ -2248,14 +2289,19 @@ async def execute_api_test_plan(req: ExecutePlanRequest):
         meta_list = []  # (case_type, expected_status) 与 steps 一一对应
         for ep in endpoints:
             base_url_ep = (ep.get("base_url") or "").strip() or base_url
+            ep_path = (ep.get("path") or "").strip()
+            ep_method = (ep.get("method") or "GET").upper()
             for case in ep.get("cases") or []:
                 rt = case.get("request_template") or {}
                 et = case.get("expected_template") or {}
                 expected_status = et.get("status_code", 200)
+                # AI 生成的 case 可能没有 path/method，必须从 endpoint 回退，否则请求地址会变成 base_url/ 且无 path
+                case_path = (case.get("path") or "").strip() or ep_path
+                case_method = (case.get("method") or "").upper() or ep_method
                 steps.append({
                     "step_order": len(steps) + 1,
-                    "api_path": case.get("path", ""),
-                    "api_method": (case.get("method") or "GET").upper(),
+                    "api_path": case_path,
+                    "api_method": case_method,
                     "params": rt.get("params") or {},
                     "url_params": rt.get("url_params") or {},
                     "headers": rt.get("headers") or {},

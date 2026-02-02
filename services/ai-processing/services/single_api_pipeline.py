@@ -531,6 +531,12 @@ async def generate_test_plan_md(
             },
             include_types=needed_types,
         )
+        # 确保每个 case 都有 path/method（AI 生成器已写入，此处兜底）
+        for c in all_ai_cases:
+            if not (c.get("path") or "").strip():
+                c["path"] = target_ep.get("path") or target_path
+            if not (c.get("method") or "").strip():
+                c["method"] = target_ep.get("method") or target_method
         target_ep["cases"] = all_ai_cases
         endpoints.append(target_ep)
     print(f"DEBUG: Generated cases for {len(endpoints)} endpoints, total cases={sum(len(ep.get('cases') or []) for ep in endpoints)}")
