@@ -18,8 +18,15 @@ class SchedulerService:
     def __init__(self, db_path: str = "test_platform.db"):
         self.db_path = db_path
         self.scheduler = AsyncIOScheduler()
-        self.scheduler.start()
-        print("📅 定时任务调度器已启动")
+        self._started = False
+        print("📅 定时任务调度器已初始化（未启动）")
+    
+    def start(self):
+        """启动调度器"""
+        if not self._started:
+            self.scheduler.start()
+            self._started = True
+            print("📅 定时任务调度器已启动")
     
     def _get_connection(self):
         """获取数据库连接"""
@@ -104,10 +111,13 @@ class SchedulerService:
         cursor = conn.cursor()
         
         try:
-            # 获取任务配置
+            # 获取任务配置（包括任务名称和场景名称）
             cursor.execute("""
-                SELECT scenario_id, environment_id, notify_on_failure, notification_config
-                FROM scheduled_jobs WHERE id = ?
+                SELECT sj.name, sj.scenario_id, sj.environment_id, sj.notification_config,
+                       ts.name as scenario_name, ts.test_case_id
+                FROM scheduled_jobs sj
+                LEFT JOIN scenarios ts ON sj.scenario_id = ts.id
+                WHERE sj.id = ?
             """, (job_id,))
             
             row = cursor.fetchone()
@@ -115,83 +125,174 @@ class SchedulerService:
                 print(f"❌ 任务 {job_id} 不存在")
                 return
             
-            scenario_id, environment_id, notify_on_failure, notification_config = row
+            job_name, scenario_id, environment_id, notification_config, scenario_name, test_case_id = row
+            scenario_name = scenario_name or f"场景ID: {scenario_id}"
+            
+            if not test_case_id:
+                print(f"❌ 场景 {scenario_id} 没有关联的测试用例")
+                return
             
             # 记录执行开始
             cursor.execute("""
                 INSERT INTO job_executions (job_id, status, started_at)
-                VALUES (?, 'running', ?)
-            """, (job_id, datetime.now()))
+                VALUES (?, 'running', datetime('now', 'localtime'))
+            """, (job_id,))
             execution_record_id = cursor.lastrowid
             conn.commit()
             
-            # 调用场景执行API
+            # 调用测试用例执行API
             try:
+                # 获取环境信息
+                env_name = 'test'
+                base_url = ''
+                if environment_id:
+                    cursor.execute("SELECT env_name, base_url FROM project_environments WHERE id = ?", (environment_id,))
+                    env_row = cursor.fetchone()
+                    if env_row:
+                        env_name, base_url = env_row
+                
                 async with httpx.AsyncClient(timeout=300.0) as client:
-                    # 假设场景执行API在本地8000端口
+                    # 使用正确的执行API
                     response = await client.post(
-                        f"http://localhost:8000/api/v1/scenarios/{scenario_id}/execute",
-                        json={"environment_id": environment_id} if environment_id else {}
+                        f"http://localhost:8000/api/v1/executions",
+                        json={
+                            "test_case_id": str(test_case_id),
+                            "environment": env_name,
+                            "base_url": base_url
+                        }
                     )
                     
                     if response.status_code == 200:
                         result = response.json()
-                        execution_id = result.get('execution_id')
+                        execution_id = result.get('id')
+                        
+                        # 计算步骤统计
+                        steps = result.get('results', [])
+                        total_steps = len(steps)
+                        passed_steps = sum(1 for s in steps if s.get('success') is True)
+                        failed_steps = total_steps - passed_steps
                         
                         # 更新执行记录
                         cursor.execute("""
                             UPDATE job_executions 
                             SET status = 'success', 
-                                completed_at = ?,
+                                completed_at = datetime('now', 'localtime'),
                                 execution_id = ?,
                                 total_steps = ?,
                                 passed_steps = ?,
                                 failed_steps = ?
                             WHERE id = ?
                         """, (
-                            datetime.now(),
-                            execution_id,
-                            result.get('total_steps', 0),
-                            result.get('passed_steps', 0),
-                            result.get('failed_steps', 0),
+                            execution_id, 
+                            total_steps, 
+                            passed_steps, 
+                            failed_steps, 
                             execution_record_id
                         ))
                         conn.commit()
                         
-                        print(f"✅ 任务 {job_id} 执行成功")
+                        print(f"✅ 任务 {job_id} 执行成功，ID: {execution_id}")
+                        print(f"📊 步骤统计: 总计 {total_steps}, 通过 {passed_steps}, 失败 {failed_steps}")
                         
-                        # 如果有失败且需要通知
-                        if result.get('failed_steps', 0) > 0 and notify_on_failure:
-                            await self._send_notification(job_id, notification_config, result)
+                        # 每次执行都发送通知（不论成功或失败）
+                        if notification_config:
+                            notification_result = {
+                                'status': 'success' if failed_steps == 0 else 'failed',
+                                'total_steps': total_steps,
+                                'passed_steps': passed_steps,
+                                'failed_steps': failed_steps,
+                                'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                'completed_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            }
+                            await self._send_notification(job_id, job_name, scenario_name, notification_config, notification_result)
                     else:
-                        raise Exception(f"执行失败: {response.text}")
+                        raise Exception(f"执行失败: HTTP {response.status_code} - {response.text}")
             
             except Exception as e:
                 error_msg = str(e)
                 cursor.execute("""
                     UPDATE job_executions 
                     SET status = 'failed', 
-                        completed_at = ?,
+                        completed_at = datetime('now', 'localtime'),
                         error_message = ?
                     WHERE id = ?
-                """, (datetime.now(), error_msg, execution_record_id))
+                """, (error_msg, execution_record_id))
                 conn.commit()
                 
                 print(f"❌ 任务 {job_id} 执行失败: {error_msg}")
                 
-                if notify_on_failure:
-                    await self._send_notification(job_id, notification_config, {"error": error_msg})
+                # 每次执行都发送通知（包括失败情况）
+                if notification_config:
+                    notification_result = {
+                        'status': 'failed',
+                        'error': error_msg,
+                        'total_steps': 0,
+                        'passed_steps': 0,
+                        'failed_steps': 0,
+                        'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'completed_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    await self._send_notification(job_id, job_name, scenario_name, notification_config, notification_result)
         
         finally:
             conn.close()
     
-    async def _send_notification(self, job_id: int, notification_config: str, result: Dict):
-        """发送通知(邮件/钉钉/企业微信)"""
+    async def _send_notification(self, job_id: int, job_name: str, scenario_name: str, notification_config: str, result: Dict):
+        """发送通知(飞书/邮件/钉钉/企业微信)"""
         try:
-            config = json.loads(notification_config) if notification_config else {}
+            # 解析通知配置
+            config = {}
+            if isinstance(notification_config, str):
+                try:
+                    config = json.loads(notification_config)
+                    # 如果第一次解析后还是字符串，说明被双重编码了，再解析一次
+                    if isinstance(config, str):
+                        config = json.loads(config)
+                except json.JSONDecodeError as e:
+                    print(f"❌ JSON解析失败: {e}")
+                    return
+            else:
+                config = notification_config
+            
+            if not isinstance(config, dict):
+                print(f"❌ config不是字典，无法发送通知")
+                return
+            
             notification_type = config.get('type', 'none')
             
-            if notification_type == 'email':
+            if notification_type == 'feishu':
+                # 飞书通知
+                webhook_url = config.get('webhook_url')
+                if not webhook_url:
+                    print(f"⚠️ 任务 {job_id} 未配置飞书Webhook URL")
+                    return
+                
+                # 导入并实例化飞书通知服务
+                from services.feishu_notifier import FeishuNotifier
+                notifier = FeishuNotifier()
+                
+                # 确保result是字典
+                if isinstance(result, str):
+                    try:
+                        result = json.loads(result)
+                    except:
+                        result = {}
+                
+                # 发送通知
+                error_message = result.get('error')
+                success = await notifier.send_execution_result(
+                    webhook_url=webhook_url,
+                    task_name=job_name,
+                    scenario_name=scenario_name,
+                    execution_result=result,
+                    error_message=error_message
+                )
+                
+                if success:
+                    print(f"✅ 飞书通知发送成功: {task_name if 'task_name' in locals() else job_name}")
+                else:
+                    print(f"❌ 飞书通知发送失败")
+            elif notification_type == 'email':
                 # TODO: 实现邮件通知
                 print(f"📧 发送邮件通知: 任务 {job_id}")
             elif notification_type == 'dingtalk':
@@ -275,7 +376,7 @@ class SchedulerService:
             cursor.execute("""
                 SELECT sj.*, ts.name as scenario_name
                 FROM scheduled_jobs sj
-                LEFT JOIN test_scenarios ts ON sj.scenario_id = ts.id
+                LEFT JOIN scenarios ts ON sj.scenario_id = ts.id
                 WHERE sj.project_id = ?
                 ORDER BY sj.created_at DESC
             """, (project_id,))
@@ -320,6 +421,46 @@ class SchedulerService:
                 job_id, scenario_id, cron = row
                 self._add_job_to_scheduler(job_id, {'scenario_id': scenario_id, 'cron': cron})
             
+            
             print(f"✅ 已加载 {cursor.rowcount} 个活跃任务")
+        finally:
+            conn.close()
+
+    async def update_job(self, job_id: int, job_config: Dict) -> Dict:
+        """
+        更新定时任务
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # 检查任务是否存在
+            cursor.execute("SELECT id FROM scheduled_jobs WHERE id = ?", (job_id,))
+            if not cursor.fetchone():
+                raise ValueError(f"任务 {job_id} 不存在")
+            
+            # 更新数据库
+            cursor.execute("""
+                UPDATE scheduled_jobs 
+                SET name = ?, description = ?, scenario_id = ?, cron_expression = ?, 
+                    environment_id = ?, notify_on_failure = ?, notification_config = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (
+                job_config['name'],
+                job_config.get('description', ''),
+                job_config['scenario_id'],
+                job_config['cron'],
+                job_config.get('environment_id'),
+                job_config.get('notify_on_failure', False),
+                json.dumps(job_config.get('notification_config', {})),
+                job_id
+            ))
+            
+            conn.commit()
+            
+            # 更新调度器中的任务
+            self._add_job_to_scheduler(job_id, job_config)
+            
+            return {"job_id": job_id, "message": "任务更新成功"}
         finally:
             conn.close()

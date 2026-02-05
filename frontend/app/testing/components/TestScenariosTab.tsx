@@ -44,6 +44,24 @@ export default function TestScenariosTab() {
     const [newEnvName, setNewEnvName] = useState('')
     const [newEnvUrl, setNewEnvUrl] = useState('')
 
+    // 定时任务相关
+    const [showSchedulerModal, setShowSchedulerModal] = useState(false)
+    const [schedulerScenario, setSchedulerScenario] = useState<any>(null)
+    const [schedulerForm, setSchedulerForm] = useState({
+        name: '',
+        cron: '0 2 * * *',
+        timeMode: 'preset' as 'preset' | 'custom',
+        customHour: '9',
+        customMinute: '0',
+        frequency: 'daily' as 'daily' | 'hourly' | 'weekly' | 'once',
+        weekday: '1',
+        environment_id: null as number | null,
+        use_project_webhook: true,
+        custom_webhook: '',
+        is_active: true
+    })
+    const [projectFeishuWebhook, setProjectFeishuWebhook] = useState('')
+
     useEffect(() => {
         const init = async () => {
             const scenarioData = await fetchScenarios()
@@ -157,6 +175,102 @@ export default function TestScenariosTab() {
             }
         })
     }
+
+    // 定时任务相关函数
+    const handleOpenScheduler = (scenario: any) => {
+        setSchedulerScenario(scenario)
+        setSchedulerForm({
+            name: `定时执行-${scenario.name}`,
+            cron: '0 2 * * *',
+            timeMode: 'preset',
+            customHour: '9',
+            customMinute: '0',
+            frequency: 'daily',
+            weekday: '1',
+            environment_id: selectedEnvId,
+            use_project_webhook: true,
+            custom_webhook: '',
+            is_active: true
+        })
+        setShowSchedulerModal(true)
+    }
+
+    const handleCreateScheduledJob = async () => {
+        if (!schedulerScenario) return
+
+        try {
+            const notificationConfig = {
+                type: 'feishu',
+                webhook_url: schedulerForm.use_project_webhook ? projectFeishuWebhook : schedulerForm.custom_webhook,
+                use_project_default: schedulerForm.use_project_webhook,
+                enabled: true,
+                notify_always: true
+            }
+
+            const finalCron = generateCron()
+
+            const response = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/scheduler/jobs`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: schedulerForm.name,
+                    description: `场景: ${schedulerScenario.name}`,
+                    project_id: currentProject,
+                    scenario_id: schedulerScenario.id,
+                    cron: finalCron,
+                    environment_id: schedulerForm.environment_id,
+                    notification_config: JSON.stringify(notificationConfig),
+                    is_active: schedulerForm.is_active
+                })
+            })
+
+            if (response.ok) {
+                alert('定时任务创建成功！')
+                setShowSchedulerModal(false)
+            } else {
+                const error = await response.json()
+                alert(`创建失败: ${error.detail || '未知错误'}`)
+            }
+        } catch (error) {
+            console.error('创建定时任务失败:', error)
+            alert('创建失败，请检查网络连接')
+        }
+    }
+
+    const cronPresets = [
+        { label: '立即执行（1分钟后）', value: 'now' },
+        { label: '每天凌晨2点', value: '0 2 * * *' },
+        { label: '每天上午9点', value: '0 9 * * *' },
+        { label: '每小时', value: '0 * * * *' },
+        { label: '每30分钟', value: '*/30 * * * *' },
+        { label: '每周一上午9点', value: '0 9 * * 1' },
+        { label: '自定义时间', value: 'custom' }
+    ]
+
+    // 生成Cron表达式
+    const generateCron = () => {
+        if (schedulerForm.timeMode === 'preset') {
+            if (schedulerForm.cron === 'now') {
+                const now = new Date()
+                now.setMinutes(now.getMinutes() + 1)
+                return `${now.getMinutes()} ${now.getHours()} * * *`
+            }
+            return schedulerForm.cron === 'custom' ? `${schedulerForm.customMinute} ${schedulerForm.customHour} * * *` : schedulerForm.cron
+        } else {
+            // 自定义模式
+            const { customHour, customMinute, frequency, weekday } = schedulerForm
+            if (frequency === 'daily') {
+                return `${customMinute} ${customHour} * * *`
+            } else if (frequency === 'hourly') {
+                return `${customMinute} * * * *`
+            } else if (frequency === 'weekly') {
+                return `${customMinute} ${customHour} * * ${weekday}`
+            } else {
+                return `${customMinute} ${customHour} * * *`
+            }
+        }
+    }
+
 
     const handleDelete = (e: React.MouseEvent, scenarioId: number) => {
         e.stopPropagation()
@@ -567,6 +681,22 @@ export default function TestScenariosTab() {
                                         >
                                             <Play size={16} fill="currentColor" />
                                             执行测试
+                                        </button>
+                                        <button
+                                            onClick={(e) => { e.stopPropagation(); handleOpenScheduler(scenario); }}
+                                            disabled={!scenario.test_case_id}
+                                            style={{
+                                                padding: '0.5rem',
+                                                color: scenario.test_case_id ? '#667eea' : '#9CA3AF',
+                                                background: scenario.test_case_id ? '#EEF2FF' : '#F3F4F6',
+                                                border: `1px solid ${scenario.test_case_id ? '#C7D2FE' : '#E5E7EB'}`,
+                                                borderRadius: '0.5rem',
+                                                cursor: scenario.test_case_id ? 'pointer' : 'not-allowed',
+                                                transition: 'all 0.2s'
+                                            }}
+                                            title="设置定时任务"
+                                        >
+                                            <Clock size={18} />
                                         </button>
                                         <button
                                             onClick={(e) => handleDelete(e, scenario.id)}
@@ -1086,6 +1216,336 @@ export default function TestScenariosTab() {
                             to { transform: scale(1); opacity: 1; }
                         }
                     `}</style>
+                </div>
+            )}
+
+            {/* 定时任务配置弹窗 */}
+            {showSchedulerModal && (
+                <div style={{
+                    position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000
+                }} onClick={() => setShowSchedulerModal(false)}>
+                    <div style={{
+                        background: 'white',
+                        borderRadius: '1rem',
+                        padding: '2rem',
+                        width: '90%',
+                        maxWidth: '600px',
+                        maxHeight: '80vh',
+                        overflowY: 'auto',
+                        boxShadow: '0 25px 50px -12px rgba(0,0,0,0.25)'
+                    }} onClick={(e) => e.stopPropagation()}>
+                        <h2 style={{ fontSize: '1.5rem', fontWeight: '700', marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <Clock size={24} style={{ color: '#667eea' }} />
+                            设置定时任务
+                        </h2>
+
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                            {/* 任务名称 */}
+                            <div>
+                                <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem', color: '#374151' }}>
+                                    任务名称 *
+                                </label>
+                                <input
+                                    type="text"
+                                    value={schedulerForm.name}
+                                    onChange={(e) => setSchedulerForm({ ...schedulerForm, name: e.target.value })}
+                                    placeholder="例如: 每日回归测试"
+                                    style={{
+                                        width: '100%',
+                                        padding: '0.75rem',
+                                        border: '1px solid #E5E7EB',
+                                        borderRadius: '0.5rem',
+                                        fontSize: '0.875rem',
+                                        outline: 'none'
+                                    }}
+                                />
+                            </div>
+
+                            {/* 执行时间 */}
+                            <div>
+                                <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem', color: '#374151' }}>
+                                    执行时间 *
+                                </label>
+                                <select
+                                    value={schedulerForm.cron}
+                                    onChange={(e) => {
+                                        setSchedulerForm({ ...schedulerForm, cron: e.target.value, timeMode: e.target.value === 'custom' ? 'custom' : 'preset' })
+                                    }}
+                                    style={{
+                                        width: '100%',
+                                        padding: '0.75rem',
+                                        border: '1px solid #E5E7EB',
+                                        borderRadius: '0.5rem',
+                                        fontSize: '0.875rem',
+                                        marginBottom: '0.75rem',
+                                        outline: 'none'
+                                    }}
+                                >
+                                    {cronPresets.map((preset) => (
+                                        <option key={preset.value} value={preset.value}>
+                                            {preset.label}
+                                        </option>
+                                    ))}
+                                </select>
+
+                                {/* 自定义时间选择器 */}
+                                {schedulerForm.cron === 'custom' && (
+                                    <div style={{ background: '#F9FAFB', padding: '1rem', borderRadius: '0.5rem', border: '1px solid #E5E7EB' }}>
+                                        <div style={{ marginBottom: '0.75rem' }}>
+                                            <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: '500', marginBottom: '0.5rem', color: '#6B7280' }}>
+                                                执行频率
+                                            </label>
+                                            <select
+                                                value={schedulerForm.frequency}
+                                                onChange={(e) => setSchedulerForm({ ...schedulerForm, frequency: e.target.value as any })}
+                                                style={{
+                                                    width: '100%',
+                                                    padding: '0.5rem',
+                                                    border: '1px solid #E5E7EB',
+                                                    borderRadius: '0.375rem',
+                                                    fontSize: '0.875rem',
+                                                    outline: 'none'
+                                                }}
+                                            >
+                                                <option value="daily">每天</option>
+                                                <option value="hourly">每小时</option>
+                                                <option value="weekly">每周</option>
+                                            </select>
+                                        </div>
+
+                                        {schedulerForm.frequency !== 'hourly' && (
+                                            <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '0.75rem' }}>
+                                                <div style={{ flex: 1 }}>
+                                                    <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: '500', marginBottom: '0.5rem', color: '#6B7280' }}>
+                                                        小时 (0-23)
+                                                    </label>
+                                                    <input
+                                                        type="number"
+                                                        min="0"
+                                                        max="23"
+                                                        value={schedulerForm.customHour}
+                                                        onChange={(e) => setSchedulerForm({ ...schedulerForm, customHour: e.target.value })}
+                                                        style={{
+                                                            width: '100%',
+                                                            padding: '0.5rem',
+                                                            border: '1px solid #E5E7EB',
+                                                            borderRadius: '0.375rem',
+                                                            fontSize: '0.875rem',
+                                                            outline: 'none'
+                                                        }}
+                                                    />
+                                                </div>
+                                                <div style={{ flex: 1 }}>
+                                                    <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: '500', marginBottom: '0.5rem', color: '#6B7280' }}>
+                                                        分钟 (0-59)
+                                                    </label>
+                                                    <input
+                                                        type="number"
+                                                        min="0"
+                                                        max="59"
+                                                        value={schedulerForm.customMinute}
+                                                        onChange={(e) => setSchedulerForm({ ...schedulerForm, customMinute: e.target.value })}
+                                                        style={{
+                                                            width: '100%',
+                                                            padding: '0.5rem',
+                                                            border: '1px solid #E5E7EB',
+                                                            borderRadius: '0.375rem',
+                                                            fontSize: '0.875rem',
+                                                            outline: 'none'
+                                                        }}
+                                                    />
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {schedulerForm.frequency === 'hourly' && (
+                                            <div style={{ marginBottom: '0.75rem' }}>
+                                                <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: '500', marginBottom: '0.5rem', color: '#6B7280' }}>
+                                                    分钟 (0-59)
+                                                </label>
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    max="59"
+                                                    value={schedulerForm.customMinute}
+                                                    onChange={(e) => setSchedulerForm({ ...schedulerForm, customMinute: e.target.value })}
+                                                    style={{
+                                                        width: '100%',
+                                                        padding: '0.5rem',
+                                                        border: '1px solid #E5E7EB',
+                                                        borderRadius: '0.375rem',
+                                                        fontSize: '0.875rem',
+                                                        outline: 'none'
+                                                    }}
+                                                />
+                                            </div>
+                                        )}
+
+                                        {schedulerForm.frequency === 'weekly' && (
+                                            <div>
+                                                <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: '500', marginBottom: '0.5rem', color: '#6B7280' }}>
+                                                    星期几
+                                                </label>
+                                                <select
+                                                    value={schedulerForm.weekday}
+                                                    onChange={(e) => setSchedulerForm({ ...schedulerForm, weekday: e.target.value })}
+                                                    style={{
+                                                        width: '100%',
+                                                        padding: '0.5rem',
+                                                        border: '1px solid #E5E7EB',
+                                                        borderRadius: '0.375rem',
+                                                        fontSize: '0.875rem',
+                                                        outline: 'none'
+                                                    }}
+                                                >
+                                                    <option value="1">星期一</option>
+                                                    <option value="2">星期二</option>
+                                                    <option value="3">星期三</option>
+                                                    <option value="4">星期四</option>
+                                                    <option value="5">星期五</option>
+                                                    <option value="6">星期六</option>
+                                                    <option value="0">星期日</option>
+                                                </select>
+                                            </div>
+                                        )}
+
+                                        <div style={{ marginTop: '0.75rem', fontSize: '0.75rem', color: '#6B7280', background: '#EFF6FF', padding: '0.5rem', borderRadius: '0.375rem' }}>
+                                            💡 预览: {generateCron()}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* 环境选择 */}
+                            <div>
+                                <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem', color: '#374151' }}>
+                                    执行环境
+                                </label>
+                                <select
+                                    value={schedulerForm.environment_id || ''}
+                                    onChange={(e) => setSchedulerForm({ ...schedulerForm, environment_id: e.target.value ? Number(e.target.value) : null })}
+                                    style={{
+                                        width: '100%',
+                                        padding: '0.75rem',
+                                        border: '1px solid #E5E7EB',
+                                        borderRadius: '0.5rem',
+                                        fontSize: '0.875rem',
+                                        outline: 'none'
+                                    }}
+                                >
+                                    <option value="">使用默认环境</option>
+                                    {environments.map(e => (
+                                        <option key={e.id} value={e.id}>
+                                            {e.env_name} ({e.base_url})
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            {/* 飞书通知配置 */}
+                            <div style={{ background: '#F9FAFB', padding: '1rem', borderRadius: '0.5rem', border: '1px solid #E5E7EB' }}>
+                                <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.75rem', color: '#374151' }}>
+                                    飞书通知配置
+                                </label>
+                                <div style={{ marginBottom: '0.75rem' }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', marginBottom: '0.5rem' }}>
+                                        <input
+                                            type="radio"
+                                            checked={schedulerForm.use_project_webhook}
+                                            onChange={() => setSchedulerForm({ ...schedulerForm, use_project_webhook: true })}
+                                        />
+                                        <span style={{ fontSize: '0.875rem' }}>使用项目默认Webhook</span>
+                                    </label>
+                                    {schedulerForm.use_project_webhook && (
+                                        <div style={{ marginLeft: '1.5rem', fontSize: '0.75rem', color: '#6B7280' }}>
+                                            {projectFeishuWebhook ? `当前: ${projectFeishuWebhook.substring(0, 50)}...` : '未配置项目Webhook'}
+                                        </div>
+                                    )}
+                                </div>
+                                <div>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', marginBottom: '0.5rem' }}>
+                                        <input
+                                            type="radio"
+                                            checked={!schedulerForm.use_project_webhook}
+                                            onChange={() => setSchedulerForm({ ...schedulerForm, use_project_webhook: false })}
+                                        />
+                                        <span style={{ fontSize: '0.875rem' }}>自定义Webhook URL</span>
+                                    </label>
+                                    {!schedulerForm.use_project_webhook && (
+                                        <input
+                                            type="text"
+                                            value={schedulerForm.custom_webhook}
+                                            onChange={(e) => setSchedulerForm({ ...schedulerForm, custom_webhook: e.target.value })}
+                                            placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
+                                            style={{
+                                                width: '100%',
+                                                padding: '0.5rem',
+                                                border: '1px solid #E5E7EB',
+                                                borderRadius: '0.375rem',
+                                                fontSize: '0.75rem',
+                                                marginLeft: '1.5rem',
+                                                outline: 'none'
+                                            }}
+                                        />
+                                    )}
+                                </div>
+                                <div style={{ marginTop: '0.75rem', fontSize: '0.75rem', color: '#6B7280', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                                    <AlertCircle size={14} />
+                                    每次执行都会发送通知（成功和失败）
+                                </div>
+                            </div>
+
+                            {/* 立即启用 */}
+                            <div>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                    <input
+                                        type="checkbox"
+                                        checked={schedulerForm.is_active}
+                                        onChange={(e) => setSchedulerForm({ ...schedulerForm, is_active: e.target.checked })}
+                                        style={{ width: '1.125rem', height: '1.125rem' }}
+                                    />
+                                    <span style={{ fontSize: '0.875rem', fontWeight: '500' }}>创建后立即启用</span>
+                                </label>
+                            </div>
+
+                            {/* 操作按钮 */}
+                            <div style={{ display: 'flex', gap: '1rem', marginTop: '0.5rem' }}>
+                                <button
+                                    onClick={() => setShowSchedulerModal(false)}
+                                    style={{
+                                        flex: 1,
+                                        padding: '0.75rem',
+                                        border: '1px solid #E5E7EB',
+                                        borderRadius: '0.5rem',
+                                        background: 'white',
+                                        cursor: 'pointer',
+                                        fontSize: '0.875rem',
+                                        fontWeight: '500'
+                                    }}
+                                >
+                                    取消
+                                </button>
+                                <button
+                                    onClick={handleCreateScheduledJob}
+                                    disabled={!schedulerForm.name || !schedulerForm.cron}
+                                    style={{
+                                        flex: 1,
+                                        padding: '0.75rem',
+                                        border: 'none',
+                                        borderRadius: '0.5rem',
+                                        background: schedulerForm.name && schedulerForm.cron ? '#667eea' : '#9CA3AF',
+                                        color: 'white',
+                                        cursor: schedulerForm.name && schedulerForm.cron ? 'pointer' : 'not-allowed',
+                                        fontWeight: '600',
+                                        fontSize: '0.875rem'
+                                    }}
+                                >
+                                    创建定时任务
+                                </button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             )}
         </>

@@ -3025,6 +3025,132 @@ async def heal_apply(req: HealApplyRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============= 定时任务调度服务 =============
+
+from services.scheduler_service import SchedulerService
+
+# 初始化调度服务
+scheduler_service = SchedulerService(DB_PATH)
+
+class ScheduledJobCreateRequest(BaseModel):
+    name: str
+    description: str = ""
+    project_id: str
+    scenario_id: int
+    cron: str
+    environment_id: Optional[int] = None
+    notification_config: str = "{}"
+    is_active: bool = True
+
+@app.post("/api/v1/scheduler/jobs")
+async def create_scheduled_job(req: ScheduledJobCreateRequest):
+    """创建定时任务"""
+    try:
+        result = await scheduler_service.create_job({
+            "name": req.name,
+            "description": req.description,
+            "project_id": req.project_id,
+            "scenario_id": req.scenario_id,
+            "cron": req.cron,
+            "environment_id": req.environment_id,
+            "notification_config": req.notification_config
+        })
+        return result
+    except Exception as e:
+        print(f"❌ 创建定时任务失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/v1/scheduler/jobs/{job_id}")
+async def update_scheduled_job(job_id: int, req: ScheduledJobCreateRequest):
+    """更新定时任务"""
+    try:
+        result = await scheduler_service.update_job(job_id, {
+            "name": req.name,
+            "description": req.description,
+            "project_id": req.project_id,
+            "scenario_id": req.scenario_id,
+            "cron": req.cron,
+            "environment_id": req.environment_id,
+            "notification_config": req.notification_config
+        })
+        return result
+    except Exception as e:
+        print(f"❌ 更新定时任务失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/scheduler/jobs")
+async def get_scheduled_jobs(project_id: str):
+    """获取项目的定时任务列表"""
+    try:
+        jobs = await scheduler_service.get_job_list(project_id)
+        return jobs
+    except Exception as e:
+        print(f"❌ 获取定时任务列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/v1/scheduler/jobs/{job_id}/pause")
+async def pause_scheduled_job(job_id: int):
+    """暂停定时任务"""
+    try:
+        result = await scheduler_service.pause_job(job_id)
+        return result
+    except Exception as e:
+        print(f"❌ 暂停定时任务失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/v1/scheduler/jobs/{job_id}/resume")
+async def resume_scheduled_job(job_id: int):
+    """恢复定时任务"""
+    try:
+        result = await scheduler_service.resume_job(job_id)
+        return result
+    except Exception as e:
+        print(f"❌ 恢复定时任务失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/v1/scheduler/jobs/{job_id}")
+async def delete_scheduled_job(job_id: int):
+    """删除定时任务"""
+    try:
+        result = await scheduler_service.delete_job(job_id)
+        return result
+    except Exception as e:
+        print(f"❌ 删除定时任务失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/scheduler/jobs/{job_id}/trigger")
+async def trigger_scheduled_job(job_id: int):
+    """立即执行定时任务"""
+    try:
+        await scheduler_service.execute_job(job_id)
+        return {"message": "任务已触发执行"}
+    except Exception as e:
+        print(f"❌ 触发定时任务失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/scheduler/jobs/{job_id}/history")
+async def get_job_history(job_id: int, limit: int = 50):
+    """获取任务执行历史"""
+    try:
+        history = await scheduler_service.get_job_history(job_id, limit)
+        return history
+    except Exception as e:
+        print(f"❌ 获取任务历史失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 启动时加载所有活跃任务
+@app.on_event("startup")
+async def startup_event():
+    """应用启动时加载定时任务"""
+    try:
+        # 先启动调度器
+        scheduler_service.start()
+        # 再加载任务
+        await scheduler_service.load_jobs_from_db()
+    except Exception as e:
+        print(f"⚠️ 加载定时任务失败: {e}")
+
+
 if __name__ == "__main__":
     print(f"🚀 启动统一后端 (Unified Backend)... 数据库: {DB_PATH}")
     uvicorn.run(app, host="0.0.0.0", port=8000)

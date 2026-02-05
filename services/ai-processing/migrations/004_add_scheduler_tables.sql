@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     notification_config TEXT,  -- JSON格式: {"type": "email", "recipients": [...]}
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (scenario_id) REFERENCES test_scenarios(id)
+    FOREIGN KEY (scenario_id) REFERENCES scenarios(id)
 );
 
 -- 任务执行历史表
