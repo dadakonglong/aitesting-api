@@ -972,85 +972,93 @@ export default function TestScenariosTab() {
                                                                         {/* 提取标签页 (默认,核心功能) */}
                                                                         {(activeStepTab[stepKey] || '提取') === '提取' && (
                                                                             <div>
-                                                                                {res.extractions && res.extractions.length > 0 ? (
-                                                                                    <table style={{ width: '100%', background: 'white', borderRadius: '0.5rem', borderCollapse: 'collapse' }}>
-                                                                                        <thead style={{ background: '#EFF6FF' }}>
-                                                                                            <tr>
-                                                                                                <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid #DBEAFE' }}>来源步骤</th>
-                                                                                                <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid #DBEAFE' }}>来源字段</th>
-                                                                                                <th style={{ padding: '0.75rem', textAlign: 'center', borderBottom: '2px solid #DBEAFE', width: '60px' }}>→</th>
-                                                                                                <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid #DBEAFE' }}>目标字段</th>
-                                                                                                <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid #DBEAFE' }}>提取的值</th>
-                                                                                                <th style={{ padding: '0.75rem', textAlign: 'center', borderBottom: '2px solid #DBEAFE', width: '60px' }}>状态</th>
-                                                                                            </tr>
-                                                                                        </thead>
-                                                                                        <tbody>
-                                                                                            {res.extractions.map((ext: any, idx: number) => (
-                                                                                                <tr key={idx} style={{ borderBottom: idx === res.extractions.length - 1 ? 'none' : '1px solid #F3F4F6' }}>
-                                                                                                    <td style={{ padding: '0.75rem' }}>
-                                                                                                        <span style={{
-                                                                                                            background: '#DBEAFE',
-                                                                                                            color: '#1E40AF',
-                                                                                                            padding: '0.25rem 0.5rem',
-                                                                                                            borderRadius: '0.25rem',
-                                                                                                            fontWeight: '600',
-                                                                                                            fontSize: '0.75rem'
-                                                                                                        }}>
-                                                                                                            步骤 {ext.from_step}
-                                                                                                        </span>
-                                                                                                    </td>
-                                                                                                    <td style={{ padding: '0.75rem', fontFamily: 'monospace', fontSize: '0.75rem', color: '#475569' }}>
-                                                                                                        {ext.from_field}
-                                                                                                    </td>
-                                                                                                    <td style={{ padding: '0.75rem', textAlign: 'center', color: '#3B82F6', fontSize: '1.25rem', fontWeight: 'bold' }}>
-                                                                                                        →
-                                                                                                    </td>
-                                                                                                    <td style={{ padding: '0.75rem', fontFamily: 'monospace', fontSize: '0.75rem', color: '#475569' }}>
-                                                                                                        {ext.to_field}
-                                                                                                    </td>
-                                                                                                    <td style={{ padding: '0.75rem' }}>
-                                                                                                        <code style={{
-                                                                                                            background: '#F3F4F6',
-                                                                                                            padding: '0.25rem 0.5rem',
-                                                                                                            borderRadius: '0.25rem',
-                                                                                                            fontSize: '0.75rem',
-                                                                                                            maxWidth: '200px',
-                                                                                                            display: 'inline-block',
-                                                                                                            overflow: 'hidden',
-                                                                                                            textOverflow: 'ellipsis',
-                                                                                                            whiteSpace: 'nowrap',
-                                                                                                            color: '#1F2937'
-                                                                                                        }}>
-                                                                                                            {typeof ext.extracted_value === 'object'
-                                                                                                                ? JSON.stringify(ext.extracted_value)
-                                                                                                                : String(ext.extracted_value)}
-                                                                                                        </code>
-                                                                                                    </td>
-                                                                                                    <td style={{ padding: '0.75rem', textAlign: 'center' }}>
-                                                                                                        {ext.success ? (
-                                                                                                            <span style={{ color: '#10B981', fontSize: '1.25rem' }}>✅</span>
-                                                                                                        ) : (
-                                                                                                            <span style={{ color: '#EF4444', fontSize: '1.25rem' }} title={ext.error_msg}>❌</span>
-                                                                                                        )}
-                                                                                                    </td>
-                                                                                                </tr>
-                                                                                            ))}
-                                                                                        </tbody>
-                                                                                    </table>
-                                                                                ) : (
-                                                                                    <div style={{
-                                                                                        background: 'white',
-                                                                                        padding: '2rem',
-                                                                                        textAlign: 'center',
-                                                                                        borderRadius: '0.5rem',
-                                                                                        color: '#9CA3AF'
-                                                                                    }}>
-                                                                                        <p style={{ margin: 0, fontSize: '0.875rem' }}>此步骤未从其他步骤提取数据</p>
-                                                                                        <p style={{ margin: '0.5rem 0 0', fontSize: '0.75rem' }}>
-                                                                                            (AI会自动识别接口间的依赖关系并生成提取配置)
-                                                                                        </p>
-                                                                                    </div>
-                                                                                )}
+                                                                                {(() => {
+                                                                                    const extractions = (res.extractions || []).filter((ext: any) =>
+                                                                                        ext.extracted_value != null && ext.extracted_value !== ''
+                                                                                    )
+                                                                                    if (extractions.length > 0) {
+                                                                                        return (
+                                                                                            <table style={{ width: '100%', background: 'white', borderRadius: '0.5rem', borderCollapse: 'collapse' }}>
+                                                                                                <thead style={{ background: '#EFF6FF' }}>
+                                                                                                    <tr>
+                                                                                                        <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid #DBEAFE' }}>来源步骤</th>
+                                                                                                        <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid #DBEAFE' }}>来源字段</th>
+                                                                                                        <th style={{ padding: '0.75rem', textAlign: 'center', borderBottom: '2px solid #DBEAFE', width: '60px' }}>→</th>
+                                                                                                        <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid #DBEAFE' }}>目标字段</th>
+                                                                                                        <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid #DBEAFE' }}>提取的值</th>
+                                                                                                        <th style={{ padding: '0.75rem', textAlign: 'center', borderBottom: '2px solid #DBEAFE', width: '60px' }}>状态</th>
+                                                                                                    </tr>
+                                                                                                </thead>
+                                                                                                <tbody>
+                                                                                                    {extractions.map((ext: any, idx: number) => (
+                                                                                                        <tr key={idx} style={{ borderBottom: idx === extractions.length - 1 ? 'none' : '1px solid #F3F4F6' }}>
+                                                                                                            <td style={{ padding: '0.75rem' }}>
+                                                                                                                <span style={{
+                                                                                                                    background: '#DBEAFE',
+                                                                                                                    color: '#1E40AF',
+                                                                                                                    padding: '0.25rem 0.5rem',
+                                                                                                                    borderRadius: '0.25rem',
+                                                                                                                    fontWeight: '600',
+                                                                                                                    fontSize: '0.75rem'
+                                                                                                                }}>
+                                                                                                                    步骤 {ext.from_step}
+                                                                                                                </span>
+                                                                                                            </td>
+                                                                                                            <td style={{ padding: '0.75rem', fontFamily: 'monospace', fontSize: '0.75rem', color: '#475569' }}>
+                                                                                                                {ext.from_field}
+                                                                                                            </td>
+                                                                                                            <td style={{ padding: '0.75rem', textAlign: 'center', color: '#3B82F6', fontSize: '1.25rem', fontWeight: 'bold' }}>
+                                                                                                                →
+                                                                                                            </td>
+                                                                                                            <td style={{ padding: '0.75rem', fontFamily: 'monospace', fontSize: '0.75rem', color: '#475569' }}>
+                                                                                                                {ext.to_field}
+                                                                                                            </td>
+                                                                                                            <td style={{ padding: '0.75rem' }}>
+                                                                                                                <code style={{
+                                                                                                                    background: '#F3F4F6',
+                                                                                                                    padding: '0.25rem 0.5rem',
+                                                                                                                    borderRadius: '0.25rem',
+                                                                                                                    fontSize: '0.75rem',
+                                                                                                                    maxWidth: '200px',
+                                                                                                                    display: 'inline-block',
+                                                                                                                    overflow: 'hidden',
+                                                                                                                    textOverflow: 'ellipsis',
+                                                                                                                    whiteSpace: 'nowrap',
+                                                                                                                    color: '#1F2937'
+                                                                                                                }}>
+                                                                                                                    {typeof ext.extracted_value === 'object'
+                                                                                                                        ? JSON.stringify(ext.extracted_value)
+                                                                                                                        : String(ext.extracted_value)}
+                                                                                                                </code>
+                                                                                                            </td>
+                                                                                                            <td style={{ padding: '0.75rem', textAlign: 'center' }}>
+                                                                                                                {ext.success ? (
+                                                                                                                    <span style={{ color: '#10B981', fontSize: '1.25rem' }}>✅</span>
+                                                                                                                ) : (
+                                                                                                                    <span style={{ color: '#EF4444', fontSize: '1.25rem' }} title={ext.error_msg}>❌</span>
+                                                                                                                )}
+                                                                                                            </td>
+                                                                                                        </tr>
+                                                                                                    ))}
+                                                                                                </tbody>
+                                                                                            </table>
+                                                                                        )
+                                                                                    }
+                                                                                    return (
+                                                                                        <div style={{
+                                                                                            background: 'white',
+                                                                                            padding: '2rem',
+                                                                                            textAlign: 'center',
+                                                                                            borderRadius: '0.5rem',
+                                                                                            color: '#9CA3AF'
+                                                                                        }}>
+                                                                                            <p style={{ margin: 0, fontSize: '0.875rem' }}>此步骤未从其他步骤提取数据</p>
+                                                                                            <p style={{ margin: '0.5rem 0 0', fontSize: '0.75rem' }}>
+                                                                                                (AI会自动识别接口间的依赖关系并生成提取配置)
+                                                                                            </p>
+                                                                                        </div>
+                                                                                    )
+                                                                                })()}
                                                                             </div>
                                                                         )}
 
@@ -1106,29 +1114,82 @@ export default function TestScenariosTab() {
                                                                         {(activeStepTab[stepKey] || '提取') === '断言' && (
                                                                             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
                                                                                 {res.assertions && res.assertions.length > 0 ? (
-                                                                                    res.assertions.map((assertion: any, idx: number) => (
-                                                                                        <div key={idx} style={{
-                                                                                            background: 'white',
-                                                                                            padding: '1rem',
-                                                                                            borderRadius: '0.5rem',
-                                                                                            borderLeft: `4px solid ${assertion.passed ? '#10B981' : '#EF4444'}`
-                                                                                        }}>
-                                                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
-                                                                                                <span style={{ fontSize: '1.25rem' }}>{assertion.passed ? '✅' : '❌'}</span>
-                                                                                                <span style={{ fontWeight: '600', fontSize: '0.875rem' }}>
-                                                                                                    {assertion.description || assertion.type || assertion.assertion?.description}
-                                                                                                </span>
+                                                                                    res.assertions.map((assertion: any, idx: number) => {
+                                                                                        const isHttp = assertion.type === 'http'
+                                                                                        const isBusiness = assertion.type === 'business'
+                                                                                        const expectedHttp = res.expected_status
+                                                                                        const actualHttp = res.status_code
+                                                                                        const businessDetails = Array.isArray(assertion.details) ? assertion.details : []
+                                                                                        return (
+                                                                                            <div key={idx} style={{
+                                                                                                background: 'white',
+                                                                                                padding: '1rem',
+                                                                                                borderRadius: '0.5rem',
+                                                                                                borderLeft: `4px solid ${assertion.passed ? '#10B981' : '#EF4444'}`
+                                                                                            }}>
+                                                                                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                                                                                                    <span style={{ fontSize: '1.25rem' }}>{assertion.passed ? '✅' : '❌'}</span>
+                                                                                                    <span style={{ fontWeight: '600', fontSize: '0.875rem' }}>
+                                                                                                        {isHttp ? 'HTTP 状态码断言' : (isBusiness ? '业务断言' : (assertion.description || assertion.type || '断言'))}
+                                                                                                    </span>
+                                                                                                </div>
+                                                                                                {/* HTTP 断言：展示期望/实际状态码 */}
+                                                                                                {isHttp && (
+                                                                                                    <div style={{ fontSize: '0.75rem', color: '#6B7280', marginLeft: '1.75rem' }}>
+                                                                                                        <div>期望状态码: <code style={{ background: '#F3F4F6', padding: '0.125rem 0.25rem', borderRadius: '0.25rem' }}>
+                                                                                                            {expectedHttp != null ? expectedHttp : '-'}
+                                                                                                        </code></div>
+                                                                                                        <div style={{ marginTop: '0.25rem' }}>实际状态码: <code style={{ background: '#F3F4F6', padding: '0.125rem 0.25rem', borderRadius: '0.25rem' }}>
+                                                                                                            {actualHttp != null ? actualHttp : '-'}
+                                                                                                        </code></div>
+                                                                                                        {assertion.message && (
+                                                                                                            <div style={{ marginTop: '0.25rem' }}>{assertion.message}</div>
+                                                                                                        )}
+                                                                                                    </div>
+                                                                                                )}
+                                                                                                {/* 业务断言：展示每个字段的期望/实际 */}
+                                                                                                {isBusiness && businessDetails.length > 0 && (
+                                                                                                    <div style={{ fontSize: '0.75rem', color: '#6B7280', marginLeft: '1.75rem' }}>
+                                                                                                        <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '0.25rem' }}>
+                                                                                                            <thead>
+                                                                                                                <tr style={{ background: '#F3F4F6' }}>
+                                                                                                                    <th style={{ padding: '0.4rem 0.5rem', textAlign: 'left' }}>字段路径</th>
+                                                                                                                    <th style={{ padding: '0.4rem 0.5rem', textAlign: 'left' }}>期望值</th>
+                                                                                                                    <th style={{ padding: '0.4rem 0.5rem', textAlign: 'left' }}>实际值</th>
+                                                                                                                    <th style={{ padding: '0.4rem 0.5rem', textAlign: 'center', width: '60px' }}>结果</th>
+                                                                                                                </tr>
+                                                                                                            </thead>
+                                                                                                            <tbody>
+                                                                                                                {businessDetails.map((d: any, di: number) => (
+                                                                                                                    <tr key={di} style={{ borderTop: '1px solid #E5E7EB' }}>
+                                                                                                                        <td style={{ padding: '0.4rem 0.5rem', fontFamily: 'monospace' }}>{d.field}</td>
+                                                                                                                        <td style={{ padding: '0.4rem 0.5rem', fontFamily: 'monospace' }}>
+                                                                                                                            {JSON.stringify(d.expected)}
+                                                                                                                        </td>
+                                                                                                                        <td style={{ padding: '0.4rem 0.5rem', fontFamily: 'monospace' }}>
+                                                                                                                            {JSON.stringify(d.actual)}
+                                                                                                                        </td>
+                                                                                                                        <td style={{ padding: '0.4rem 0.5rem', textAlign: 'center' }}>
+                                                                                                                            {d.passed ? <span style={{ color: '#10B981' }}>通过</span> : <span style={{ color: '#EF4444' }}>失败</span>}
+                                                                                                                        </td>
+                                                                                                                    </tr>
+                                                                                                                ))}
+                                                                                                            </tbody>
+                                                                                                        </table>
+                                                                                                        {assertion.message && (
+                                                                                                            <div style={{ marginTop: '0.4rem' }}>{assertion.message}</div>
+                                                                                                        )}
+                                                                                                    </div>
+                                                                                                )}
+                                                                                                {/* 兜底：其它类型断言或没有详情时，直接展示 message */}
+                                                                                                {!isHttp && !(isBusiness && businessDetails.length > 0) && assertion.message && (
+                                                                                                    <div style={{ fontSize: '0.75rem', color: '#6B7280', marginLeft: '1.75rem' }}>
+                                                                                                        {assertion.message}
+                                                                                                    </div>
+                                                                                                )}
                                                                                             </div>
-                                                                                            <div style={{ fontSize: '0.75rem', color: '#6B7280', marginLeft: '1.75rem' }}>
-                                                                                                <div>期望值: <code style={{ background: '#F3F4F6', padding: '0.125rem 0.25rem', borderRadius: '0.25rem' }}>
-                                                                                                    {JSON.stringify(assertion.expected || assertion.assertion?.expected_value)}
-                                                                                                </code></div>
-                                                                                                <div style={{ marginTop: '0.25rem' }}>实际值: <code style={{ background: '#F3F4F6', padding: '0.125rem 0.25rem', borderRadius: '0.25rem' }}>
-                                                                                                    {JSON.stringify(assertion.actual || assertion.actual_value)}
-                                                                                                </code></div>
-                                                                                            </div>
-                                                                                        </div>
-                                                                                    ))
+                                                                                        )
+                                                                                    })
                                                                                 ) : (
                                                                                     <div style={{ background: 'white', padding: '2rem', textAlign: 'center', borderRadius: '0.5rem', color: '#9CA3AF' }}>
                                                                                         <p style={{ margin: 0 }}>无断言信息</p>
