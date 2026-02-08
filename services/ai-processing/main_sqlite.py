@@ -345,6 +345,37 @@ def init_database():
         status TEXT DEFAULT 'success',
         payload TEXT
     )''')
+
+    # 定时任务表
+    cursor.execute('''CREATE TABLE IF NOT EXISTS scheduled_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        description TEXT,
+        project_id TEXT NOT NULL,
+        scenario_id INTEGER NOT NULL,
+        cron_expression TEXT NOT NULL,
+        environment_id INTEGER,
+        is_active INTEGER DEFAULT 1,
+        notify_on_failure INTEGER DEFAULT 0,
+        notification_config TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )''')
+
+    # 定时任务执行记录表
+    cursor.execute('''CREATE TABLE IF NOT EXISTS job_executions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        status TEXT, -- success, failed, running
+        started_at TEXT,
+        completed_at TEXT,
+        execution_id TEXT,
+        total_steps INTEGER,
+        passed_steps INTEGER,
+        failed_steps INTEGER,
+        error_message TEXT,
+        FOREIGN KEY (job_id) REFERENCES scheduled_jobs(id)
+    )''')
     
     # 兼容性处理：如果 api 表中存在 default-project 但 projects 表中没有，则插入
     cursor.execute("SELECT COUNT(*) FROM projects WHERE id = 'default-project'")
