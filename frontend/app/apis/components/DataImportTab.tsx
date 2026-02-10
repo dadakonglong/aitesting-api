@@ -41,7 +41,10 @@ export default function DataImportTab() {
                 body: formData,
             })
 
-            if (!response.ok) throw new Error('导入失败')
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}))
+                throw new Error(errorData.detail || errorData.message || '导入失败')
+            }
             const data = await response.json()
             setResult(data)
         } catch (error: any) {
@@ -71,7 +74,10 @@ export default function DataImportTab() {
                 body: formData,
             })
 
-            if (!response.ok) throw new Error('导入失败')
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}))
+                throw new Error(errorData.detail || errorData.message || '导入失败')
+            }
             const data = await response.json()
             setResult(data)
         } catch (error: any) {

@@ -152,28 +152,58 @@ class PostmanAdapter(DataSourceAdapter):
                 apis.append(self._convert_request(item, folder_path))
             elif 'item' in item:
                 # 这是一个文件夹
-                new_path = f"{folder_path}/{item['name']}" if folder_path else item['name']
+                item_name = item.get('name', 'folder')
+                new_path = f"{folder_path}/{item_name}" if folder_path else item_name
                 self._parse_items(item['item'], apis, new_path)
     
     def _convert_request(self, item: dict, folder_path: str) -> dict:
         """转换Postman请求为标准格式"""
-        request = item['request']
-        url = request.get('url', {})
+        request = item.get('request', {})
+        url = request.get('url')
+        method = request.get('method', 'GET')
         
         # 处理URL
+        path = '/'
         if isinstance(url, str):
-            url_str = url
-            path = url_str
-        else:
-            url_str = url.get('raw', '')
-            path = '/' + '/'.join(url.get('path', []))
+            from urllib.parse import urlparse
+            try:
+                # 如果是完整的URL，提取path
+                if url.startswith(('http://', 'https://')):
+                    path = urlparse(url).path or '/'
+                else:
+                    path = url
+            except:
+                path = url
+        elif isinstance(url, dict):
+            if 'path' in url and isinstance(url['path'], list):
+                # path 是列表
+                path = '/' + '/'.join(str(p) for p in url['path'])
+            elif 'raw' in url:
+                # 尝试从 raw url 提取 path
+                from urllib.parse import urlparse
+                try:
+                    raw_url = str(url['raw'])
+                    # 如果 raw 不包含 schema，urlparse 可能解析不准，但这里我们主要是防崩溃
+                    parsed = urlparse(raw_url)
+                    path = parsed.path or '/'
+                    # 如果解析出来是空的或者不包含/，尝试手动处理
+                    if not path and raw_url:
+                        path = raw_url
+                except:
+                    pass
         
+        # 确保 path 以 / 开头且不为空
+        if not path:
+            path = '/'
+        if not path.startswith('/') and not path.startswith(('http://', 'https://')):
+            path = '/' + path
+
         return {
-            "id": f"{request['method']}:{path}",
+            "id": f"{method}:{path}",
             "name": item.get('name', ''),
             "path": path,
-            "method": request['method'],
-            "description": item.get('request', {}).get('description', ''),
+            "method": method,
+            "description": request.get('description', ''),
             "tags": [folder_path] if folder_path else [],
             "parameters": self._parse_postman_params(url, request),
             "request_body": self._parse_postman_body(request.get('body')),

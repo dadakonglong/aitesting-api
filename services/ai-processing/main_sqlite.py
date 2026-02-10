@@ -37,13 +37,20 @@ load_dotenv()
 
 app = FastAPI(title="AI Testing API - Unified Edition")
 
-from routers import api_management
+from routers import api_management, import_router
 app.include_router(api_management.router)
+app.include_router(import_router.router)
 
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "*"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -267,6 +274,103 @@ ai_client = AIProvider()
 api_planner = ApiPlanner(DB_PATH)
 # API Healer（失败用例分析与自愈）
 healer_agent = HealerAgent(ai_client, DB_PATH)
+
+# ============= 数据导入服务 (本地版) =============
+from adapters.data_source_adapter import AdapterFactory
+
+class DummyVectorService:
+    async def index_api(self, api: Dict):
+        print(f"[Dummy] 假装索引 API: {api.get('method')} {api.get('path')}")
+
+class LocalDataImportService:
+    def __init__(self, vector: DummyVectorService):
+        self.vector_service = vector
+
+    async def _enhance_apis(self, apis: List[Dict], project_id: str) -> List[Dict]:
+        enhanced = []
+        for api in apis:
+            api['project_id'] = project_id
+            if not api.get('id'):
+                api['id'] = f"{api['method']}:{api['path']}"
+            if not api.get('description'):
+                api['description'] = api.get('name', '')
+            enhanced.append(api)
+        return enhanced
+
+    async def import_from_source(self, source_type: str, source: str, project_id: str) -> Dict:
+        try:
+            adapter = AdapterFactory.create(source_type)
+            if not adapter.validate(source):
+                raise ValueError(f"无效的数据源: {source}")
+            
+            print(f"开始解析{source_type}: {source}")
+            apis = await adapter.parse(source)
+            
+            enhanced_apis = await self._enhance_apis(apis, project_id)
+            
+            # 保存到 SQLite (apis 表)
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            saved_count = 0
+            
+            for api in enhanced_apis:
+                # 检查是否存在 (path, method, project_id)
+                c.execute("SELECT id FROM apis WHERE path=? AND method=? AND project_id=?", 
+                          (api['path'], api['method'], project_id))
+                row = c.fetchone()
+                
+                params_json = json.dumps(api.get('parameters', []))
+                body_json = json.dumps(api.get('request_body', {}))
+                
+                if row:
+                    # 更新
+                    c.execute("""UPDATE apis SET 
+                        summary=?, description=?, parameters=?, request_body=?
+                        WHERE id=?""", 
+                        (api['name'], api['description'], params_json, body_json, row[0]))
+                else:
+                    # 插入
+                    c.execute("""INSERT INTO apis 
+                        (path, method, summary, description, parameters, request_body, project_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (api['path'], api['method'], api['name'], api['description'], 
+                         params_json, body_json, project_id))
+                saved_count += 1
+            
+            conn.commit()
+            conn.close()
+
+            # Dummy vector index
+            for api in enhanced_apis:
+                await self.vector_service.index_api(api)
+                
+            return {
+                "success": True, 
+                "total": len(apis), 
+                "indexed": saved_count, 
+                "source_type": source_type
+            }
+        except Exception as e:
+            print(f"导入出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return {"success": False, "error": str(e)}
+
+    async def batch_import(self, sources: List[Dict], project_id: str) -> Dict:
+        results = []
+        success_count = 0
+        for src in sources:
+            res = await self.import_from_source(src['type'], src['source'], project_id)
+            results.append(res)
+            if res['success']:
+                success_count += res['indexed']
+        return {
+            "total_sources": len(sources),
+            "total_apis": success_count,
+            "details": results
+        }
+
+data_import_service = LocalDataImportService(DummyVectorService())
 
 # ============= 数据库初始化 =============
 
@@ -1419,6 +1523,26 @@ def _get_value_by_path(data, path):
     return curr
 
 
+def _normalize_params(params):
+    """Normalize parameters to dict if they are list of descriptors (from Postman import)"""
+    if isinstance(params, list):
+        new_params = {}
+        for item in params:
+            if isinstance(item, dict) and "name" in item:
+                 # It's a descriptor
+                 key = item["name"]
+                 # Try to find a reasonable value
+                 val = item.get("value")
+                 if val is None: val = item.get("default")
+                 if val is None: val = item.get("example")
+                 if val is None: val = "" # Default to empty string
+                 new_params[key] = val
+            elif isinstance(item, (list, tuple)) and len(item) == 2:
+                 # It's a tuple (key, value)
+                 new_params[item[0]] = item[1]
+        return new_params
+    return params
+
 async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
     """执行步骤列表，返回每条步骤的请求/响应与 success（按 status_code < 400 判定）。"""
     context = {}
@@ -1447,7 +1571,10 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                 url = f"{current_base_url.rstrip('/')}/{safe_path}"
                 step_data["url"] = url
                 params_body = (step.get("params") or {}).copy()
-                params_query = (step.get("url_params") or {}).copy()
+                
+                # Normalize URL params (fix KeyError: 0 for Postman imports)
+                raw_url_params = (step.get("url_params") or {}).copy()
+                params_query = _normalize_params(raw_url_params)
                 request_headers = (step.get("headers") or {}).copy()
                 method = step_data["method"]
                 extractions = []
@@ -2349,8 +2476,24 @@ async def execute_single_case(req: ExecuteCaseRequest):
         sr["case_type"] = ct
         sr["expected_status"] = expected_status
         sr["success"] = (sr.get("status_code") == expected_status)
+        
+        # 保存执行记录 (以便用于自愈)
+        exec_id = 0
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            # 这里的 test_case_id=0 表示非场景用例执行
+            cursor.execute(
+                "INSERT INTO executions (test_case_id, status, results, project_id) VALUES (?, ?, ?, ?)",
+                (0, "success" if sr["success"] else "failed", json.dumps([sr], default=str), req.project_id),
+            )
+            exec_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"保存执行记录失败: {e}")
 
-        return {"result": sr, "success": sr.get("success")}
+        return {"result": sr, "success": sr.get("success"), "execution_id": exec_id}
     except HTTPException:
         raise
     except Exception as e:
@@ -3026,8 +3169,9 @@ class HealAnalyzeRequest(BaseModel):
 
 
 class HealApplyRequest(BaseModel):
-    """应用修复请求（仅场景用例 test_case_id > 0）"""
-    test_case_id: int
+    """应用修复请求（支持场景用例 test_case_id 或 接口用例 api_test_case_id）"""
+    test_case_id: Optional[int] = 0
+    api_test_case_id: Optional[int] = None
     execution_id: Optional[int] = None  # 不传则需在下次执行后单独传 execution_result
 
 
@@ -3219,11 +3363,13 @@ async def heal_analyze(req: HealAnalyzeRequest):
 @app.post("/api/v1/heal/apply")
 async def heal_apply(req: HealApplyRequest):
     """
-    API Healer - 应用修复：根据某次执行记录的分析结果，自动修改场景用例（test_cases 表）的步骤。
-    仅对 test_case_id > 0 的场景用例生效；计划执行（test_case_id=0）无对应用例可改，请用 analyze 查看建议后人工调整。
+    API Healer - 应用修复：根据某次执行记录的分析结果，自动修改用例。
+    - 场景用例：传 test_case_id > 0
+    - 接口用例：传 api_test_case_id > 0
     """
-    if req.test_case_id <= 0:
-        raise HTTPException(status_code=400, detail="仅支持对场景用例（test_case_id > 0）应用修复")
+    if (not req.test_case_id or req.test_case_id <= 0) and (not req.api_test_case_id or req.api_test_case_id <= 0):
+        raise HTTPException(status_code=400, detail="请提供有效的 test_case_id 或 api_test_case_id")
+    
     try:
         execution_result = None
         if req.execution_id:
@@ -3233,21 +3379,32 @@ async def heal_apply(req: HealApplyRequest):
             cursor.execute("SELECT results FROM executions WHERE id = ?", (req.execution_id,))
             row = cursor.fetchone()
             conn.close()
-            if not row:
-                raise HTTPException(status_code=404, detail="执行记录不存在")
-            try:
-                results = json.loads(row["results"] or "[]")
-            except Exception:
-                results = []
-            execution_result = {"steps": _normalize_results_to_steps(results)}
+            if row:
+                try:
+                    results = json.loads(row["results"] or "[]")
+                except Exception:
+                    results = []
+                # 兼容处理：如果是接口用例（单步），results 可能就是 steps 列表；
+                # 如果是场景用例，通常也是 steps 列表。
+                # _normalize_results_to_steps 主要用于补充一些字段
+                execution_result = {"steps": _normalize_results_to_steps(results)}
+
         if not execution_result or not execution_result.get("steps"):
             raise HTTPException(status_code=400, detail="请提供 execution_id 以指定用于修复的执行记录")
-        result = await healer_agent.heal(req.test_case_id, execution_result)
+
+        # 分发处理
+        if req.api_test_case_id and req.api_test_case_id > 0:
+            result = await healer_agent.heal_api_case(req.api_test_case_id, execution_result)
+        else:
+            result = await healer_agent.heal(req.test_case_id, execution_result)
+            
         return result
     except HTTPException:
         raise
     except Exception as e:
         import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
