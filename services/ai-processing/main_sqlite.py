@@ -61,7 +61,7 @@ import re
 
 def _parse_ai_json(content: str) -> Dict:
     """
-    容错解析大模型返回的 JSON：空返回、顶层数组、markdown 包裹、尾部逗号等。
+    容错解析大模型返回的 JSON：空返回、顶层数组、markdown 包裹、尾部逗号、双引号转义等。
     解析失败时返回 {} 并打日志，不抛错，避免整次调用报「无法解析」。
     """
     if content is None:
@@ -72,6 +72,23 @@ def _parse_ai_json(content: str) -> Dict:
         raw = raw[1:].strip()
     if not raw:
         return {}
+    
+    # 预处理：修复常见的JSON格式问题
+    def clean_json_string(s: str) -> str:
+        """清理JSON字符串中的常见问题"""
+        # 1. 修复双引号转义问题：""cases" -> "cases"（字段名被双引号包裹两次）
+        # 匹配模式：""field_name" 或 ""field_name": 
+        s = re.sub(r'""([a-zA-Z_][a-zA-Z0-9_]*)"(\s*:)', r'"\1"\2', s)
+        # 2. 修复值中的双引号转义：""value" -> "value"
+        s = re.sub(r':\s*""([^"]+)"([,\s}])', r': "\1"\2', s)
+        # 3. 修复尾部逗号
+        s = re.sub(r",\s*([}\]])", r"\1", s)
+        # 4. 修复单引号（某些模型可能返回单引号）
+        s = s.replace("'", '"')
+        # 5. 移除控制字符（但保留换行符和制表符）
+        s = re.sub(r'[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f-\x9f]', '', s)
+        return s
+    
     # 1. 直接解析
     try:
         obj = json.loads(raw)
@@ -80,50 +97,85 @@ def _parse_ai_json(content: str) -> Dict:
         return obj if isinstance(obj, dict) else {}
     except json.JSONDecodeError:
         pass
-    # 2. 顶层为数组：取 [ ... ] 解析后包装为 {"cases": ...}
-    if raw.lstrip().startswith("["):
-        start = raw.find("[")
-        end = raw.rfind("]")
-        if end > start:
-            try:
-                obj = json.loads(raw[start : end + 1])
-                return {"cases": obj} if isinstance(obj, list) else {}
-            except json.JSONDecodeError:
-                pass
+    
+    # 2. 清理后解析
+    try:
+        cleaned = clean_json_string(raw)
+        obj = json.loads(cleaned)
+        if isinstance(obj, list):
+            return {"cases": obj}
+        return obj if isinstance(obj, dict) else {}
+    except json.JSONDecodeError:
+        pass
+    
     # 3. 去掉 markdown 代码块
     if "```" in raw:
         m = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
         if m:
             try:
                 inner = m.group(1).strip()
-                obj = json.loads(inner)
+                cleaned_inner = clean_json_string(inner)
+                obj = json.loads(cleaned_inner)
                 if isinstance(obj, list):
                     return {"cases": obj}
                 return obj if isinstance(obj, dict) else {}
             except json.JSONDecodeError:
                 pass
-    # 4. 取第一个 { 到最后一个 } 或 [ 到 ]
+    
+    # 4. 顶层为数组：取 [ ... ] 解析后包装为 {"cases": ...}
+    if raw.lstrip().startswith("["):
+        start = raw.find("[")
+        end = raw.rfind("]")
+        if end > start:
+            try:
+                segment = raw[start : end + 1]
+                cleaned_segment = clean_json_string(segment)
+                obj = json.loads(cleaned_segment)
+                return {"cases": obj} if isinstance(obj, list) else {}
+            except json.JSONDecodeError:
+                pass
+    
+    # 5. 取第一个 { 到最后一个 }
     start = raw.find("{")
     end = raw.rfind("}")
     if start != -1 and end > start:
         try:
-            obj = json.loads(raw[start : end + 1])
+            segment = raw[start : end + 1]
+            cleaned_segment = clean_json_string(segment)
+            obj = json.loads(cleaned_segment)
             return obj if isinstance(obj, dict) else {}
         except json.JSONDecodeError:
             pass
-    # 5. 修复尾部逗号后再试
+    
+    # 6. 尝试修复更多问题后解析
     for attempt in [raw, raw[start : end + 1] if start != -1 and end > start else raw]:
-        fixed = re.sub(r",\s*([}\]])", r"\1", attempt)
+        fixed = clean_json_string(attempt)
         try:
             obj = json.loads(fixed)
             if isinstance(obj, list):
                 return {"cases": obj}
             return obj if isinstance(obj, dict) else {}
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as e:
+            # 记录详细的错误信息
+            error_pos = getattr(e, 'pos', None)
+            if error_pos and error_pos < len(fixed):
+                error_context = fixed[max(0, error_pos-50):error_pos+50]
+                print(f"DEBUG: JSON解析错误位置 {error_pos}: ...{error_context}...")
+    
     # 解析失败不抛错，返回空并打日志（便于排查「json 非法」指哪里）
-    preview = (raw[:200] + "…") if len(raw) > 200 else raw
-    print(f"⚠️ AI 返回无法解析为 JSON，已当空处理。内容预览: {preview!r}")
+    preview = (raw[:500] + "…") if len(raw) > 500 else raw
+    print(f"⚠️ AI 返回无法解析为 JSON，已当空处理。")
+    print(f"   内容预览（前500字符）: {preview!r}")
+    print(f"   内容长度: {len(raw)} 字符")
+    # 尝试输出更详细的错误信息
+    try:
+        json.loads(raw)  # 这会抛出详细的错误信息
+    except json.JSONDecodeError as e:
+        print(f"   JSON错误详情: {str(e)}")
+        if hasattr(e, 'pos'):
+            print(f"   错误位置: {e.pos}")
+            if e.pos < len(raw):
+                print(f"   错误位置上下文: {raw[max(0, e.pos-30):e.pos+30]!r}")
     return {}
 
 
@@ -1498,14 +1550,115 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                             resp_obj = json.loads(res_content) if res_content else {}
                         except Exception:
                             resp_obj = {}
+                    
+                    # 字段名映射表：支持不同API的字段名变体
+                    FIELD_NAME_MAPPING = {
+                        "code": ["code", "errcode", "retCode", "status", "ret", "error_code", "statusCode"],
+                        "message": ["message", "msg", "errmsg", "info", "error", "desc", "description"],
+                        "data": ["data", "result", "content", "body", "list"],
+                    }
+                    BASIC_CODE_FIELDS = set(FIELD_NAME_MAPPING["code"])
+                    MESSAGE_FIELDS = set(FIELD_NAME_MAPPING["message"])
+
+                    def _shorten(val: Any) -> Any:
+                        """
+                        将 very long 的实际值/期望值做友好截断，避免在前端显示一大串 token / JSON。
+                        只在展示用的 business_details 里截断，不影响真实断言逻辑。
+                        """
+                        try:
+                            s = json.dumps(val, ensure_ascii=False)
+                        except Exception:
+                            s = str(val)
+                        # 200 字符足够让人看明白字段值，大于此长度只保留前缀
+                        if len(s) > 200:
+                            return s[:200] + "…(已截断)"
+                        return s
+                    
                     for field_path, expected_val in expected_response_body.items():
+                        # 提取字段名（支持路径如 "data.code"）
+                        path_parts = field_path.split(".")
+                        base_field = path_parts[0] if path_parts else field_path
+                        
+                        # 尝试直接提取
                         actual = _get_value_by_path(resp_obj, field_path)
-                        match = actual == expected_val if expected_val is not None else (actual is not None)
+                        
+                        # 如果直接提取失败，尝试字段名映射（仅对顶级字段）
+                        if actual is None and len(path_parts) == 1 and base_field in FIELD_NAME_MAPPING:
+                            for alt_field in FIELD_NAME_MAPPING[base_field]:
+                                if alt_field != base_field and alt_field in resp_obj:
+                                    actual = resp_obj[alt_field]
+                                    field_path = alt_field  # 更新字段路径用于显示
+                                    break
+                        
+                        # 类型兼容比较：支持字符串和数字的互转比较
+                        match = False
+                        if expected_val is None:
+                            match = actual is not None
+                        else:
+                            # 严格相等
+                            if actual == expected_val:
+                                match = True
+                            else:
+                                # 类型转换后比较（字符串和数字互转）
+                                try:
+                                    # 尝试将期望值和实际值都转为字符串比较
+                                    if str(actual) == str(expected_val):
+                                        match = True
+                                    # 尝试数字比较
+                                    elif isinstance(expected_val, (int, float)) and isinstance(actual, (int, float)):
+                                        match = abs(float(actual) - float(expected_val)) < 0.0001
+                                    elif isinstance(expected_val, (int, float)) and isinstance(actual, str):
+                                        try:
+                                            match = float(actual) == float(expected_val)
+                                        except (ValueError, TypeError):
+                                            pass
+                                    elif isinstance(expected_val, str) and isinstance(actual, (int, float)):
+                                        try:
+                                            match = str(actual) == expected_val or float(actual) == float(expected_val)
+                                        except (ValueError, TypeError):
+                                            pass
+                                except (ValueError, TypeError):
+                                    pass
+
+                        # 针对 message 等提示语字段，支持「多候选文案」和包含匹配：
+                        # 例如期望值为 "用户不存在或密码错误"，实际返回 "用户不存在" 也视为通过
+                        if (
+                            not match
+                            and isinstance(expected_val, str)
+                            and isinstance(actual, str)
+                        ):
+                            normalized_field_for_msg = field_path.split(".")[-1] if field_path else ""
+                            if normalized_field_for_msg in MESSAGE_FIELDS:
+                                # 按中文“或”、逗号等拆分成多个候选文案
+                                candidates = [c.strip() for c in re.split(r"[，,;/]|或", expected_val) if c.strip()]
+                                if not candidates:
+                                    candidates = [expected_val.strip()]
+                                for cand in candidates:
+                                    if cand and (cand in actual or actual in cand):
+                                        match = True
+                                        break
+                        
+                        # 断言分类：用于前端按「基础响应 / 业务数据 / 数据完整性」展示
+                        # - code 等状态码字段 -> basic
+                        # - 期望为空/非空之类 -> integrity
+                        # - 其它 -> business_data
+                        normalized_field = field_path.split(".")[-1] if field_path else ""
+                        category = "business_data"
+                        text_expected = str(expected_val).strip() if expected_val is not None else ""
+                        if normalized_field in BASIC_CODE_FIELDS:
+                            category = "basic"
+                        elif (
+                            expected_val is None
+                            or text_expected in {"非空", "not null", "not_null", "not_empty", "存在", "exists"}
+                        ):
+                            category = "integrity"
+
                         business_details.append({
                             "field": field_path,
-                            "expected": expected_val,
-                            "actual": actual,
+                            "expected": _shorten(expected_val),
+                            "actual": _shorten(actual),
                             "passed": match,
+                            "category": category,
                         })
                         if not match:
                             business_passed = False
@@ -1514,7 +1667,12 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                 # 保留 HTTP 断言；若配置了业务断言且业务断言通过，则即使 HTTP 状态码与期望不符也视为通过（如 200 但 body 中 code=401、message=密码错误）
                 success = http_passed or (bool(expected_response_body) and business_passed)
                 assertions = [
-                    {"type": "http", "passed": http_passed, "message": f"状态码 {res.status_code} 与期望 {expected_status} {'一致' if http_passed else '不一致'}"},
+                    {
+                        "type": "http",
+                        "category": "basic",
+                        "passed": http_passed,
+                        "message": f"状态码 {res.status_code} 与期望 {expected_status} {'一致' if http_passed else '不一致'}",
+                    },
                 ]
                 if expected_response_body:
                     assertions.append({
@@ -2348,21 +2506,46 @@ async def execute_api_test_plan(req: ExecutePlanRequest):
             raise HTTPException(status_code=400, detail="请提供 base_url 或在项目环境中配置 base_url")
 
         # 优先使用前端传入的当前计划（含已生成的 AI 用例）
+        include_types = None
+        if req.case_types:
+            include_types = [t.strip().lower() for t in req.case_types.split(",") if t.strip()]
+        
         if req.plan and isinstance(req.plan, dict) and (req.plan.get("endpoints") or []):
             endpoints = req.plan.get("endpoints") or []
+            # 调试日志：检查传入的 plan 结构
+            print(f"DEBUG: 使用前端传入的 plan，endpoints 数量: {len(endpoints)}")
+            if include_types:
+                print(f"DEBUG: 需要过滤的用例类型: {include_types}")
+            for i, ep in enumerate(endpoints):
+                cases_count = len(ep.get("cases") or [])
+                print(f"DEBUG: endpoint[{i}]: path={ep.get('path')}, method={ep.get('method')}, cases数量={cases_count}")
         else:
-            include_types = None
-            if req.case_types:
-                include_types = [t.strip().lower() for t in req.case_types.split(",") if t.strip()]
             plan = api_planner.generate_plan(project_id=req.project_id, include_case_types=include_types)
             endpoints = plan.get("endpoints") or []
+            print(f"DEBUG: 重新生成 plan，endpoints 数量: {len(endpoints)}")
         steps = []
         meta_list = []  # (case_type, expected_status) 与 steps 一一对应
         for ep in endpoints:
             base_url_ep = (ep.get("base_url") or "").strip() or base_url
             ep_path = (ep.get("path") or "").strip()
             ep_method = (ep.get("method") or "GET").upper()
-            for case in ep.get("cases") or []:
+            cases = ep.get("cases") or []
+            if not cases:
+                print(f"DEBUG: 警告 - endpoint {ep_method} {ep_path} 的 cases 列表为空或不存在")
+                continue
+            # 如果指定了 case_types，需要过滤用例
+            filtered_cases = cases
+            if include_types:
+                filtered_cases = []
+                for case in cases:
+                    case_type = (case.get("case_type") or "positive").lower()
+                    if case_type in include_types:
+                        filtered_cases.append(case)
+                    else:
+                        print(f"DEBUG: 过滤掉用例 - case_type={case_type}, name={case.get('name', '')}")
+                if len(filtered_cases) < len(cases):
+                    print(f"DEBUG: endpoint {ep_method} {ep_path} 过滤后用例数量: {len(filtered_cases)}/{len(cases)}")
+            for case in filtered_cases:
                 rt = case.get("request_template") or {}
                 et = case.get("expected_template") or {}
                 expected_status = et.get("status_code", 200)
@@ -2387,7 +2570,20 @@ async def execute_api_test_plan(req: ExecutePlanRequest):
                 meta_list.append((ct, expected_status))
 
         if not steps:
-            raise HTTPException(status_code=400, detail="该项目下无可用接口或未生成任何用例，请先导入 Swagger 再生成计划")
+            # 提供更详细的错误信息，帮助诊断问题
+            total_endpoints = len(endpoints)
+            endpoints_with_cases = sum(1 for ep in endpoints if ep.get("cases"))
+            total_cases = sum(len(ep.get("cases") or []) for ep in endpoints)
+            error_detail = (
+                f"未找到可执行的用例。"
+                f"统计信息：接口数量={total_endpoints}，"
+                f"有用例的接口数量={endpoints_with_cases}，"
+                f"用例总数={total_cases}。"
+                f"请确保已生成测试用例（点击「AI生成用例」按钮），"
+                f"或检查传入的 plan 数据中 endpoints[].cases 是否包含有效的用例。"
+            )
+            print(f"DEBUG: {error_detail}")
+            raise HTTPException(status_code=400, detail=error_detail)
 
         step_results = await _run_steps(steps, base_url)
         for i, sr in enumerate(step_results):

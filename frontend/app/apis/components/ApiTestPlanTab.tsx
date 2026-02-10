@@ -155,21 +155,64 @@ export default function ApiTestPlanTab() {
             alert('请先选择当前项目已配置的环境（在项目设置中可添加环境）')
             return
         }
+        // 检查 plan 中是否有用例（考虑case_types过滤）
+        if (plan?.endpoints) {
+            const types = caseTypes ? caseTypes.split(',').map((t: string) => t.trim().toLowerCase()).filter(Boolean) : null
+            let totalCases = 0
+            plan.endpoints.forEach((ep: any) => {
+                const cases = ep.cases || []
+                if (types && types.length > 0) {
+                    // 如果指定了case_types，只统计匹配的用例
+                    const matchedCases = cases.filter((c: any) => {
+                        const caseType = (c.case_type || 'positive').toLowerCase()
+                        return types.includes(caseType)
+                    })
+                    totalCases += matchedCases.length
+                } else {
+                    totalCases += cases.length
+                }
+            })
+            console.log('DEBUG: 执行前检查 - plan.endpoints数量:', plan.endpoints.length)
+            console.log('DEBUG: 执行前检查 - 用例总数（考虑过滤）:', totalCases)
+            console.log('DEBUG: 执行前检查 - case_types过滤:', types)
+            plan.endpoints.forEach((ep: any, idx: number) => {
+                const cases = ep.cases || []
+                const filteredCount = types && types.length > 0 
+                    ? cases.filter((c: any) => types.includes((c.case_type || 'positive').toLowerCase())).length
+                    : cases.length
+                console.log(`DEBUG: endpoint[${idx}]: path=${ep.path}, method=${ep.method}, 总用例数=${cases.length}, 过滤后=${filteredCount}`)
+            })
+            if (totalCases === 0) {
+                if (types && types.length > 0) {
+                    alert(`当前测试计划中没有匹配用例类型 [${types.join(', ')}] 的用例，请检查用例类型过滤条件或生成对应类型的用例`)
+                } else {
+                    alert('当前测试计划中没有用例，请先点击「AI生成用例」按钮生成测试用例')
+                }
+                return
+            }
+        }
         setExecuteLoading(true)
         setExecuteResult(null)
         setHealAnalyzeResult(null)
         try {
             const types = caseTypes ? caseTypes.split(',').map((t: string) => t.trim()).filter(Boolean) : null
+            const requestBody = {
+                project_id: currentProject,
+                base_url: baseUrl.trim(),
+                case_types: types ? types.join(',') : undefined,
+                environment: 'test',
+                plan: plan ?? undefined,
+            }
+            console.log('DEBUG: 执行请求体 - plan是否存在:', !!requestBody.plan)
+            if (requestBody.plan?.endpoints) {
+                console.log('DEBUG: 执行请求体 - endpoints数量:', requestBody.plan.endpoints.length)
+                const totalCases = requestBody.plan.endpoints.reduce((n: number, ep: any) => n + (ep.cases?.length || 0), 0)
+                console.log('DEBUG: 执行请求体 - 用例总数:', totalCases)
+            }
             const res = await fetch(`${API_BASE}/api/v1/api-test-plan/execute`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    project_id: currentProject,
-                    base_url: baseUrl.trim(),
-                    case_types: types ? types.join(',') : undefined,
-                    environment: 'test',
-                    plan: plan ?? undefined,
-                }),
+                body: JSON.stringify(requestBody),
             })
             const data = await res.json()
             if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`)
@@ -518,14 +561,188 @@ export default function ApiTestPlanTab() {
                                     )}
                                     {resultDetailTab === 'response' && (
                                         <div>
-                                            <div style={{ marginBottom: '0.5rem' }}><span style={{ color: '#6B7280' }}>状态码：</span><strong>{rd.status_code ?? '-'}</strong> {rd.expected_status != null && <span style={{ color: '#6B7280', fontSize: '0.8rem' }}>（期望 {rd.expected_status}）</span>}</div>
-                                            {rd.error && <div style={{ color: '#EF4444', marginBottom: '0.5rem' }}>错误：{rd.error}</div>}
+                                            <div style={{ marginBottom: '0.5rem' }}>
+                                                <span style={{ color: '#6B7280' }}>状态码：</span>
+                                                <strong>{rd.status_code ?? '-'}</strong>
+                                                {rd.expected_status != null && (
+                                                    <span style={{ color: '#6B7280', fontSize: '0.8rem' }}>（期望 {rd.expected_status}）</span>
+                                                )}
+                                            </div>
+                                            {rd.error && (
+                                                <div style={{ color: '#EF4444', marginBottom: '0.5rem' }}>错误：{rd.error}</div>
+                                            )}
                                             {rd.response != null && (
-                                                <div><span style={{ color: '#6B7280', fontSize: '0.75rem' }}>响应体</span>
-                                                    <pre style={{ margin: '0.25rem 0 0', padding: '0.5rem', background: '#F9FAFB', borderRadius: '0.25rem', overflow: 'auto', fontSize: '0.75rem', maxHeight: '180px' }}>{typeof rd.response === 'string' ? rd.response : JSON.stringify(rd.response, null, 2)}</pre>
+                                                <div>
+                                                    <span style={{ color: '#6B7280', fontSize: '0.75rem' }}>响应体</span>
+                                                    <pre
+                                                        style={{
+                                                            margin: '0.25rem 0 0',
+                                                            padding: '0.5rem',
+                                                            background: '#F9FAFB',
+                                                            borderRadius: '0.25rem',
+                                                            overflow: 'auto',
+                                                            fontSize: '0.75rem',
+                                                            maxHeight: '180px',
+                                                        }}
+                                                    >
+                                                        {typeof rd.response === 'string'
+                                                            ? rd.response
+                                                            : JSON.stringify(rd.response, null, 2)}
+                                                    </pre>
                                                 </div>
                                             )}
-                                            {rd.response == null && !rd.error && <div style={{ color: '#9CA3AF' }}>无响应体</div>}
+                                            {rd.response == null && !rd.error && (
+                                                <div style={{ color: '#9CA3AF' }}>无响应体</div>
+                                            )}
+                                            {/* 断言结果（HTTP + 业务断言），按条目清晰展示 */}
+                                            {Array.isArray(rd.assertions) && rd.assertions.length > 0 && (
+                                                <div style={{ marginTop: '0.75rem' }}>
+                                                    <span style={{ color: '#6B7280', fontSize: '0.75rem' }}>断言结果</span>
+                                                    <div
+                                                        style={{
+                                                            marginTop: '0.25rem',
+                                                            display: 'flex',
+                                                            flexDirection: 'column',
+                                                            gap: '0.35rem',
+                                                        }}
+                                                    >
+                                                        {rd.assertions.map((a: any, idx: number) => (
+                                                            <div
+                                                                key={idx}
+                                                                style={{
+                                                                    padding: '0.4rem 0.55rem',
+                                                                    borderRadius: '0.375rem',
+                                                                    background: a.passed ? '#ECFDF3' : '#FEF2F2',
+                                                                    border: `1px solid ${a.passed ? '#BBF7D0' : '#FECACA'}`,
+                                                                    fontSize: '0.75rem',
+                                                                }}
+                                                            >
+                                                                <div
+                                                                    style={{
+                                                                        display: 'flex',
+                                                                        alignItems: 'center',
+                                                                        justifyContent: 'space-between',
+                                                                        marginBottom:
+                                                                            a.type === 'business' &&
+                                                                            Array.isArray(a.details) &&
+                                                                            a.details.length > 0
+                                                                                ? '0.25rem'
+                                                                                : 0,
+                                                                    }}
+                                                                >
+                                                                    <span style={{ fontWeight: 500 }}>
+                                                                        {a.type === 'http'
+                                                                            ? 'HTTP 断言'
+                                                                            : a.type === 'business'
+                                                                                ? '业务断言'
+                                                                                : `断言 (${a.type || '其他'})`}
+                                                                    </span>
+                                                                    <span
+                                                                        style={{
+                                                                            color: a.passed ? '#16A34A' : '#DC2626',
+                                                                            fontWeight: 600,
+                                                                        }}
+                                                                    >
+                                                                        {a.passed ? '通过' : '未通过'}
+                                                                    </span>
+                                                                </div>
+                                                                {a.message && (
+                                                                    <div style={{ color: '#4B5563' }}>{a.message}</div>
+                                                                )}
+                                                                {a.type === 'business' &&
+                                                                    Array.isArray(a.details) &&
+                                                                    a.details.length > 0 && (() => {
+                                                                        const groups: Record<string, any[]> = {
+                                                                            basic: [],
+                                                                            business_data: [],
+                                                                            integrity: [],
+                                                                            other: [],
+                                                                        }
+                                                                        a.details.forEach((d: any) => {
+                                                                            const cat = d.category || 'other'
+                                                                            if (groups[cat]) groups[cat].push(d)
+                                                                            else groups.other.push(d)
+                                                                        })
+                                                                        const groupOrder: { key: string; title: string }[] = [
+                                                                            { key: 'basic', title: '基础响应验证（协议层 + 业务状态码）' },
+                                                                            { key: 'business_data', title: '业务数据验证（数据一致性与业务规则）' },
+                                                                            { key: 'integrity', title: '数据完整性验证' },
+                                                                            { key: 'other', title: '其他断言' },
+                                                                        ]
+                                                                        return (
+                                                                            <div style={{ marginTop: '0.25rem' }}>
+                                                                                {groupOrder.map(({ key, title }) =>
+                                                                                    groups[key] && groups[key].length > 0 ? (
+                                                                                        <div key={key} style={{ marginBottom: '0.25rem' }}>
+                                                                                            <div
+                                                                                                style={{
+                                                                                                    fontSize: '0.7rem',
+                                                                                                    color: '#6B7280',
+                                                                                                    marginBottom: '0.1rem',
+                                                                                                }}
+                                                                                            >
+                                                                                                {title}
+                                                                                            </div>
+                                                                                            <ul
+                                                                                                style={{
+                                                                                                    margin: 0,
+                                                                                                    paddingLeft: '1.1rem',
+                                                                                                    color: '#4B5563',
+                                                                                                }}
+                                                                                            >
+                                                                                                {groups[key].map((d: any, di: number) => (
+                                                                                                    <li key={di} style={{ marginBottom: '0.15rem' }}>
+                                                                                                        <code
+                                                                                                            style={{
+                                                                                                                fontFamily: 'monospace',
+                                                                                                                background: '#F3F4F6',
+                                                                                                                padding: '0 0.2rem',
+                                                                                                                borderRadius: '0.2rem',
+                                                                                                            }}
+                                                                                                        >
+                                                                                                            {d.field}
+                                                                                                        </code>
+                                                                                                        ：期望{' '}
+                                                                                                        <code
+                                                                                                            style={{
+                                                                                                                fontFamily: 'monospace',
+                                                                                                                background: '#F3F4F6',
+                                                                                                                padding: '0 0.2rem',
+                                                                                                                borderRadius: '0.2rem',
+                                                                                                            }}
+                                                                                                        >
+                                                                                                            {d.expected !== undefined
+                                                                                                                ? String(d.expected)
+                                                                                                                : '非空'}
+                                                                                                        </code>
+                                                                                                        ，实际{' '}
+                                                                                                        <code
+                                                                                                            style={{
+                                                                                                                fontFamily: 'monospace',
+                                                                                                                background: '#F3F4F6',
+                                                                                                                padding: '0 0.2rem',
+                                                                                                                borderRadius: '0.2rem',
+                                                                                                            }}
+                                                                                                        >
+                                                                                                            {d.actual !== undefined
+                                                                                                                ? String(d.actual)
+                                                                                                                : '未找到'}
+                                                                                                        </code>
+                                                                                                        （{d.passed ? '通过' : '不通过'}）
+                                                                                                    </li>
+                                                                                                ))}
+                                                                                            </ul>
+                                                                                        </div>
+                                                                                    ) : null
+                                                                                )}
+                                                                            </div>
+                                                                        )
+                                                                    })()}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
                                         </div>
                                     )}
                                 </div>
