@@ -56,9 +56,13 @@ async def list_apis(project_id: Optional[str] = None, limit: int = 100):
         conn = get_db()
         cursor = conn.cursor()
         
+        print(f"DEBUG: list_apis called with project_id={project_id}, limit={limit}")
+        print(f"DEBUG: Using DB_PATH={DB_PATH}")
+        
         # 确保表存在 (防止 main_sqlite.py 尚未初始化)
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='apis'")
         if not cursor.fetchone():
+             print("DEBUG: Table 'apis' does not exist")
              conn.close()
              return {"total": 0, "apis": []}
 
@@ -72,8 +76,10 @@ async def list_apis(project_id: Optional[str] = None, limit: int = 100):
         query += " ORDER BY created_at DESC LIMIT ?"
         args.append(limit)
         
+        print(f"DEBUG: Executing query: {query} with args: {args}")
         cursor.execute(query, tuple(args))
         rows = cursor.fetchall()
+        print(f"DEBUG: Found {len(rows)} rows")
         conn.close()
         
         apis = []

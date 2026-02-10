@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Play, Clock, CheckCircle, XCircle, FileText, ChevronDown, ChevronUp, Trash2, Filter, Database, Settings, Plus, X, Globe, ListChecks, AlertCircle } from 'lucide-react'
+import { Play, Clock, CheckCircle, XCircle, FileText, ChevronDown, ChevronUp, Trash2, Filter, Database, Settings, Plus, X, Globe, ListChecks, AlertCircle, Wand2 } from 'lucide-react'
 import { useProject } from '../../contexts/ProjectContext'
 
 export default function TestScenariosTab() {
@@ -17,6 +17,7 @@ export default function TestScenariosTab() {
     const [activeStepTab, setActiveStepTab] = useState<Record<string, string>>({}) // key: scenarioId_stepOrder, value: tab name
     const [executingSingleStep, setExecutingSingleStep] = useState<string | null>(null) // scenarioId_stepOrder
     const [singleStepResults, setSingleStepResults] = useState<Record<string, any>>({}) // key: scenarioId_stepOrder
+    const [healApplyLoading, setHealApplyLoading] = useState<Record<number, boolean>>({})
 
     // 批量执行相关
     const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
@@ -490,6 +491,35 @@ export default function TestScenariosTab() {
         })
     }
 
+    const runHealApply = async (scenario: any, executionId: number) => {
+        if (!scenario.test_case_id) return
+        setHealApplyLoading(prev => ({ ...prev, [scenario.id]: true }))
+        try {
+            const res = await fetch(`${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/heal/apply`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    test_case_id: scenario.test_case_id,
+                    execution_id: executionId
+                }),
+            })
+            const data = await res.json()
+            if (!res.ok) throw new Error(data.detail || '修复失败')
+
+            if (data.status === 'healed') {
+                alert(`✅ 修复成功！\n\nAI 已自动优化测试步骤，请重新执行验证。`)
+                // 刷新场景列表以获取最新步骤
+                fetchScenarios()
+            } else {
+                alert(`⚠️ 无法自动修复\n\n原因: ${data.message}\n分析: ${data.analysis?.root_cause || '无详细分析'}`)
+            }
+        } catch (e: any) {
+            alert(`请求失败: ${e.message}`)
+        } finally {
+            setHealApplyLoading(prev => ({ ...prev, [scenario.id]: false }))
+        }
+    }
+
     const filteredScenarios = scenarios.filter(s =>
         (s.project_id || 'default-project') === currentProject
     )
@@ -907,8 +937,39 @@ export default function TestScenariosTab() {
                                                 {executionResults[scenario.id].error ? <XCircle size={20} /> : <CheckCircle size={20} />}
                                                 <b>{executionResults[scenario.id].error ? `执行失败: ${executionResults[scenario.id].error}` : `执行完成: ${executionResults[scenario.id].status === 'success' ? '全部通过' : '存在异常'}`}</b>
                                             </div>
-                                            {expandedScenarios.has(scenario.id) ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                                                {executionResults[scenario.id].error && (
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation()
+                                                            runHealApply(scenario, executionResults[scenario.id].id)
+                                                        }}
+                                                        disabled={healApplyLoading[scenario.id]}
+                                                        style={{
+                                                            padding: '0.35rem 0.75rem',
+                                                            background: healApplyLoading[scenario.id] ? '#FCA5A5' : '#EF4444',
+                                                            color: 'white',
+                                                            border: 'none',
+                                                            borderRadius: '0.5rem',
+                                                            fontSize: '0.8rem',
+                                                            cursor: healApplyLoading[scenario.id] ? 'not-allowed' : 'pointer',
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            gap: '0.35rem',
+                                                            boxShadow: '0 2px 4px rgba(239, 68, 68, 0.2)'
+                                                        }}
+                                                    >
+                                                        <Wand2 size={14} className={healApplyLoading[scenario.id] ? 'spin' : ''} />
+                                                        {healApplyLoading[scenario.id] ? '正在修复...' : '一键修复'}
+                                                    </button>
+                                                )}
+                                                {expandedScenarios.has(scenario.id) ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+                                            </div>
                                         </div>
+                                        <style>{`
+                                            .spin { animation: spin 1s linear infinite; }
+                                            @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+                                        `}</style>
 
                                         {expandedScenarios.has(scenario.id) && executionResults[scenario.id].results && (
                                             <div style={{ border: '1px solid #E5E7EB', borderRadius: '0.75rem', marginTop: '0.5rem', overflow: 'hidden' }}>

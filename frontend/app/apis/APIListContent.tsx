@@ -906,9 +906,22 @@ export default function APIListContent() {
                                                     </div>
                                                 )}
                                                 {(activeResultTab[api.id] || '响应体') === '请求内容' && (
-                                                    <pre style={{ background: '#F8FAFC', padding: '1rem', borderRadius: '0.5rem', overflow: 'auto', maxHeight: '400px', fontSize: '0.75rem', margin: 0, border: '1px solid #E2E8F0' }}>
-                                                        {JSON.stringify(executionResults[api.id].request_data || {}, null, 2)}
-                                                    </pre>
+                                                    <div style={{ background: '#F8FAFC', padding: '1rem', borderRadius: '0.5rem', border: '1px solid #E2E8F0', maxHeight: '400px', overflow: 'auto' }}>
+                                                        {executionResults[api.id].url_params && Object.keys(executionResults[api.id].url_params).length > 0 && (
+                                                            <div style={{ marginBottom: '1rem' }}>
+                                                                <div style={{ fontSize: '0.75rem', fontWeight: '600', color: '#374151', marginBottom: '0.5rem' }}>URL 参数 (Query):</div>
+                                                                <pre style={{ margin: 0, fontSize: '0.75rem' }}>
+                                                                    {JSON.stringify(executionResults[api.id].url_params, null, 2)}
+                                                                </pre>
+                                                            </div>
+                                                        )}
+                                                        <div>
+                                                            <div style={{ fontSize: '0.75rem', fontWeight: '600', color: '#374151', marginBottom: '0.5rem' }}>请求体 (Body):</div>
+                                                            <pre style={{ margin: 0, fontSize: '0.75rem' }}>
+                                                                {JSON.stringify(executionResults[api.id].request_data || {}, null, 2)}
+                                                            </pre>
+                                                        </div>
+                                                    </div>
                                                 )}
                                             </div>
                                         </div>

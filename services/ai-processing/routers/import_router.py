@@ -16,6 +16,26 @@ class BatchImportRequest(BaseModel):
     sources: List[dict]
     project_id: str
 
+def get_data_import_service():
+    """Dynamically get data_import_service from the running main module"""
+    import sys
+    
+    # 1. Try importing from main (standard way)
+    try:
+        from main import data_import_service
+        return data_import_service
+    except ImportError:
+        pass
+        
+    # 2. Check loaded main modules
+    for module_name in ['main_sqlite', 'main_with_db', '__main__']:
+        if module_name in sys.modules:
+            mod = sys.modules[module_name]
+            if hasattr(mod, 'data_import_service'):
+                return mod.data_import_service
+                
+    raise ImportError("Could not find data_import_service instance")
+
 @router.post("/swagger")
 async def import_swagger(
     file: Optional[UploadFile] = File(None),
@@ -23,7 +43,7 @@ async def import_swagger(
     project_id: str = Form("default-project")
 ):
     """导入Swagger文档 (支持URL或文件)"""
-    from main import data_import_service
+    data_import_service = get_data_import_service()
     import tempfile
     import os
     
@@ -61,9 +81,9 @@ async def import_swagger(
             os.remove(temp_file_path)
 
 @router.post("/postman")
-async def import_postman(file: UploadFile = File(...), project_id: str = ""):
+async def import_postman(file: UploadFile = File(...), project_id: str = Form("default-project")):
     """导入Postman Collection文件"""
-    from main import data_import_service
+    data_import_service = get_data_import_service()
     import tempfile
     import os
     
@@ -73,6 +93,7 @@ async def import_postman(file: UploadFile = File(...), project_id: str = ""):
         tmp.write(content)
         tmp_path = tmp.name
     
+    print(f"DEBUG: import_postman called with project_id='{project_id}'")
     try:
         result = await data_import_service.import_from_source(
             source_type="postman",
@@ -90,9 +111,9 @@ async def import_postman(file: UploadFile = File(...), project_id: str = ""):
             os.remove(tmp_path)
 
 @router.post("/har")
-async def import_har(file: UploadFile = File(...), project_id: str = ""):
+async def import_har(file: UploadFile = File(...), project_id: str = Form("default-project")):
     """导入HAR文件"""
-    from main import data_import_service
+    data_import_service = get_data_import_service()
     import tempfile
     import os
     
@@ -121,7 +142,7 @@ async def import_har(file: UploadFile = File(...), project_id: str = ""):
 @router.post("/batch")
 async def batch_import(request: BatchImportRequest):
     """批量导入"""
-    from main import data_import_service
+    data_import_service = get_data_import_service()
     
     result = await data_import_service.batch_import(
         sources=request.sources,

@@ -2,21 +2,44 @@
 向量化服务
 提供接口、测试用例的向量化和语义搜索功能
 """
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+try:
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+except ImportError:
+    QdrantClient = None
+    Distance = None
+    VectorParams = None
+    PointStruct = None
+    Filter = None
+    FieldCondition = None
+    MatchValue = None
+    
 from openai import AsyncOpenAI
 from typing import List, Dict, Optional
 import hashlib
+import logging
+
+logger = logging.getLogger(__name__)
 
 class VectorService:
     def __init__(self, qdrant_url: str, openai_api_key: str):
-        self.qdrant = QdrantClient(url=qdrant_url)
-        self.openai = AsyncOpenAI(api_key=openai_api_key)
-        self.collection_name = "api_knowledge"
-        self.embedding_model = "text-embedding-3-small"
-        self.embedding_dim = 1536
-        
-        self._init_collection()
+        self.enabled = False
+        if QdrantClient is None:
+            logger.warning("QdrantClient库未安装，向量服务将不可用。请安装 qdrant-client。")
+            return
+
+        try:
+            self.qdrant = QdrantClient(url=qdrant_url)
+            self.openai = AsyncOpenAI(api_key=openai_api_key)
+            self.collection_name = "api_knowledge"
+            self.embedding_model = "text-embedding-3-small"
+            self.embedding_dim = 1536
+            self.enabled = True
+            
+            self._init_collection()
+        except Exception as e:
+            logger.error(f"向量服务初始失败: {e}")
+            self.enabled = False
     
     def _init_collection(self):
         """初始化向量集合"""
@@ -33,37 +56,50 @@ class VectorService:
     
     async def embed_text(self, text: str) -> List[float]:
         """文本向量化"""
-        response = await self.openai.embeddings.create(
-            model=self.embedding_model,
-            input=text
-        )
-        return response.data[0].embedding
+        if not self.enabled or not self.openai:
+            return []
+        try:
+            response = await self.openai.embeddings.create(
+                model=self.embedding_model,
+                input=text
+            )
+            return response.data[0].embedding
+        except Exception as e:
+            logger.error(f"Embedding failed: {e}")
+            return []
     
     async def index_api(self, api: Dict):
         """索引API"""
-        text = self._build_api_text(api)
-        vector = await self.embed_text(text)
-        point_id = self._generate_id(api['id'])
+        if not self.enabled: return
         
-        self.qdrant.upsert(
-            collection_name=self.collection_name,
-            points=[
-                PointStruct(
-                    id=point_id,
-                    vector=vector,
-                    payload={
-                        "type": "api",
-                        "api_id": api['id'],
-                        "name": api['name'],
-                        "path": api['path'],
-                        "method": api['method'],
-                        "description": api.get('description', ''),
-                        "tags": api.get('tags', []),
-                        "project_id": api.get('project_id', ''),
-                    }
-                )
-            ]
-        )
+        try:
+            text = self._build_api_text(api)
+            vector = await self.embed_text(text)
+            if not vector: return
+
+            point_id = self._generate_id(api['id'])
+            
+            self.qdrant.upsert(
+                collection_name=self.collection_name,
+                points=[
+                    PointStruct(
+                        id=point_id,
+                        vector=vector,
+                        payload={
+                            "type": "api",
+                            "api_id": api['id'],
+                            "name": api['name'],
+                            "path": api['path'],
+                            "method": api['method'],
+                            "description": api.get('description', ''),
+                            "tags": api.get('tags', []),
+                            "project_id": api.get('project_id', ''),
+                        }
+                    )
+                ]
+            )
+        except Exception as e:
+            logger.error(f"Index API failed: {e}")
     
     async def index_test_case(self, test_case: Dict):
         """索引测试用例"""
@@ -140,14 +176,103 @@ class VectorService:
             query_filter=search_filter
         )
         
-        return [
-            {
-                "score": hit.score,
-                "type": hit.payload['type'],
-                "payload": hit.payload
-            }
-            for hit in results
-        ]
+    async def index_test_case(self, test_case: Dict):
+        """索引测试用例"""
+        if not self.enabled: return
+        try:
+            text = self._build_test_case_text(test_case)
+            vector = await self.embed_text(text)
+            point_id = self._generate_id(test_case['id'])
+            
+            self.qdrant.upsert(
+                collection_name=self.collection_name,
+                points=[
+                    PointStruct(
+                        id=point_id,
+                        vector=vector,
+                        payload={
+                            "type": "test_case",
+                            "test_case_id": test_case['id'],
+                            "name": test_case['name'],
+                            "description": test_case.get('description', ''),
+                            "project_id": test_case.get('project_id', ''),
+                        }
+                    )
+                ]
+            )
+        except Exception as e:
+            logger.error(f"Index test case failed: {e}")
+    
+    async def index_scenario(self, scenario: Dict):
+        """索引场景"""
+        if not self.enabled: return
+        try:
+            text = self._build_scenario_text(scenario)
+            vector = await self.embed_text(text)
+            point_id = self._generate_id(scenario['id'])
+            
+            self.qdrant.upsert(
+                collection_name=self.collection_name,
+                points=[
+                    PointStruct(
+                        id=point_id,
+                        vector=vector,
+                        payload={
+                            "type": "scenario",
+                            "scenario_id": scenario['id'],
+                            "name": scenario['name'],
+                            "description": scenario.get('description', ''),
+                            "project_id": scenario.get('project_id', ''),
+                        }
+                    )
+                ]
+            )
+        except Exception as e:
+            logger.error(f"Index scenario failed: {e}")
+    
+    async def semantic_search(
+        self,
+        query: str,
+        limit: int = 10,
+        filter_type: Optional[str] = None,
+        project_id: Optional[str] = None
+    ) -> List[Dict]:
+        """语义搜索"""
+        if not self.enabled: return []
+        try:
+            query_vector = await self.embed_text(query)
+            if not query_vector: return []
+            
+            must_conditions = []
+            if filter_type:
+                must_conditions.append(
+                    FieldCondition(key="type", match=MatchValue(value=filter_type))
+                )
+            if project_id:
+                must_conditions.append(
+                    FieldCondition(key="project_id", match=MatchValue(value=project_id))
+                )
+            
+            search_filter = Filter(must=must_conditions) if must_conditions else None
+            
+            results = self.qdrant.search(
+                collection_name=self.collection_name,
+                query_vector=query_vector,
+                limit=limit,
+                query_filter=search_filter
+            )
+            
+            return [
+                {
+                    "score": hit.score,
+                    "type": hit.payload['type'],
+                    "payload": hit.payload
+                }
+                for hit in results
+            ]
+        except Exception as e:
+            logger.error(f"Semantic search failed: {e}")
+            return []
     
     def _build_api_text(self, api: Dict) -> str:
         """构建API文本描述"""
@@ -180,42 +305,51 @@ class VectorService:
     
     def list_apis(self, project_id: Optional[str] = None, limit: int = 100) -> List[Dict]:
         """获取所有已索引的API列表"""
-        must_conditions = [
-            FieldCondition(key="type", match=MatchValue(value="api"))
-        ]
-        if project_id:
-            must_conditions.append(
-                FieldCondition(key="project_id", match=MatchValue(value=project_id))
+        if not self.enabled: return []
+        try:
+            must_conditions = [
+                FieldCondition(key="type", match=MatchValue(value="api"))
+            ]
+            if project_id:
+                must_conditions.append(
+                    FieldCondition(key="project_id", match=MatchValue(value=project_id))
+                )
+            
+            search_filter = Filter(must=must_conditions)
+            
+            # 使用 scroll 方法获取所有点
+            results, _ = self.qdrant.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=search_filter,
+                limit=limit,
+                with_payload=True,
+                with_vectors=False
             )
-        
-        search_filter = Filter(must=must_conditions)
-        
-        # 使用 scroll 方法获取所有点
-        results, _ = self.qdrant.scroll(
-            collection_name=self.collection_name,
-            scroll_filter=search_filter,
-            limit=limit,
-            with_payload=True,
-            with_vectors=False
-        )
-        
-        return [
-            {
-                "id": point.payload.get('api_id'),
-                "name": point.payload.get('name'),
-                "method": point.payload.get('method'),
-                "path": point.payload.get('path'),
-                "description": point.payload.get('description', ''),
-                "tags": point.payload.get('tags', []),
-                "project_id": point.payload.get('project_id', '')
-            }
-            for point in results
-        ]
+            
+            return [
+                {
+                    "id": point.payload.get('api_id'),
+                    "name": point.payload.get('name'),
+                    "method": point.payload.get('method'),
+                    "path": point.payload.get('path'),
+                    "description": point.payload.get('description', ''),
+                    "tags": point.payload.get('tags', []),
+                    "project_id": point.payload.get('project_id', '')
+                }
+                for point in results
+            ]
+        except Exception as e:
+            logger.error(f"List APIs failed: {e}")
+            return []
 
     def delete_api(self, api_id: str):
         """删除API索引"""
-        point_id = self._generate_id(api_id)
-        self.qdrant.delete(
-            collection_name=self.collection_name,
-            points_selector=[point_id]
-        )
+        if not self.enabled: return
+        try:
+            point_id = self._generate_id(api_id)
+            self.qdrant.delete(
+                collection_name=self.collection_name,
+                points_selector=[point_id]
+            )
+        except Exception as e:
+            logger.error(f"Delete API failed: {e}")

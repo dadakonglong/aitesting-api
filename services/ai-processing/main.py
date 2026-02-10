@@ -176,7 +176,8 @@ rag_engine = RAGEngine(
 )
 
 data_import_service = DataImportService(
-    vector_service=vector_service
+    vector_service=vector_service,
+    db_path=DB_PATH
 )
 
 # ============= 请求/响应模型 =============
@@ -279,7 +280,6 @@ async def generate_data(request: DataGenerationRequest):
     
     根据参数schema和业务规则生成测试数据
     """
-    try:
     try:
         # 如果 schema 为空但提供了 path/method，尝试从 DB 加载
         target_schema = request.param_schema

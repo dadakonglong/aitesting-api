@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
 import { useProject } from '../../contexts/ProjectContext'
-import { ClipboardList, Play, CheckCircle, XCircle, AlertCircle, Loader2, FileText } from 'lucide-react'
+import { ClipboardList, Play, CheckCircle, XCircle, AlertCircle, Loader2, FileText, Wand2 } from 'lucide-react'
 
 const API_BASE = process.env.NEXT_PUBLIC_AI_API_URL || 'http://localhost:8000'
 
@@ -41,7 +41,8 @@ export default function ApiTestPlanTab() {
     const [savedCasesLoading, setSavedCasesLoading] = useState(false)
     const [savedCasesError, setSavedCasesError] = useState<string | null>(null)
     const [savedCaseRunLoading, setSavedCaseRunLoading] = useState<number | null>(null)
-    const [savedCaseRunResult, setSavedCaseRunResult] = useState<Record<number, { status: string; status_code?: number; error?: string; response?: unknown }>>({})
+    const [savedCaseRunResult, setSavedCaseRunResult] = useState<Record<number, { status: string; status_code?: number; error?: string; response?: unknown; execution_id?: number }>>({})
+    const [healApplyLoading, setHealApplyLoading] = useState<Record<number, boolean>>({})
 
     useEffect(() => {
         const load = async () => {
@@ -197,6 +198,34 @@ export default function ApiTestPlanTab() {
             alert(e.message || '分析失败')
         } finally {
             setHealAnalyzeLoading(false)
+        }
+    }
+
+    const runHealApiCase = async (apiTestCaseId: number, executionId: number) => {
+        setHealApplyLoading(prev => ({ ...prev, [apiTestCaseId]: true }))
+        try {
+            const res = await fetch(`${API_BASE}/api/v1/heal/apply`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    api_test_case_id: apiTestCaseId,
+                    execution_id: executionId
+                }),
+            })
+            const data = await res.json()
+            if (!res.ok) throw new Error(data.detail || '修复失败')
+
+            if (data.status === 'healed') {
+                alert(`✅ 修复成功！\n\n接口用例已更新，请重新执行验证。`)
+                // 刷新已保存用例列表
+                loadSavedCases()
+            } else {
+                alert(`⚠️ 无法自动修复\n\n原因: ${data.message}\n分析: ${data.analysis?.root_cause || '无详细分析'}`)
+            }
+        } catch (e: any) {
+            alert(`请求失败: ${e.message}`)
+        } finally {
+            setHealApplyLoading(prev => ({ ...prev, [apiTestCaseId]: false }))
         }
     }
 
@@ -492,43 +521,43 @@ export default function ApiTestPlanTab() {
                                     </table>
                                 )
                                 return (
-                                <div style={{ marginTop: '0.75rem', padding: '0.75rem', background: 'white', border: '1px solid #E5E7EB', borderRadius: '0.5rem', fontSize: '0.8rem' }} onClick={(e) => e.stopPropagation()}>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-                                        <strong>执行步骤详情</strong>
-                                        <button type="button" onClick={() => setSelectedResultDetail(null)} style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem', border: '1px solid #E5E7EB', borderRadius: '0.25rem', background: '#F9FAFB', cursor: 'pointer' }}>关闭</button>
-                                    </div>
-                                    <div style={{ marginBottom: '0.5rem' }}><span style={{ fontWeight: '500' }}>{rd.method}</span> <span style={{ fontFamily: 'monospace' }}>{rd.url}</span></div>
-                                    <div style={{ display: 'flex', gap: '0.5rem', borderBottom: '1px solid #E5E7EB', marginBottom: '0.5rem' }}>
-                                        <button type="button" onClick={() => { setResultDetailTab('request'); setResultDetailSubTab('body') }} style={{ padding: '0.35rem 0.75rem', border: 'none', borderBottom: resultDetailTab === 'request' ? '2px solid #667eea' : '2px solid transparent', background: 'transparent', cursor: 'pointer', fontSize: '0.8rem', color: resultDetailTab === 'request' ? '#667eea' : '#6B7280', fontWeight: resultDetailTab === 'request' ? '600' : '400' }}>请求</button>
-                                        <button type="button" onClick={() => setResultDetailTab('response')} style={{ padding: '0.35rem 0.75rem', border: 'none', borderBottom: resultDetailTab === 'response' ? '2px solid #667eea' : '2px solid transparent', background: 'transparent', cursor: 'pointer', fontSize: '0.8rem', color: resultDetailTab === 'response' ? '#667eea' : '#6B7280', fontWeight: resultDetailTab === 'response' ? '600' : '400' }}>响应</button>
-                                    </div>
-                                    {resultDetailTab === 'request' && (
-                                        <>
-                                            <div style={{ display: 'flex', gap: '0.25rem', marginBottom: '0.5rem', fontSize: '0.75rem' }}>
-                                                <button type="button" onClick={() => setResultDetailSubTab('params')} style={{ padding: '0.25rem 0.5rem', border: 'none', borderBottom: resultDetailSubTab === 'params' ? '2px solid #667eea' : '2px solid transparent', background: 'transparent', cursor: 'pointer', color: resultDetailSubTab === 'params' ? '#667eea' : '#6B7280' }}>Params</button>
-                                                <button type="button" onClick={() => setResultDetailSubTab('body')} style={{ padding: '0.25rem 0.5rem', border: 'none', borderBottom: resultDetailSubTab === 'body' ? '2px solid #667eea' : '2px solid transparent', background: 'transparent', cursor: 'pointer', color: resultDetailSubTab === 'body' ? '#667eea' : '#6B7280' }}>Body</button>
-                                                <button type="button" onClick={() => setResultDetailSubTab('headers')} style={{ padding: '0.25rem 0.5rem', border: 'none', borderBottom: resultDetailSubTab === 'headers' ? '2px solid #667eea' : '2px solid transparent', background: 'transparent', cursor: 'pointer', color: resultDetailSubTab === 'headers' ? '#667eea' : '#6B7280' }}>Headers</button>
-                                            </div>
-                                            <div style={{ maxHeight: '200px', overflow: 'auto', border: '1px solid #E5E7EB', borderRadius: '0.375rem' }}>
-                                                {resultDetailSubTab === 'params' && (Object.keys(urlParams).length > 0 ? kvTable(urlParams) : <div style={{ padding: '0.5rem', color: '#9CA3AF' }}>无 URL 参数</div>)}
-                                                {resultDetailSubTab === 'body' && (Object.keys(reqData).length > 0 ? <pre style={{ margin: 0, padding: '0.5rem', background: '#F9FAFB', fontSize: '0.75rem', overflow: 'auto' }}>{JSON.stringify(reqData, null, 2)}</pre> : <div style={{ padding: '0.5rem', color: '#9CA3AF' }}>无 Body</div>)}
-                                                {resultDetailSubTab === 'headers' && (Object.keys(reqHeaders).length > 0 ? kvTable(reqHeaders) : <div style={{ padding: '0.5rem', color: '#9CA3AF' }}>无请求头</div>)}
-                                            </div>
-                                        </>
-                                    )}
-                                    {resultDetailTab === 'response' && (
-                                        <div>
-                                            <div style={{ marginBottom: '0.5rem' }}><span style={{ color: '#6B7280' }}>状态码：</span><strong>{rd.status_code ?? '-'}</strong> {rd.expected_status != null && <span style={{ color: '#6B7280', fontSize: '0.8rem' }}>（期望 {rd.expected_status}）</span>}</div>
-                                            {rd.error && <div style={{ color: '#EF4444', marginBottom: '0.5rem' }}>错误：{rd.error}</div>}
-                                            {rd.response != null && (
-                                                <div><span style={{ color: '#6B7280', fontSize: '0.75rem' }}>响应体</span>
-                                                    <pre style={{ margin: '0.25rem 0 0', padding: '0.5rem', background: '#F9FAFB', borderRadius: '0.25rem', overflow: 'auto', fontSize: '0.75rem', maxHeight: '180px' }}>{typeof rd.response === 'string' ? rd.response : JSON.stringify(rd.response, null, 2)}</pre>
-                                                </div>
-                                            )}
-                                            {rd.response == null && !rd.error && <div style={{ color: '#9CA3AF' }}>无响应体</div>}
+                                    <div style={{ marginTop: '0.75rem', padding: '0.75rem', background: 'white', border: '1px solid #E5E7EB', borderRadius: '0.5rem', fontSize: '0.8rem' }} onClick={(e) => e.stopPropagation()}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                                            <strong>执行步骤详情</strong>
+                                            <button type="button" onClick={() => setSelectedResultDetail(null)} style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem', border: '1px solid #E5E7EB', borderRadius: '0.25rem', background: '#F9FAFB', cursor: 'pointer' }}>关闭</button>
                                         </div>
-                                    )}
-                                </div>
+                                        <div style={{ marginBottom: '0.5rem' }}><span style={{ fontWeight: '500' }}>{rd.method}</span> <span style={{ fontFamily: 'monospace' }}>{rd.url}</span></div>
+                                        <div style={{ display: 'flex', gap: '0.5rem', borderBottom: '1px solid #E5E7EB', marginBottom: '0.5rem' }}>
+                                            <button type="button" onClick={() => { setResultDetailTab('request'); setResultDetailSubTab('body') }} style={{ padding: '0.35rem 0.75rem', border: 'none', borderBottom: resultDetailTab === 'request' ? '2px solid #667eea' : '2px solid transparent', background: 'transparent', cursor: 'pointer', fontSize: '0.8rem', color: resultDetailTab === 'request' ? '#667eea' : '#6B7280', fontWeight: resultDetailTab === 'request' ? '600' : '400' }}>请求</button>
+                                            <button type="button" onClick={() => setResultDetailTab('response')} style={{ padding: '0.35rem 0.75rem', border: 'none', borderBottom: resultDetailTab === 'response' ? '2px solid #667eea' : '2px solid transparent', background: 'transparent', cursor: 'pointer', fontSize: '0.8rem', color: resultDetailTab === 'response' ? '#667eea' : '#6B7280', fontWeight: resultDetailTab === 'response' ? '600' : '400' }}>响应</button>
+                                        </div>
+                                        {resultDetailTab === 'request' && (
+                                            <>
+                                                <div style={{ display: 'flex', gap: '0.25rem', marginBottom: '0.5rem', fontSize: '0.75rem' }}>
+                                                    <button type="button" onClick={() => setResultDetailSubTab('params')} style={{ padding: '0.25rem 0.5rem', border: 'none', borderBottom: resultDetailSubTab === 'params' ? '2px solid #667eea' : '2px solid transparent', background: 'transparent', cursor: 'pointer', color: resultDetailSubTab === 'params' ? '#667eea' : '#6B7280' }}>Params</button>
+                                                    <button type="button" onClick={() => setResultDetailSubTab('body')} style={{ padding: '0.25rem 0.5rem', border: 'none', borderBottom: resultDetailSubTab === 'body' ? '2px solid #667eea' : '2px solid transparent', background: 'transparent', cursor: 'pointer', color: resultDetailSubTab === 'body' ? '#667eea' : '#6B7280' }}>Body</button>
+                                                    <button type="button" onClick={() => setResultDetailSubTab('headers')} style={{ padding: '0.25rem 0.5rem', border: 'none', borderBottom: resultDetailSubTab === 'headers' ? '2px solid #667eea' : '2px solid transparent', background: 'transparent', cursor: 'pointer', color: resultDetailSubTab === 'headers' ? '#667eea' : '#6B7280' }}>Headers</button>
+                                                </div>
+                                                <div style={{ maxHeight: '200px', overflow: 'auto', border: '1px solid #E5E7EB', borderRadius: '0.375rem' }}>
+                                                    {resultDetailSubTab === 'params' && (Object.keys(urlParams).length > 0 ? kvTable(urlParams) : <div style={{ padding: '0.5rem', color: '#9CA3AF' }}>无 URL 参数</div>)}
+                                                    {resultDetailSubTab === 'body' && (Object.keys(reqData).length > 0 ? <pre style={{ margin: 0, padding: '0.5rem', background: '#F9FAFB', fontSize: '0.75rem', overflow: 'auto' }}>{JSON.stringify(reqData, null, 2)}</pre> : <div style={{ padding: '0.5rem', color: '#9CA3AF' }}>无 Body</div>)}
+                                                    {resultDetailSubTab === 'headers' && (Object.keys(reqHeaders).length > 0 ? kvTable(reqHeaders) : <div style={{ padding: '0.5rem', color: '#9CA3AF' }}>无请求头</div>)}
+                                                </div>
+                                            </>
+                                        )}
+                                        {resultDetailTab === 'response' && (
+                                            <div>
+                                                <div style={{ marginBottom: '0.5rem' }}><span style={{ color: '#6B7280' }}>状态码：</span><strong>{rd.status_code ?? '-'}</strong> {rd.expected_status != null && <span style={{ color: '#6B7280', fontSize: '0.8rem' }}>（期望 {rd.expected_status}）</span>}</div>
+                                                {rd.error && <div style={{ color: '#EF4444', marginBottom: '0.5rem' }}>错误：{rd.error}</div>}
+                                                {rd.response != null && (
+                                                    <div><span style={{ color: '#6B7280', fontSize: '0.75rem' }}>响应体</span>
+                                                        <pre style={{ margin: '0.25rem 0 0', padding: '0.5rem', background: '#F9FAFB', borderRadius: '0.25rem', overflow: 'auto', fontSize: '0.75rem', maxHeight: '180px' }}>{typeof rd.response === 'string' ? rd.response : JSON.stringify(rd.response, null, 2)}</pre>
+                                                    </div>
+                                                )}
+                                                {rd.response == null && !rd.error && <div style={{ color: '#9CA3AF' }}>无响应体</div>}
+                                            </div>
+                                        )}
+                                    </div>
                                 )
                             })()}
                         </div>
@@ -672,6 +701,7 @@ export default function ApiTestPlanTab() {
                                                                 status_code: data.result?.status_code,
                                                                 error: data.result?.error,
                                                                 response: data.result?.response,
+                                                                execution_id: data.execution_id,
                                                             },
                                                         }))
                                                     } catch (e: any) {
@@ -685,9 +715,37 @@ export default function ApiTestPlanTab() {
                                                 {savedCaseRunLoading === sc.id ? '执行中' : '执行'}
                                             </button>
                                             {savedCaseRunResult[sc.id] && savedCaseRunLoading !== sc.id && (
-                                                <span style={{ marginLeft: '0.35rem', fontSize: '0.75rem', color: savedCaseRunResult[sc.id].status === 'passed' ? '#10B981' : '#EF4444' }}>
-                                                    {savedCaseRunResult[sc.id].status === 'passed' ? `✓ ${savedCaseRunResult[sc.id].status_code}` : savedCaseRunResult[sc.id].status_code ? `✗ ${savedCaseRunResult[sc.id].status_code}` : savedCaseRunResult[sc.id].error || '失败'}
-                                                </span>
+                                                <>
+                                                    <span style={{ marginLeft: '0.35rem', fontSize: '0.75rem', color: savedCaseRunResult[sc.id].status === 'passed' ? '#10B981' : '#EF4444' }}>
+                                                        {savedCaseRunResult[sc.id].status === 'passed' ? `✓ ${savedCaseRunResult[sc.id].status_code}` : savedCaseRunResult[sc.id].status_code ? `✗ ${savedCaseRunResult[sc.id].status_code}` : savedCaseRunResult[sc.id].error || '失败'}
+                                                    </span>
+                                                    {savedCaseRunResult[sc.id].status !== 'passed' && savedCaseRunResult[sc.id].execution_id && (
+                                                        <button
+                                                            onClick={(e) => {
+                                                                e.stopPropagation()
+                                                                runHealApiCase(sc.id, savedCaseRunResult[sc.id].execution_id!)
+                                                            }}
+                                                            disabled={healApplyLoading[sc.id]}
+                                                            title="一键修复"
+                                                            style={{
+                                                                marginLeft: '0.5rem',
+                                                                padding: '0.2rem 0.4rem',
+                                                                background: healApplyLoading[sc.id] ? '#FCA5A5' : '#EF4444',
+                                                                color: 'white',
+                                                                border: 'none',
+                                                                borderRadius: '0.25rem',
+                                                                fontSize: '0.7rem',
+                                                                cursor: healApplyLoading[sc.id] ? 'not-allowed' : 'pointer',
+                                                                display: 'inline-flex',
+                                                                alignItems: 'center',
+                                                                gap: '0.25rem'
+                                                            }}
+                                                        >
+                                                            <Wand2 size={12} className={healApplyLoading[sc.id] ? 'spin' : ''} />
+                                                            {healApplyLoading[sc.id] ? '修复中...' : '修复'}
+                                                        </button>
+                                                    )}
+                                                </>
                                             )}
                                             <button
                                                 type="button"
@@ -743,114 +801,115 @@ export default function ApiTestPlanTab() {
                                         const runState = singleRunResult[caseKey]
                                         const running = singleRunLoading === caseKey
                                         return (
-                                        <tr
-                                            key={caseKey}
-                                            style={{ borderTop: '1px solid #E5E7EB', cursor: 'pointer' }}
-                                            onClick={() => {
-                                            const rt = c.request_template || {}
-                                            setSelectedCaseDetail({ ep, c })
-                                            if (Object.keys(rt.params || {}).length > 0) setCaseDetailSubTab('body')
-                                            else if (Object.keys(rt.url_params || {}).length > 0) setCaseDetailSubTab('params')
-                                            else if (Object.keys(rt.headers || {}).length > 0) setCaseDetailSubTab('headers')
-                                            else if (Object.keys(rt.cookies || {}).length > 0) setCaseDetailSubTab('cookies')
-                                            else setCaseDetailSubTab('headers')
-                                            setCaseDetailMainTab('request')
-                                        }}
-                                        >
-                                            <td style={{ padding: '0.5rem 0.75rem' }}><span style={{ fontWeight: '500' }}>{ep.method}</span> {ep.path}</td>
-                                            <td style={{ padding: '0.5rem 0.75rem' }}>
-                                                {c.source === 'ai' ? (
-                                                    <span style={{ padding: '0.15rem 0.4rem', borderRadius: '0.25rem', background: '#DBEAFE', color: '#1D4ED8', fontSize: '0.7rem', fontWeight: '600' }}>AI</span>
-                                                ) : (
-                                                    <span style={{ padding: '0.15rem 0.4rem', borderRadius: '0.25rem', background: '#F3F4F6', color: '#6B7280', fontSize: '0.7rem' }}>规则</span>
-                                                )}
-                                            </td>
-                                            <td style={{ padding: '0.5rem 0.75rem' }}>{c.case_type ?? '-'}</td>
-                                            <td style={{ padding: '0.5rem 0.75rem', color: '#6B7280' }}>{c.name ?? c.description ?? '-'}</td>
-                                            <td style={{ padding: '0.5rem 0.75rem', textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
-                                                <button
-                                                    type="button"
-                                                    disabled={running || !baseUrl.trim()}
-                                                    onClick={async () => {
-                                                        if (!baseUrl.trim()) { alert('请先选择执行环境 Base URL'); return }
-                                                        setSingleRunLoading(caseKey)
-                                                        setSingleRunResult(prev => { const n = { ...prev }; delete n[caseKey]; return n })
-                                                        try {
-                                                            const res = await fetch(`${API_BASE}/api/v1/api-test-plan/execute-case`, {
-                                                                method: 'POST',
-                                                                headers: { 'Content-Type': 'application/json' },
-                                                                body: JSON.stringify({
-                                                                    project_id: currentProject,
-                                                                    base_url: baseUrl.trim(),
-                                                                    environment: 'test',
-                                                                    endpoint: { method: ep.method, path: ep.path, base_url: ep.base_url },
-                                                                    case: { ...c, path: ep.path, method: ep.method },
-                                                                }),
-                                                            })
-                                                            const data = await res.json().catch(() => ({}))
-                                                            if (!res.ok) {
-                                                                const msg = data.detail || data.message || `HTTP ${res.status}`
-                                                                setSingleRunResult(prev => ({ ...prev, [caseKey]: { status: 'error', error: msg } }))
-                                                                return
+                                            <tr
+                                                key={caseKey}
+                                                style={{ borderTop: '1px solid #E5E7EB', cursor: 'pointer' }}
+                                                onClick={() => {
+                                                    const rt = c.request_template || {}
+                                                    setSelectedCaseDetail({ ep, c })
+                                                    if (Object.keys(rt.params || {}).length > 0) setCaseDetailSubTab('body')
+                                                    else if (Object.keys(rt.url_params || {}).length > 0) setCaseDetailSubTab('params')
+                                                    else if (Object.keys(rt.headers || {}).length > 0) setCaseDetailSubTab('headers')
+                                                    else if (Object.keys(rt.cookies || {}).length > 0) setCaseDetailSubTab('cookies')
+                                                    else setCaseDetailSubTab('headers')
+                                                    setCaseDetailMainTab('request')
+                                                }}
+                                            >
+                                                <td style={{ padding: '0.5rem 0.75rem' }}><span style={{ fontWeight: '500' }}>{ep.method}</span> {ep.path}</td>
+                                                <td style={{ padding: '0.5rem 0.75rem' }}>
+                                                    {c.source === 'ai' ? (
+                                                        <span style={{ padding: '0.15rem 0.4rem', borderRadius: '0.25rem', background: '#DBEAFE', color: '#1D4ED8', fontSize: '0.7rem', fontWeight: '600' }}>AI</span>
+                                                    ) : (
+                                                        <span style={{ padding: '0.15rem 0.4rem', borderRadius: '0.25rem', background: '#F3F4F6', color: '#6B7280', fontSize: '0.7rem' }}>规则</span>
+                                                    )}
+                                                </td>
+                                                <td style={{ padding: '0.5rem 0.75rem' }}>{c.case_type ?? '-'}</td>
+                                                <td style={{ padding: '0.5rem 0.75rem', color: '#6B7280' }}>{c.name ?? c.description ?? '-'}</td>
+                                                <td style={{ padding: '0.5rem 0.75rem', textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
+                                                    <button
+                                                        type="button"
+                                                        disabled={running || !baseUrl.trim()}
+                                                        onClick={async () => {
+                                                            if (!baseUrl.trim()) { alert('请先选择执行环境 Base URL'); return }
+                                                            setSingleRunLoading(caseKey)
+                                                            setSingleRunResult(prev => { const n = { ...prev }; delete n[caseKey]; return n })
+                                                            try {
+                                                                const res = await fetch(`${API_BASE}/api/v1/api-test-plan/execute-case`, {
+                                                                    method: 'POST',
+                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                    body: JSON.stringify({
+                                                                        project_id: currentProject,
+                                                                        base_url: baseUrl.trim(),
+                                                                        environment: 'test',
+                                                                        endpoint: { method: ep.method, path: ep.path, base_url: ep.base_url },
+                                                                        case: { ...c, path: ep.path, method: ep.method },
+                                                                    }),
+                                                                })
+                                                                const data = await res.json().catch(() => ({}))
+                                                                if (!res.ok) {
+                                                                    const msg = data.detail || data.message || `HTTP ${res.status}`
+                                                                    setSingleRunResult(prev => ({ ...prev, [caseKey]: { status: 'error', error: msg } }))
+                                                                    return
+                                                                }
+                                                                if (data.detail) {
+                                                                    setSingleRunResult(prev => ({ ...prev, [caseKey]: { status: 'error', error: data.detail } }))
+                                                                    return
+                                                                }
+                                                                setSingleRunResult(prev => ({ ...prev, [caseKey]: { status: data.result?.success ? 'passed' : 'failed', status_code: data.result?.status_code, error: data.result?.error, response: data.result?.response } }))
+                                                            } catch (e: any) {
+                                                                setSingleRunResult(prev => ({ ...prev, [caseKey]: { status: 'error', error: e.message || '执行失败' } }))
+                                                            } finally {
+                                                                setSingleRunLoading(null)
                                                             }
-                                                            if (data.detail) {
-                                                                setSingleRunResult(prev => ({ ...prev, [caseKey]: { status: 'error', error: data.detail } }))
-                                                                return
+                                                        }}
+                                                        style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', border: '1px solid #667eea', borderRadius: '0.25rem', background: running ? '#E5E7EB' : '#667eea', color: 'white', cursor: running ? 'not-allowed' : 'pointer' }}
+                                                    >
+                                                        {running ? '执行中' : '执行'}
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={async () => {
+                                                            try {
+                                                                const res = await fetch(`${API_BASE}/api/v1/api-test-cases`, {
+                                                                    method: 'POST',
+                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                    body: JSON.stringify({
+                                                                        project_id: currentProject,
+                                                                        api_id: ep.id,
+                                                                        method: ep.method,
+                                                                        path: ep.path,
+                                                                        source: c.source || 'rule',
+                                                                        case_type: c.case_type,
+                                                                        name: c.name || c.description || `${ep.method} ${ep.path}`,
+                                                                        description: c.description || '',
+                                                                        request_template: c.request_template || {},
+                                                                        expected_template: c.expected_template || {},
+                                                                    }),
+                                                                })
+                                                                const data = await res.json().catch(() => ({}))
+                                                                if (!res.ok) {
+                                                                    alert(data.detail || data.message || `保存失败: HTTP ${res.status}`)
+                                                                    return
+                                                                }
+                                                                // 追加到已保存用例列表
+                                                                setSavedCases(prev => [data, ...prev])
+                                                            } catch (e: any) {
+                                                                alert(e.message || '保存用例失败')
                                                             }
-                                                            setSingleRunResult(prev => ({ ...prev, [caseKey]: { status: data.result?.success ? 'passed' : 'failed', status_code: data.result?.status_code, error: data.result?.error, response: data.result?.response } }))
-                                                        } catch (e: any) {
-                                                            setSingleRunResult(prev => ({ ...prev, [caseKey]: { status: 'error', error: e.message || '执行失败' } }))
-                                                        } finally {
-                                                            setSingleRunLoading(null)
-                                                        }
-                                                    }}
-                                                    style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', border: '1px solid #667eea', borderRadius: '0.25rem', background: running ? '#E5E7EB' : '#667eea', color: 'white', cursor: running ? 'not-allowed' : 'pointer' }}
-                                                >
-                                                    {running ? '执行中' : '执行'}
-                                                </button>
-                                                <button
-                                                    type="button"
-                                                    onClick={async () => {
-                                                        try {
-                                                            const res = await fetch(`${API_BASE}/api/v1/api-test-cases`, {
-                                                                method: 'POST',
-                                                                headers: { 'Content-Type': 'application/json' },
-                                                                body: JSON.stringify({
-                                                                    project_id: currentProject,
-                                                                    api_id: ep.id,
-                                                                    method: ep.method,
-                                                                    path: ep.path,
-                                                                    source: c.source || 'rule',
-                                                                    case_type: c.case_type,
-                                                                    name: c.name || c.description || `${ep.method} ${ep.path}`,
-                                                                    description: c.description || '',
-                                                                    request_template: c.request_template || {},
-                                                                    expected_template: c.expected_template || {},
-                                                                }),
-                                                            })
-                                                            const data = await res.json().catch(() => ({}))
-                                                            if (!res.ok) {
-                                                                alert(data.detail || data.message || `保存失败: HTTP ${res.status}`)
-                                                                return
-                                                            }
-                                                            // 追加到已保存用例列表
-                                                            setSavedCases(prev => [data, ...prev])
-                                                        } catch (e: any) {
-                                                            alert(e.message || '保存用例失败')
-                                                        }
-                                                    }}
-                                                    style={{ marginLeft: '0.35rem', padding: '0.25rem 0.5rem', fontSize: '0.75rem', border: '1px solid #D1D5DB', borderRadius: '0.25rem', background: '#F9FAFB', color: '#4B5563', cursor: 'pointer' }}
-                                                >
-                                                    保存
-                                                </button>
-                                                {runState && !running && (
-                                                    <span style={{ marginLeft: '0.35rem', fontSize: '0.75rem', color: runState.status === 'passed' ? '#10B981' : '#EF4444' }}>
-                                                        {runState.status === 'passed' ? `✓ ${runState.status_code}` : runState.status_code ? `✗ ${runState.status_code}` : runState.error || '失败'}
-                                                    </span>
-                                                )}
-                                            </td>
-                                        </tr>
-                                    )})
+                                                        }}
+                                                        style={{ marginLeft: '0.35rem', padding: '0.25rem 0.5rem', fontSize: '0.75rem', border: '1px solid #D1D5DB', borderRadius: '0.25rem', background: '#F9FAFB', color: '#4B5563', cursor: 'pointer' }}
+                                                    >
+                                                        保存
+                                                    </button>
+                                                    {runState && !running && (
+                                                        <span style={{ marginLeft: '0.35rem', fontSize: '0.75rem', color: runState.status === 'passed' ? '#10B981' : '#EF4444' }}>
+                                                            {runState.status === 'passed' ? `✓ ${runState.status_code}` : runState.status_code ? `✗ ${runState.status_code}` : runState.error || '失败'}
+                                                        </span>
+                                                    )}
+                                                </td>
+                                            </tr>
+                                        )
+                                    })
                                 )}
                             </tbody>
                         </table>

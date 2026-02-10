@@ -236,3 +236,113 @@ API: {api_method} {api_path}
                 })
         
         return changes
+
+    async def heal_api_case(self, api_test_case_id: int, execution_result: Dict) -> Dict:
+        """
+        自动修复独立的 API 测试用例 (api_test_cases 表)
+        """
+        # 1. 分析失败原因
+        analysis = await self.analyze_failure(execution_result)
+        
+        if not analysis.get("healable", False):
+            return {
+                "status": "cannot_heal",
+                "message": "失败原因需要人工介入",
+                "analysis": analysis
+            }
+        
+        # 2. 获取当前用例
+        import sqlite3
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM api_test_cases WHERE id = ?", (api_test_case_id,))
+        case = cursor.fetchone()
+        
+        if not case:
+            conn.close()
+            return {"status": "error", "message": "接口用例不存在"}
+        
+        original_request = json.loads(case["request_template"] or "{}")
+        original_expected = json.loads(case["expected_template"] or "{}")
+        
+        # 3. 获取最新 API 定义
+        cursor.execute("SELECT * FROM apis WHERE id = ?", (case["api_id"],))
+        api_def_row = cursor.fetchone()
+        api_def = dict(api_def_row) if api_def_row else {}
+        
+        # 4. AI 修复
+        healed_data = await self._heal_api_template(
+            original_request,
+            original_expected,
+            api_def,
+            analysis
+        )
+        
+        # 5. 更新数据库
+        new_request = healed_data.get("request_template", original_request)
+        new_expected = healed_data.get("expected_template", original_expected)
+        
+        cursor.execute("""
+            UPDATE api_test_cases 
+            SET request_template = ?, expected_template = ?, updated_at = ?
+            WHERE id = ?
+        """, (
+            json.dumps(new_request, ensure_ascii=False),
+            json.dumps(new_expected, ensure_ascii=False),
+            datetime.now().isoformat() + "Z",
+            api_test_case_id
+        ))
+        conn.commit()
+        conn.close()
+        
+        return {
+            "status": "healed",
+            "message": "接口用例已自动修复",
+            "healed_request": new_request,
+            "healed_expected": new_expected
+        }
+
+    async def _heal_api_template(
+        self,
+        request_template: Dict,
+        expected_template: Dict,
+        api_def: Dict,
+        analysis: Dict
+    ) -> Dict:
+        """使用 AI 修复单接口用例的模板"""
+        system_prompt = """你是一个接口用例修复专家。
+        根据失败分析和 API 定义，修复用例的请求模板和期望模板。
+        
+        输入包含:
+        1. 原始请求模板 (request_template)
+        2. 原始期望模板 (expected_template)
+        3. 失败分析 (analysis)
+        4. API 定义 (api_def)
+        
+        请返回修复后的 JSON，格式必须为:
+        {
+            "request_template": { ... },
+            "expected_template": { ... }
+        }
+        
+        修复策略:
+        - 如果是参数错误，修正 request_template 中的 params/body
+        - 如果是期望与实际不符且实际是正确的（如状态码变更），修正 expected_template
+        - 保持测试意图，仅修正导致失败的部分
+        """
+        
+        user_prompt = f"""原始数据:
+Request: {json.dumps(request_template, ensure_ascii=False)}
+Expected: {json.dumps(expected_template, ensure_ascii=False)}
+
+API定义:
+{json.dumps(api_def, ensure_ascii=False, default=str)}
+
+失败分析:
+{json.dumps(analysis, ensure_ascii=False, default=str)}
+
+请提供修复后的 JSON。
+"""
+        response = await self.ai_client.chat(system_prompt, user_prompt)
+        return response

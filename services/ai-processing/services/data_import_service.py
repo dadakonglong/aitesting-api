@@ -9,12 +9,24 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+import sqlite3
+import json
+import os
+
 class DataImportService:
     """数据导入服务"""
     
-    def __init__(self, vector_service: VectorService):
+    def __init__(self, vector_service: VectorService, db_path: str = None):
         self.vector_service = vector_service
-    
+        self.db_path = db_path
+        
+        # 自动查找 DB_PATH (如果未提供)
+        if not self.db_path:
+             current_dir = os.path.dirname(os.path.abspath(__file__)) 
+             services_dir = os.path.dirname(os.path.dirname(current_dir))
+             root_dir = os.path.dirname(services_dir)
+             self.db_path = os.path.join(root_dir, "data", "apis.db")
+
     async def import_from_source(
         self,
         source_type: str,
@@ -22,15 +34,7 @@ class DataImportService:
         project_id: str
     ) -> Dict:
         """
-        从数据源导入接口
-        
-        Args:
-            source_type: 数据源类型 (swagger, postman, har)
-            source: 数据源（URL或文件路径）
-            project_id: 项目ID
-            
-        Returns:
-            导入结果统计
+        从数据源导入接口 (保存到 SQLite 并尝试向量化)
         """
         try:
             # 1. 创建适配器
@@ -48,22 +52,85 @@ class DataImportService:
             # 4. 数据增强
             enhanced_apis = await self._enhance_apis(apis, project_id)
             
-            # 5. 向量化并索引
+            # 5. 保存到 SQLite
+            sqlite_count = 0
+            if self.db_path:
+                try:
+                    os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+                    conn = sqlite3.connect(self.db_path)
+                    c = conn.cursor()
+                    
+                    # 检查是否有 name 列 (main_sqlite logic)
+                    c.execute("PRAGMA table_info(apis)")
+                    columns = [info[1] for info in c.fetchall()]
+                    has_name_col = "name" in columns
+
+                    for api in enhanced_apis:
+                        # 检查是否存在 (path, method, project_id)
+                        c.execute("SELECT id FROM apis WHERE path=? AND method=? AND project_id=?", 
+                                  (api['path'], api['method'], project_id))
+                        row = c.fetchone()
+                        
+                        params_json = json.dumps(api.get('parameters', []))
+                        body_json = json.dumps(api.get('request_body', {}))
+                        
+                        if row:
+                            # 更新
+                            if has_name_col:
+                                c.execute("""UPDATE apis SET 
+                                    name=?, description=?, parameters=?, request_body=?
+                                    WHERE id=?""", 
+                                    (api['name'], api['description'], params_json, body_json, row[0]))
+                            else:
+                                c.execute("""UPDATE apis SET 
+                                    summary=?, description=?, parameters=?, request_body=?
+                                    WHERE id=?""", 
+                                    (api['name'], api['description'], params_json, body_json, row[0]))
+                        else:
+                            # 插入
+                            if has_name_col:
+                                c.execute("""INSERT INTO apis 
+                                    (path, method, name, description, parameters, request_body, project_id)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                                    (api['path'], api['method'], api['name'], api['description'], 
+                                     params_json, body_json, project_id))
+                            else:
+                                c.execute("""INSERT INTO apis 
+                                    (path, method, summary, description, parameters, request_body, project_id)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                                    (api['path'], api['method'], api['name'], api['description'], 
+                                     params_json, body_json, project_id))
+                        sqlite_count += 1
+                    
+                    conn.commit()
+                    conn.close()
+                    logger.info(f"SQLite保存完成: {sqlite_count} 条")
+                except Exception as e:
+                    logger.error(f"SQLite保存失败: {e}")
+            
+            # 6. 向量化并索引
+            indexed_count = 0
             logger.info("开始向量化索引...")
-            for api in enhanced_apis:
-                await self.vector_service.index_api(api)
-            logger.info("向量化索引完成")
+            if self.vector_service and getattr(self.vector_service, 'enabled', True):
+                for api in enhanced_apis:
+                    await self.vector_service.index_api(api)
+                    indexed_count += 1
+                logger.info("向量化索引完成")
+            else:
+                 logger.warning("向量化服务不可用，跳过索引")
             
             return {
-                "success": True,
-                "total": len(apis),
-                "indexed": len(enhanced_apis),
+                "success": True, 
+                "total": len(apis), 
+                "indexed": sqlite_count, 
                 "source_type": source_type,
                 "project_id": project_id
             }
             
         except Exception as e:
             logger.error(f"导入失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return {
                 "success": False,
                 "error": str(e),
