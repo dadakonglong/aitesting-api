@@ -749,14 +749,27 @@ def _single_api_plan_to_steps(plan: Dict[str, Any]) -> List[Dict]:
         path = ep.get("path") or ""
         method = (ep.get("method") or "GET").upper()
         base_url_ep = (ep.get("base_url") or "").strip()
+        # ★ 获取接口原始请求体作为基模板（用于大请求体合并）
+        original_body = ep.get("request_body") or {}
+        if isinstance(original_body, str):
+            try:
+                original_body = json.loads(original_body)
+            except Exception:
+                original_body = {}
         for c in ep.get("cases") or []:
             rt = c.get("request_template") or {}
             et = c.get("expected_template") or {}
+            ai_params = rt.get("params") or {}
+            # ★ 合并：以原始请求体为基模板，AI 生成的参数覆盖其上
+            if original_body and isinstance(original_body, dict) and ai_params:
+                merged_params = {**original_body, **ai_params}
+            else:
+                merged_params = ai_params if ai_params else (original_body.copy() if original_body else {})
             steps.append({
                 "step_order": step_order,
                 "api_path": path,
                 "api_method": method,
-                "params": rt.get("params") or {},
+                "params": merged_params,
                 "url_params": rt.get("url_params") or {},
                 "headers": rt.get("headers") or {},
                 "param_mappings": [],
@@ -2729,11 +2742,24 @@ async def execute_api_test_plan(req: ExecutePlanRequest):
                 # AI 生成的 case 可能没有 path/method，必须从 endpoint 回退，否则请求地址会变成 base_url/ 且无 path
                 case_path = (case.get("path") or "").strip() or ep_path
                 case_method = (case.get("method") or "").upper() or ep_method
+                ai_params = rt.get("params") or {}
+                # ★ 获取接口原始请求体作为基模板
+                original_body = ep.get("request_body") or {}
+                if isinstance(original_body, str):
+                    try:
+                        original_body = json.loads(original_body)
+                    except Exception:
+                        original_body = {}
+                # ★ 合并：以原始请求体为基模板，AI 生成的参数覆盖其上
+                if original_body and isinstance(original_body, dict) and ai_params:
+                    merged_params = {**original_body, **ai_params}
+                else:
+                    merged_params = ai_params if ai_params else {}
                 steps.append({
                     "step_order": len(steps) + 1,
                     "api_path": case_path,
                     "api_method": case_method,
-                    "params": rt.get("params") or {},
+                    "params": merged_params,
                     "url_params": rt.get("url_params") or {},
                     "headers": rt.get("headers") or {},
                     "param_mappings": [],

@@ -163,6 +163,71 @@ USER_PROMPT_TEMPLATE = """请为以下接口生成测试用例，需包含类型
 请为每种请求类型生成至少 1 条**真实**用例。每条用例的 request_template.params 必须包含接口定义中所有必填字段的**具体取值**，且不同用例类型（正向/边界/健壮/安全）的取值应不同，以验证不同请求的不同响应。直接返回上述格式的 JSON。"""
 
 
+# --- 大请求体智能裁剪（仅用于 AI 提示词，不影响实际执行） ---
+
+# 浏览器自动附加的无关 headers，传给 AI 时去掉以节省 token
+_BROWSER_HEADERS_TO_REMOVE = {
+    "accept", "accept-language", "accept-encoding", "connection",
+    "origin", "referer", "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site",
+    "user-agent", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
+    "cache-control", "pragma",
+}
+
+# 请求体字段数超过此阈值视为"大请求体"
+_LARGE_BODY_FIELD_THRESHOLD = 15
+
+
+def _simplify_headers(headers: dict) -> dict:
+    """去除浏览器自动附加的 headers，只保留业务相关的。"""
+    if not isinstance(headers, dict):
+        return {}
+    return {
+        k: v for k, v in headers.items()
+        if k.lower() not in _BROWSER_HEADERS_TO_REMOVE
+    }
+
+
+def _count_fields(body: dict) -> int:
+    """递归统计 dict 中所有字段数量（包括嵌套）。"""
+    count = 0
+    for k, v in body.items():
+        count += 1
+        if isinstance(v, dict):
+            count += _count_fields(v)
+        elif isinstance(v, list) and v and isinstance(v[0], dict):
+            count += _count_fields(v[0])
+    return count
+
+
+def _simplify_large_body(body: dict) -> dict:
+    """
+    对大请求体做智能裁剪（仅用于 AI 提示词，不影响执行）：
+    - 嵌套数组只保留第一个元素的字段名
+    - 嵌套 dict 只保留字段名（值用 "..." 代替）
+    """
+    simplified = {}
+    for k, v in body.items():
+        if isinstance(v, list):
+            if v and isinstance(v[0], dict):
+                # 嵌套数组：只展示第一个元素的字段名
+                simplified[k] = [{field: "..." for field in v[0].keys()}]
+            else:
+                simplified[k] = v
+        elif isinstance(v, dict):
+            # 嵌套对象：只展示字段名
+            simplified[k] = {field: "..." for field in v.keys()}
+        else:
+            simplified[k] = v
+    return simplified
+
+
+def _is_large_body(request_body: dict) -> bool:
+    """判断请求体是否为"大请求体"。"""
+    if not isinstance(request_body, dict):
+        return False
+    return _count_fields(request_body) >= _LARGE_BODY_FIELD_THRESHOLD
+
+
 async def generate_cases_for_endpoint(
     ai_client: Any,
     endpoint: Dict[str, Any],
@@ -190,10 +255,32 @@ async def generate_cases_for_endpoint(
     request_body = endpoint.get("request_body")
     if not isinstance(request_body, dict):
         request_body = {}
+    headers_raw = endpoint.get("headers") or {}
+
+    # ★ 大请求体优化：裁剪提示词、减少生成数量
+    is_large = _is_large_body(request_body)
+    if is_large:
+        prompt_body = _simplify_large_body(request_body)
+        prompt_headers = _simplify_headers(headers_raw)
+        print(f"DEBUG: 大请求体接口 {method} {path}，字段数={_count_fields(request_body)}，已裁剪提示词")
+    else:
+        prompt_body = request_body
+        prompt_headers = headers_raw
 
     parameters_str = json.dumps(parameters, ensure_ascii=False, indent=2)
-    request_body_str = json.dumps(request_body, ensure_ascii=False, indent=2)
-    headers_str = json.dumps(endpoint.get("headers") or {}, ensure_ascii=False, indent=2)
+    request_body_str = json.dumps(prompt_body, ensure_ascii=False, indent=2)
+    headers_str = json.dumps(prompt_headers, ensure_ascii=False, indent=2)
+
+    # 大请求体追加说明，告知 AI 基于模板生成
+    large_body_note = ""
+    if is_large:
+        large_body_note = (
+            "\n\n## 重要提示（大请求体接口）\n"
+            "此接口请求体字段很多。请注意：\n"
+            "1. request_template.params 必须包含**所有字段**（复制上述请求体模板，然后修改需要测试的字段）\n"
+            "2. 只需要生成 3 条用例即可（1 正向 + 1 边界/健壮 + 1 安全）\n"
+            "3. 嵌套数组和对象按上述结构保持原样，只修改需要测试的字段值\n"
+        )
 
     base_user_prompt = USER_PROMPT_TEMPLATE.format(
         case_types=case_types_str,
@@ -204,13 +291,13 @@ async def generate_cases_for_endpoint(
         parameters=parameters_str,
         request_body=request_body_str,
         headers=headers_str,
-    )
+    ) + large_body_note
 
     # 为了避免「坏用例」直接进入执行阶段，这里增加一个简单的重试机制：
     # - 如果本次结果中「有效用例数 < 6」或全部被判为无效（无 body / 无业务断言等），
     #   则给出错误总结，附加在 prompt 里让大模型「覆盖式重写」，最多重试 3 次。
     max_retry = 3
-    min_cases = 6
+    min_cases = 3 if is_large else 6
     last_error_summary = ""
     attempt = 0
 
