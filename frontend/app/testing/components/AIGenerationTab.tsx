@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Sparkles, Loader2, CheckCircle2, ArrowRight, Target } from 'lucide-react'
 import Link from 'next/link'
 import { useProject } from '../../contexts/ProjectContext'
@@ -30,6 +30,9 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
     const [environments, setEnvironments] = useState<EnvItem[]>([])
     const [selectedEnvId, setSelectedEnvId] = useState<number | 'custom' | null>(null)
     const [execBaseUrl, setExecBaseUrl] = useState('')
+    // 实时进度展示
+    const [progressLines, setProgressLines] = useState<string[]>([])
+    const progressEndRef = useRef<HTMLDivElement>(null)
 
     // 接口测试模式：加载项目环境
     useEffect(() => {
@@ -119,15 +122,24 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
             return
         }
 
-        // 接口测试：生成后把结果交给「接口测试」Tab 并切过去
+        // 接口测试：逐步调用各阶段接口，实时展示进度
         if (!singleApiInput.trim()) {
             alert('请输入接口测试描述，例如：为登录接口生成完整测试')
             return
         }
         setLoading(true)
         setResult(null)
+        setProgressLines(['开始处理任务...', ''])
+
+        // 辅助函数：追加进度行
+        const appendProgress = (...lines: string[]) => {
+            setProgressLines((prev) => [...prev, ...lines])
+            // 滚动到底部
+            setTimeout(() => progressEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50)
+        }
+
         try {
-            // 获取 base_url：优先用选中项，否则从环境列表取
+            // 获取 base_url
             let baseUrl = execBaseUrl.trim()
             if (!baseUrl && environments.length > 0) {
                 const env = (typeof selectedEnvId === 'number'
@@ -146,100 +158,157 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                 }
             }
 
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/single-api/full-pipeline`, {
+            // ========== Phase 1: 需求理解 ==========
+            appendProgress('检索 API 文档信息...')
+            const phase1Res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/single-api/understand`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    natural_language_input: singleApiInput.trim(),
-                    project_id: currentProject,
-                    base_url: baseUrl,
-                    environment: 'test',
-                    run_execution: true,
-                }),
+                body: JSON.stringify({ natural_language_input: singleApiInput.trim(), project_id: currentProject }),
             })
-            if (!res.ok) {
-                const err = await res.json().catch(() => ({}))
-                throw new Error(err.detail || err.message || '单接口流水线失败')
+            if (!phase1Res.ok) {
+                const err = await phase1Res.json().catch(() => ({}))
+                throw new Error(err.detail || err.message || '需求理解失败')
             }
-            let data = await res.json()
+            const structured = await phase1Res.json()
 
-            // 若流水线未执行（无 base_url 或后端未找到），自动补跑 execute + analyze
-            if (data.phase2_plan?.endpoints?.length && !data.phase4_result) {
-                let runBaseUrl = baseUrl
-                if (!runBaseUrl && environments.length > 0) {
-                    const env = environments.find((e) => e.is_default === 1) || environments[0]
-                    runBaseUrl = (env?.base_url || '').trim()
-                }
-                if (!runBaseUrl) {
-                    const envRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/projects/${encodeURIComponent(currentProject)}/environments`)
-                    if (envRes.ok) {
-                        const envList: EnvItem[] = await envRes.json()
-                        if (Array.isArray(envList) && envList.length > 0) {
-                            runBaseUrl = ((envList.find((e) => e.is_default === 1) || envList[0])?.base_url || '').trim()
-                        }
-                    }
-                }
-                if (runBaseUrl) {
-                    try {
-                        const execRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/single-api/execute`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                project_id: currentProject,
-                                base_url: runBaseUrl,
-                                environment: 'test',
-                                plan: data.phase2_plan,
-                                generated_code: data.phase3_code || undefined,
-                            }),
-                        })
-                        if (execRes.ok) {
-                            const suiteResult = await execRes.json()
-                            const analyzeRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/single-api/analyze`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ suite_result: suiteResult }),
-                            })
-                            if (analyzeRes.ok) {
-                                const analyzeData = await analyzeRes.json()
-                                data = {
-                                    ...data,
-                                    phase4_result: suiteResult,
-                                    phase5_report: analyzeData.report ?? null,
-                                    phase5_chart_data: analyzeData.chart_data ?? null,
-                                }
-                                const timeStr = new Date().toISOString().slice(0, 19).replace('T', ' ')
-                                const reportName = `${getSingleApiDisplayName(data)}-${timeStr}`
-                                try {
-                                    await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/test-reports`, {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({
-                                            project_id: currentProject,
-                                            name: reportName,
-                                            report_type: '接口测试',
-                                            trigger_method: '手动触发',
-                                            status: suiteResult.failed_cases > 0 ? 'error' : 'success',
-                                            payload: { phase2_plan: data.phase2_plan, phase4_result: suiteResult, phase5_report: analyzeData.report, phase5_chart_data: analyzeData.chart_data },
-                                        }),
-                                    })
-                                    data._reportSaved = true
-                                } catch (_e) {
-                                    /* 保存报告失败不影响主流程 */
-                                }
-                            } else {
-                                data = { ...data, phase4_result: suiteResult, phase5_report: null, phase5_chart_data: null }
-                            }
-                        }
-                    } catch (_e) {
-                        /* 补跑失败时仍返回原始数据 */
-                    }
-                }
+            // 根据 phase1 结果追加进度详情
+            const entities = structured?.entities || []
+            let moduleNames = [...new Set(entities.map((e: any) => e.entity_name || e.name || '').filter(Boolean))]
+            if (moduleNames.length > 0) {
+                appendProgress(`   ✓ 识别 ${moduleNames.length} 个相关实体：${(moduleNames as string[]).slice(0, 5).join('、')}${moduleNames.length > 5 ? '...' : ''}`)
+            } else if (entities.length > 0) {
+                appendProgress(`   ✓ 识别 ${entities.length} 个实体`)
+            }
+            const chunks = structured?.chunks || []
+            appendProgress(`   ✓ 提取 ${chunks.length || 1} 个 API 端点`)
+            const hasAuth = JSON.stringify(structured || '').includes('认证') || JSON.stringify(chunks).toLowerCase().includes('auth')
+            if (hasAuth) appendProgress('   ✓ 识别认证机制')
+            appendProgress('')
+
+            // ========== Phase 2: 测试计划 ==========
+            appendProgress('生成测试计划...')
+            const phase2Res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/single-api/plan`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ project_id: currentProject, structured_info: structured }),
+            })
+            if (!phase2Res.ok) {
+                const err = await phase2Res.json().catch(() => ({}))
+                throw new Error(err.detail || err.message || '生成测试计划失败')
+            }
+            const phase2Data = await phase2Res.json()
+            const planMarkdown = phase2Data.markdown || ''
+            const planPayload = phase2Data.plan || {}
+            const endpoints = planPayload?.endpoints || []
+            const cases = endpoints.flatMap((ep: any) => ep.cases || [])
+            if (cases.length > 0) appendProgress(`   ✓ 共 ${cases.length} 个测试用例`)
+            if (endpoints.length > 0) appendProgress(`   ✓ 覆盖 ${endpoints.length} 个 API 端点`)
+            appendProgress('')
+
+            // 更新 moduleNames from endpoints if empty
+            if (moduleNames.length === 0 && endpoints.length > 0) {
+                moduleNames = [...new Set(endpoints.map((ep: any) => {
+                    const s = (ep.summary || ep.name || ep.path || '').toString()
+                    const part = s.split(/[\/\\\-_]/).filter(Boolean)[0] || s.slice(0, 8)
+                    return part || '接口'
+                }).filter(Boolean))]
             }
 
-            if (data.phase4_result && data.phase2_plan && !data._reportSaved) {
-                const timeStr = new Date().toISOString().slice(0, 19).replace('T', ' ')
-                const reportName = `${getSingleApiDisplayName(data)}-${timeStr}`
+            // ========== Phase 3: 代码生成 ==========
+            appendProgress('生成测试代码...')
+            const targetApi = (endpoints[0]) || {}
+            const apiInfo = planPayload.target_api || targetApi || (structured?.api_candidates || [{}])[0] || {}
+            const phase3Res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/single-api/generate-code`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ plan_markdown: planMarkdown, api_info: apiInfo, plan_payload: planPayload }),
+            })
+            if (!phase3Res.ok) {
+                const err = await phase3Res.json().catch(() => ({}))
+                throw new Error(err.detail || err.message || '代码生成失败')
+            }
+            const phase3Data = await phase3Res.json()
+            const code = phase3Data.code || ''
+            appendProgress('   ✓ 生成测试文件')
+            appendProgress('')
+
+            // 组装当前结果
+            let data: any = {
+                phase1_structured: structured,
+                phase2_plan_markdown: planMarkdown,
+                phase2_plan: planPayload,
+                phase3_code: code,
+                phase4_executor_summary: null,
+                phase4_result: null,
+                phase5_report: null,
+                phase5_chart_data: null,
+            }
+
+            // ========== Phase 4: 执行测试 ==========
+            appendProgress('执行测试...')
+            if (baseUrl && endpoints.length > 0) {
                 try {
+                    const execRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/single-api/execute`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            project_id: currentProject,
+                            base_url: baseUrl,
+                            environment: 'test',
+                            plan: planPayload,
+                            generated_code: code || undefined,
+                        }),
+                    })
+                    if (execRes.ok) {
+                        const suiteResult = await execRes.json()
+                        data.phase4_result = suiteResult
+                        const total = suiteResult.total_cases ?? 0
+                        const passed = suiteResult.passed_cases ?? 0
+                        const failed = suiteResult.failed_cases ?? 0
+                        const dur = suiteResult.duration_ms != null ? (suiteResult.duration_ms / 1000).toFixed(1) : '-'
+                        appendProgress(`   ✓ 执行 ${total} 个测试用例`)
+                        appendProgress(`   ✓ 通过：${passed} 个`)
+                        appendProgress(`   ✓ 失败：${failed} 个`)
+                        appendProgress(`   ✓ 执行时间：${dur}s`)
+                    } else {
+                        appendProgress('   ⚠ 执行失败，跳过')
+                    }
+                } catch (_e) {
+                    appendProgress('   ⚠ 执行异常，跳过')
+                }
+            } else {
+                appendProgress('   ✓ 未执行（未配置接口基础地址）')
+            }
+            appendProgress('')
+
+            // ========== Phase 5: 生成报告 ==========
+            appendProgress('生成报告...')
+            if (data.phase4_result) {
+                try {
+                    const analyzeRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/single-api/analyze`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ suite_result: data.phase4_result }),
+                    })
+                    if (analyzeRes.ok) {
+                        const analyzeData = await analyzeRes.json()
+                        data.phase5_report = analyzeData.report ?? null
+                        data.phase5_chart_data = analyzeData.chart_data ?? null
+                        appendProgress('   ✓ 生成测试摘要')
+                        if (analyzeData.chart_data) appendProgress('   ✓ 生成可视化图表')
+                        appendProgress('   ✓ 分析失败原因')
+                        appendProgress('   ✓ 提供优化建议')
+                    } else {
+                        appendProgress('   ⚠ 报告生成失败')
+                    }
+                } catch (_e) {
+                    appendProgress('   ⚠ 报告生成异常')
+                }
+
+                // 保存报告
+                try {
+                    const timeStr = new Date().toISOString().slice(0, 19).replace('T', ' ')
+                    const reportName = `${getSingleApiDisplayName(data)}-${timeStr}`
                     await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/test-reports`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -252,18 +321,23 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                             payload: { phase2_plan: data.phase2_plan, phase4_result: data.phase4_result, phase5_report: data.phase5_report, phase5_chart_data: data.phase5_chart_data },
                         }),
                     })
-                } catch (_e) {
-                    /* 保存报告失败不影响主流程 */
-                }
-            }
-
-            if (onSingleApiGenerated) {
-                onSingleApiGenerated(data)
+                } catch (_e) { /* 保存报告失败不影响主流程 */ }
             } else {
-                setResult(data)
+                appendProgress('   ✓ 待生成（执行后可生成）')
             }
+            appendProgress('')
+            appendProgress('任务完成！')
+
+            // 延迟 1.5 秒后切换到接口用例 Tab，让用户看到完成
+            setTimeout(() => {
+                if (onSingleApiGenerated) {
+                    onSingleApiGenerated(data)
+                } else {
+                    setResult(data)
+                }
+            }, 1500)
         } catch (error: any) {
-            alert(`错误: ${error.message}`)
+            appendProgress('', `❌ 错误: ${error.message}`)
         } finally {
             setLoading(false)
         }
@@ -469,6 +543,53 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                     )}
                 </button>
             </div>
+
+            {/* 实时进度展示面板 */}
+            {mode === 'single-api' && progressLines.length > 0 && (
+                <div style={{
+                    marginTop: '1.5rem',
+                    background: 'linear-gradient(135deg, #f8f9ff 0%, #f0f2ff 100%)',
+                    border: '1px solid #e0e4f5',
+                    borderRadius: '0.75rem',
+                    padding: '1.5rem',
+                    fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace',
+                    fontSize: '0.85rem',
+                    lineHeight: '1.7',
+                    color: '#374151',
+                    maxHeight: '420px',
+                    overflowY: 'auto',
+                    boxShadow: '0 2px 8px rgba(102, 126, 234, 0.08)',
+                    position: 'relative',
+                }}>
+                    {loading && (
+                        <div style={{
+                            position: 'absolute', top: '0.75rem', right: '0.75rem',
+                            display: 'flex', alignItems: 'center', gap: '0.4rem',
+                            fontSize: '0.75rem', color: '#667eea',
+                        }}>
+                            <Loader2 className="animate-spin" size={14} />
+                            <span>处理中...</span>
+                        </div>
+                    )}
+                    {progressLines.map((line, i) => {
+                        if (line === '') return <div key={i} style={{ height: '0.5rem' }} />
+                        const isError = line.startsWith('❌')
+                        const isWarning = line.includes('⚠')
+                        const isComplete = line === '任务完成！'
+                        return (
+                            <div key={i} style={{
+                                color: isError ? '#DC2626' : isWarning ? '#D97706' : isComplete ? '#059669' : undefined,
+                                fontWeight: isComplete ? 700 : (line.startsWith('检索') || line.startsWith('生成') || line.startsWith('执行')) ? 600 : undefined,
+                                marginTop: (line.startsWith('检索') || line.startsWith('生成') || line.startsWith('执行')) ? '0.25rem' : undefined,
+                            }}>
+                                {isComplete && <CheckCircle2 size={16} style={{ display: 'inline', verticalAlign: 'text-bottom', marginRight: '0.4rem', color: '#059669' }} />}
+                                {line}
+                            </div>
+                        )
+                    })}
+                    <div ref={progressEndRef} />
+                </div>
+            )}
 
             {/* 仅测试场景模式在此展示结果；单接口测试结果在「单接口测试」Tab */}
             {mode === 'scenario' && result && (
