@@ -1687,6 +1687,32 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                     BASIC_CODE_FIELDS = set(FIELD_NAME_MAPPING["code"])
                     MESSAGE_FIELDS = set(FIELD_NAME_MAPPING["message"])
 
+                    # 「非空」存在性检查关键词
+                    NON_EMPTY_KEYWORDS = {"非空", "not null", "not_null", "not_empty", "存在", "exists"}
+
+                    # 常见中英文语义等价词汇映射（用于 message 等提示语字段的宽松匹配）
+                    SEMANTIC_EQUIVALENTS = [
+                        {"成功", "success", "ok", "succeed", "操作成功"},
+                        {"失败", "fail", "failed", "failure", "error", "操作失败"},
+                        {"参数错误", "param error", "parameter error", "invalid params", "bad request", "invalid parameter"},
+                        {"未授权", "unauthorized", "no auth", "not authorized", "鉴权失败"},
+                        {"禁止访问", "forbidden", "禁止", "no permission", "permission denied"},
+                        {"不存在", "not found", "no data", "数据不存在", "记录不存在"},
+                        {"密码错误", "wrong password", "invalid password", "password error"},
+                    ]
+
+                    def _semantic_match(expected_str: str, actual_str: str) -> bool:
+                        """语义等价匹配：检查两个值是否在同一组等价词中"""
+                        e_lower = expected_str.strip().lower()
+                        a_lower = actual_str.strip().lower()
+                        if e_lower == a_lower:
+                            return True
+                        for equiv_set in SEMANTIC_EQUIVALENTS:
+                            lower_set = {s.lower() for s in equiv_set}
+                            if e_lower in lower_set and a_lower in lower_set:
+                                return True
+                        return False
+
                     def _shorten(val: Any) -> Any:
                         """
                         将 very long 的实际值/期望值做友好截断，避免在前端显示一大串 token / JSON。
@@ -1719,7 +1745,12 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                         
                         # 类型兼容比较：支持字符串和数字的互转比较
                         match = False
-                        if expected_val is None:
+                        text_expected_check = str(expected_val).strip() if expected_val is not None else ""
+
+                        # ★ 分层断言：如果期望值是「非空」关键词，改为存在性检查
+                        if text_expected_check in NON_EMPTY_KEYWORDS:
+                            match = actual is not None and str(actual).strip() not in ("", "null", "None")
+                        elif expected_val is None:
                             match = actual is not None
                         else:
                             # 严格相等
@@ -1764,6 +1795,10 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                                     if cand and (cand in actual or actual in cand):
                                         match = True
                                         break
+                            # ★ 分层断言：如果包含匹配仍未通过，尝试语义等价匹配
+                            if not match:
+                                if _semantic_match(expected_val, actual):
+                                    match = True
                         
                         # 断言分类：用于前端按「基础响应 / 业务数据 / 数据完整性」展示
                         # - code 等状态码字段 -> basic
@@ -1771,12 +1806,11 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                         # - 其它 -> business_data
                         normalized_field = field_path.split(".")[-1] if field_path else ""
                         category = "business_data"
-                        text_expected = str(expected_val).strip() if expected_val is not None else ""
                         if normalized_field in BASIC_CODE_FIELDS:
                             category = "basic"
                         elif (
                             expected_val is None
-                            or text_expected in {"非空", "not null", "not_null", "not_empty", "存在", "exists"}
+                            or text_expected_check in NON_EMPTY_KEYWORDS
                         ):
                             category = "integrity"
 
