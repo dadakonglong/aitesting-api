@@ -808,20 +808,69 @@ export default function SingleApiTestTab({
                                                                                         {getTab() === 'assertions' && (
                                                                                             <div style={{ padding: '1rem', color: '#374151', fontSize: '0.875rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                                                                                                 {(r.assertions && Array.isArray(r.assertions) && r.assertions.length > 0)
-                                                                                                    ? r.assertions.map((a: any, ai: number) => (
-                                                                                                        <div key={ai} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem' }}>
-                                                                                                            <span style={{ color: a.passed ? '#10B981' : '#EF4444', fontWeight: 600 }}>{a.passed ? '✓' : '✗'}</span>
-                                                                                                            <span style={{ fontWeight: 600, color: '#6B7280' }}>{a.type === 'http' ? 'HTTP 断言' : '业务断言'}</span>
-                                                                                                            <span>{a.message}</span>
-                                                                                                            {a.details && a.details.length > 0 && (
-                                                                                                                <div style={{ marginTop: '0.25rem', marginLeft: '1.25rem', fontSize: '0.8125rem', color: '#6B7280' }}>
-                                                                                                                    {a.details.map((d: any, di: number) => (
-                                                                                                                        <div key={di}>{d.field}: 期望 {JSON.stringify(d.expected)}，实际 {JSON.stringify(d.actual)} {d.passed ? '✓' : '✗'}</div>
-                                                                                                                    ))}
+                                                                                                    ? r.assertions.map((a: any, ai: number) => {
+                                                                                                        // 尝试解析 message 中的详细信息
+                                                                                                        let detailedItems: any[] = [];
+                                                                                                        let cleanMsg = a.message || '';
+
+                                                                                                        try {
+                                                                                                            if (a.message) {
+                                                                                                                const startIdx = a.message.indexOf('[');
+                                                                                                                const endIdx = a.message.lastIndexOf(']');
+
+                                                                                                                if (startIdx >= 0 && endIdx > startIdx) {
+                                                                                                                    const listStr = a.message.substring(startIdx, endIdx + 1);
+                                                                                                                    const jsonStr = listStr
+                                                                                                                        .replace(/'/g, '"')
+                                                                                                                        .replace(/True/g, 'true')
+                                                                                                                        .replace(/False/g, 'false')
+                                                                                                                        .replace(/None/g, 'null');
+
+                                                                                                                    const parsed = JSON.parse(jsonStr);
+                                                                                                                    if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].field) {
+                                                                                                                        detailedItems = parsed;
+                                                                                                                        cleanMsg = a.message.substring(0, startIdx).trim();
+                                                                                                                        if (cleanMsg.endsWith(':')) cleanMsg = cleanMsg.slice(0, -1).trim();
+                                                                                                                    }
+                                                                                                                }
+                                                                                                            }
+                                                                                                        } catch (e) { /* 解析失败保留原样 */ }
+
+                                                                                                        // 也尝试使用 a.details
+                                                                                                        if (detailedItems.length === 0 && a.details && a.details.length > 0) {
+                                                                                                            detailedItems = a.details;
+                                                                                                            cleanMsg = a.message || '';
+                                                                                                        }
+
+                                                                                                        return (
+                                                                                                            <div key={ai} style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                                                                                                                {/* 标题行 */}
+                                                                                                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                                                                                                    <span style={{ color: a.passed ? '#10B981' : '#EF4444', fontWeight: 600 }}>{a.passed ? '✓' : '✗'}</span>
+                                                                                                                    <span style={{ fontWeight: 600, color: '#6B7280' }}>{a.type === 'http' ? 'HTTP 断言' : '业务断言'}</span>
+                                                                                                                    {/* 如果有干净的消息文本则显示 */}
+                                                                                                                    {cleanMsg && detailedItems.length > 0 && <span style={{ color: '#4B5563' }}>{cleanMsg}</span>}
+                                                                                                                    {/* 如果没有解析成功，显示原始消息 */}
+                                                                                                                    {detailedItems.length === 0 && a.message && <span>{a.message}</span>}
                                                                                                                 </div>
-                                                                                                            )}
-                                                                                                        </div>
-                                                                                                    ))
+                                                                                                                {/* 详细字段列表 (一行一个) */}
+                                                                                                                {detailedItems.length > 0 && (
+                                                                                                                    <div style={{ marginLeft: '1.5rem', display: 'flex', flexDirection: 'column', gap: '0.15rem', fontSize: '0.8125rem' }}>
+                                                                                                                        {detailedItems.map((item: any, di: number) => (
+                                                                                                                            <div key={di} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontFamily: 'monospace' }}>
+                                                                                                                                <span style={{ fontWeight: 600, color: '#374151' }}>{item.field}:</span>
+                                                                                                                                <span style={{ color: '#6B7280' }}>期望</span>
+                                                                                                                                <span style={{ color: '#059669' }}>{JSON.stringify(item.expected)}</span>
+                                                                                                                                <span style={{ color: '#6B7280' }}>，实际</span>
+                                                                                                                                <span style={{ color: item.passed ? '#059669' : '#DC2626' }}>{JSON.stringify(item.actual)}</span>
+                                                                                                                                <span style={{ fontWeight: 'bold' }}>{item.passed ? <span style={{ color: '#10B981' }}>✓</span> : <span style={{ color: '#EF4444' }}>✗</span>}</span>
+                                                                                                                            </div>
+                                                                                                                        ))}
+                                                                                                                    </div>
+                                                                                                                )}
+                                                                                                            </div>
+                                                                                                        );
+                                                                                                    })
                                                                                                     : (r.success ? `✓ 状态码 ${r.status_code} 与期望 ${r.expected_status ?? 200} 一致` : `✗ 状态码 ${r.status_code} 未通过（期望 ${r.expected_status ?? '2xx'})`)}
                                                                                             </div>
                                                                                         )}

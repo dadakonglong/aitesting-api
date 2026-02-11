@@ -544,17 +544,98 @@ export default function ApiTestPlanTab() {
                                                 {rd.response && <pre style={{ fontSize: '0.75rem', background: '#F9FAFB', padding: '0.5rem' }}>{typeof rd.response === 'string' ? rd.response : JSON.stringify(rd.response, null, 2)}</pre>}
 
                                                 {/* Categorized Assertions (from bjb HEAD) */}
-                                                {Array.isArray(rd.assertions) && rd.assertions.length > 0 && (
-                                                    <div style={{ marginTop: '0.75rem' }}>
-                                                        <span style={{ color: '#6B7280', fontSize: '0.75rem' }}>断言结果</span>
-                                                        <div style={{ marginTop: '0.25rem', display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                                                            {rd.assertions.map((a: any, idx: number) => (
-                                                                <div key={idx} style={{ padding: '0.4rem', borderRadius: '0.375rem', background: a.passed ? '#ECFDF3' : '#FEF2F2', border: `1px solid ${a.passed ? '#BBF7D0' : '#FECACA'}`, fontSize: '0.75rem' }}>
-                                                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                                <div style={{ marginTop: '0.75rem' }}>
+                                                    <span style={{ color: '#6B7280', fontSize: '0.75rem' }}>断言结果</span>
+                                                    <div style={{ marginTop: '0.25rem', display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                                                        {rd.assertions.map((a: any, idx: number) => {
+                                                            // 尝试解析 message 中的详细信息
+                                                            let detailedAssertions: any[] = [];
+                                                            let cleanMessage = a.message || '';
+
+                                                            try {
+                                                                if (a.message) {
+                                                                    const startIdx = a.message.indexOf('[');
+                                                                    const endIdx = a.message.lastIndexOf(']');
+
+                                                                    if (startIdx >= 0 && endIdx > startIdx) {
+                                                                        const listStr = a.message.substring(startIdx, endIdx + 1);
+
+                                                                        // 简单的 Python repr 转 JSON
+                                                                        const jsonStr = listStr
+                                                                            .replace(/'/g, '"')
+                                                                            .replace(/True/g, 'true')
+                                                                            .replace(/False/g, 'false')
+                                                                            .replace(/None/g, 'null');
+
+                                                                        const parsed = JSON.parse(jsonStr);
+                                                                        if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].field) {
+                                                                            detailedAssertions = parsed;
+                                                                            // 如果解析成功，从原始消息中移除列表部分，得到干净的提示语
+                                                                            cleanMessage = (a.message.substring(0, startIdx) + a.message.substring(endIdx + 1)).trim();
+                                                                            // 去除可能残留的冒号
+                                                                            if (cleanMessage.endsWith(':')) {
+                                                                                cleanMessage = cleanMessage.substring(0, cleanMessage.length - 1).trim();
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            } catch (e) {
+                                                                // 解析失败则保留原样，不做处理
+                                                            }
+
+                                                            // 如果有解析出的详细断言，则优先展示
+                                                            if (detailedAssertions.length > 0) {
+                                                                return (
+                                                                    <div key={idx} style={{ padding: '0.5rem', borderRadius: '0.375rem', background: a.passed ? '#ECFDF3' : '#FEF2F2', border: `1px solid ${a.passed ? '#BBF7D0' : '#FECACA'}`, fontSize: '0.75rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+
+                                                                        {/* 标题行: 类型 + 状态 */}
+                                                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                                            <span style={{ fontWeight: 600 }}>
+                                                                                {a.type === 'http' ? 'HTTP 断言' : '业务断言'}
+                                                                            </span>
+                                                                            <span style={{ color: a.passed ? '#16A34A' : '#DC2626', fontWeight: 600 }}>{a.passed ? '通过' : '未通过'}</span>
+                                                                        </div>
+
+                                                                        {/* 消息文本 (移除列表后的) */}
+                                                                        {cleanMessage && (
+                                                                            <div style={{ color: '#4B5563', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                                                                                {cleanMessage}
+                                                                            </div>
+                                                                        )}
+
+                                                                        {/* 详细字段列表 (一行一个) */}
+                                                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', paddingTop: '0.25rem', borderTop: '1px solid rgba(0,0,0,0.05)' }}>
+                                                                            {detailedAssertions.map((item: any, i: number) => (
+                                                                                <div key={i} style={{ display: 'flex', alignItems: 'center', flexWrap: 'nowrap', gap: '0.5rem', padding: '0.25rem 0', fontFamily: 'monospace' }}>
+                                                                                    <span style={{ minWidth: '1.2rem' }}>
+                                                                                        {item.passed ? <span style={{ color: '#16A34A', fontWeight: 'bold' }}>✓</span> : <span style={{ color: '#DC2626', fontWeight: 'bold' }}>✕</span>}
+                                                                                    </span>
+                                                                                    <div style={{ flex: 1, display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                                                                                        <span style={{ fontWeight: 600, color: '#374151' }}>{item.field}:</span>
+                                                                                        <span style={{ color: '#6B7280' }}>期望</span>
+                                                                                        <span style={{ color: '#059669', background: 'rgba(255,255,255,0.6)', padding: '0 0.2rem', borderRadius: '0.2rem' }}>
+                                                                                            {typeof item.expected === 'string' ? `"${item.expected}"` : JSON.stringify(item.expected)}
+                                                                                        </span>
+                                                                                        <span style={{ color: '#6B7280' }}>, 实际</span>
+                                                                                        <span style={{ color: '#DC2626', background: 'rgba(255,255,255,0.6)', padding: '0 0.2rem', borderRadius: '0.2rem' }}>
+                                                                                            {typeof item.actual === 'string' ? `"${item.actual}"` : JSON.stringify(item.actual)}
+                                                                                        </span>
+                                                                                    </div>
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    </div>
+                                                                );
+                                                            }
+
+                                                            // 默认展示 (解析失败或无详细信息)
+                                                            return (
+                                                                <div key={idx} style={{ padding: '0.4rem', borderRadius: '0.375rem', background: a.passed ? '#ECFDF3' : '#FEF2F2', border: `1px solid ${a.passed ? '#BBF7D0' : '#FECACA'}`, fontSize: '0.75rem', display: 'flex', flexDirection: 'column' }}>
+                                                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.25rem' }}>
                                                                         <span style={{ fontWeight: 500 }}>{a.type === 'http' ? 'HTTP 断言' : '业务断言'}</span>
                                                                         <span style={{ color: a.passed ? '#16A34A' : '#DC2626' }}>{a.passed ? '通过' : '未通过'}</span>
                                                                     </div>
-                                                                    {a.message && <div style={{ color: '#4B5563' }}>{a.message}</div>}
+                                                                    {a.message && <div style={{ color: '#4B5563', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{a.message}</div>}
                                                                     {a.details && a.details.length > 0 && (
                                                                         <ul style={{ margin: '0.25rem 0 0', paddingLeft: '1rem' }}>
                                                                             {a.details.map((d: any, di: number) => (
@@ -563,10 +644,10 @@ export default function ApiTestPlanTab() {
                                                                         </ul>
                                                                     )}
                                                                 </div>
-                                                            ))}
-                                                        </div>
+                                                            );
+                                                        })}
                                                     </div>
-                                                )}
+                                                </div>
                                             </div>
                                         )}
                                     </div>
