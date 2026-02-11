@@ -271,10 +271,17 @@ async def generate_cases_for_endpoint(
             if method in ("POST", "PUT", "PATCH") and not (req_tpl.get("params") or {}):
                 invalid_stats_total["no_body"] += 1
                 continue
-            if method in ("POST", "PUT", "PATCH") and req_tpl.get("params") and "Content-Type" not in {
-                k.lower() for k in (req_tpl.get("headers") or {}).keys()
-            }:
-                (req_tpl.setdefault("headers", {}))["Content-Type"] = "application/json"
+            # 自动补充 Content-Type（但跳过明确测试"无 Content-Type"的安全用例）
+            if method in ("POST", "PUT", "PATCH") and req_tpl.get("params"):
+                has_content_type = "Content-Type" in {k.lower() for k in (req_tpl.get("headers") or {}).keys()}
+                # 检查是否是测试"无 Content-Type"的安全用例
+                is_testing_no_content_type = any(
+                    keyword in (name.lower() + description.lower())
+                    for keyword in ["无content-type", "缺少content-type", "missing content-type", "no content-type", "without content-type"]
+                )
+                # 只有在没有 Content-Type 且不是测试"无 Content-Type"的用例时，才自动添加
+                if not has_content_type and not is_testing_no_content_type:
+                    (req_tpl.setdefault("headers", {}))["Content-Type"] = "application/json"
             # 若业务级断言为空，则丢弃该用例，避免执行阶段出现「没有业务断言」的用例
             rb = exp_tpl.get("response_body") or {}
             if not isinstance(rb, dict):
