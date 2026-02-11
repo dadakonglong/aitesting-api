@@ -591,7 +591,7 @@ export default function ApiTestPlanTab() {
                                                                         {/* 标题行: 类型 + 状态 */}
                                                                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                                                             <span style={{ fontWeight: 600 }}>
-                                                                                {a.type === 'http' ? 'HTTP 断言' : '业务断言'}
+                                                                                {a.type === 'http' ? '响应码断言' : '业务断言'}
                                                                             </span>
                                                                             <span style={{ color: a.passed ? '#16A34A' : '#DC2626', fontWeight: 600 }}>{a.passed ? '通过' : '未通过'}</span>
                                                                         </div>
@@ -632,7 +632,7 @@ export default function ApiTestPlanTab() {
                                                             return (
                                                                 <div key={idx} style={{ padding: '0.4rem', borderRadius: '0.375rem', background: a.passed ? '#ECFDF3' : '#FEF2F2', border: `1px solid ${a.passed ? '#BBF7D0' : '#FECACA'}`, fontSize: '0.75rem', display: 'flex', flexDirection: 'column' }}>
                                                                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.25rem' }}>
-                                                                        <span style={{ fontWeight: 500 }}>{a.type === 'http' ? 'HTTP 断言' : '业务断言'}</span>
+                                                                        <span style={{ fontWeight: 500 }}>{a.type === 'http' ? '响应码断言' : '业务断言'}</span>
                                                                         <span style={{ color: a.passed ? '#16A34A' : '#DC2626' }}>{a.passed ? '通过' : '未通过'}</span>
                                                                     </div>
                                                                     {a.message && <div style={{ color: '#4B5563', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{a.message}</div>}

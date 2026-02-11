@@ -847,7 +847,7 @@ export default function SingleApiTestTab({
                                                                                                                 {/* 标题行 */}
                                                                                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                                                                                                                     <span style={{ color: a.passed ? '#10B981' : '#EF4444', fontWeight: 600 }}>{a.passed ? '✓' : '✗'}</span>
-                                                                                                                    <span style={{ fontWeight: 600, color: '#6B7280' }}>{a.type === 'http' ? 'HTTP 断言' : '业务断言'}</span>
+                                                                                                                    <span style={{ fontWeight: 600, color: '#6B7280' }}>{a.type === 'http' ? '响应码断言' : '业务断言'}</span>
                                                                                                                     {/* 如果有干净的消息文本则显示 */}
                                                                                                                     {cleanMsg && detailedItems.length > 0 && <span style={{ color: '#4B5563' }}>{cleanMsg}</span>}
                                                                                                                     {/* 如果没有解析成功，显示原始消息 */}
