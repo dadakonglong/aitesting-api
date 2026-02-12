@@ -11,7 +11,7 @@ export default function Navbar() {
 
     const navItems = [
         { name: '🧪 测试中心', href: '/testing' },
-        { name: '📚 API管理', href: '/apis' },
+        { name: '📚 接口管理', href: '/apis' },
         { name: '📊 测试报告', href: '/reports' },
         { name: '⚙️ 项目设置', href: '/settings' },
     ]
@@ -41,7 +41,7 @@ export default function Navbar() {
                                     backgroundClip: 'text',
                                     margin: 0
                                 }}>
-                                    AI测试平台
+                                    AI接口测试平台
                                 </h1>
                                 <p style={{ fontSize: '0.75rem', color: '#6B7280', margin: 0 }}>智能 · 高效 · 自动化</p>
                             </div>

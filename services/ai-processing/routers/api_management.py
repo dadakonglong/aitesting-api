@@ -1,11 +1,11 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any, Union
 import sqlite3
 import json
 import os
 
-router = APIRouter(prefix="/api/v1/apis", tags=["API管理"])
+router = APIRouter(prefix="/api/v1/apis", tags=["接口管理"])
 
 # 智能查找 DB_PATH
 # 优先查找项目根目录下的 data/apis.db (main_sqlite.py 逻辑)
@@ -104,7 +104,7 @@ async def list_apis(project_id: Optional[str] = None, limit: int = 100):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("")
-async def create_api(api: APIModel, background_tasks: BackgroundTasks):
+async def create_api(api: APIModel, background_tasks: BackgroundTasks, request: Request):
     """
     创建API
     """
@@ -195,16 +195,13 @@ async def create_api(api: APIModel, background_tasks: BackgroundTasks):
         conn.commit()
         conn.close()
         
-        # 尝试更新向量 (如果可用)
+        # 自动同步该项目到向量库（main_sqlite 注入的 sync_project_to_vector）
         try:
-            from main import vector_service
-            api_data = api.dict()
-            api_data['id'] = str(api_id)
-            background_tasks.add_task(vector_service.index_api, api_data)
-        except ImportError:
-            pass # main.py 可能未运行或 vector_service 不可用
+            sync_fn = getattr(request.app.state, "sync_project_to_vector", None)
+            if callable(sync_fn):
+                await sync_fn(api.project_id)
         except Exception as e:
-            print(f"Vector Index Error: {e}")
+            print(f"Vector sync after create: {e}")
         
         return {"success": True, "id": str(api_id), "message": "API创建成功"}
     except Exception as e:
@@ -242,7 +239,7 @@ async def get_api(api_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.put("/{api_id}")
-async def update_api(api_id: int, api: APIModel, background_tasks: BackgroundTasks):
+async def update_api(api_id: int, api: APIModel, background_tasks: BackgroundTasks, request: Request):
     """
     更新API
     """
@@ -331,14 +328,13 @@ async def update_api(api_id: int, api: APIModel, background_tasks: BackgroundTas
         conn.commit()
         conn.close()
         
-        # 尝试更新向量
+        # 自动同步该项目到向量库（main_sqlite 注入的 sync_project_to_vector）
         try:
-            from main import vector_service
-            api_data = api.dict()
-            api_data['id'] = str(api_id)
-            background_tasks.add_task(vector_service.index_api, api_data)
-        except:
-            pass
+            sync_fn = getattr(request.app.state, "sync_project_to_vector", None)
+            if callable(sync_fn):
+                await sync_fn(api.project_id)
+        except Exception as e:
+            print(f"Vector sync after update: {e}")
         
         return {"success": True, "id": str(api_id), "message": "API更新成功"}
 

@@ -31,7 +31,7 @@ export default function APIManagementPage() {
             {/* 页面标题 */}
             <div style={{ marginBottom: '2rem' }}>
                 <h1 style={{ fontSize: '2rem', fontWeight: '700', color: '#111827', marginBottom: '0.5rem' }}>
-                    📚 API管理
+                    📚 接口管理
                 </h1>
                 <p style={{ color: '#6B7280' }}>
                     管理API接口和导入数据

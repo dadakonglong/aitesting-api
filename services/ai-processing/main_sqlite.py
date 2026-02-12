@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 
 # 保证从项目根或本目录运行都能找到 services / agents
 _script_dir = os.path.dirname(os.path.abspath(__file__))
+_project_root = os.path.dirname(_script_dir) if os.path.basename(_script_dir) == "ai-processing" else _script_dir
 if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
 
@@ -32,10 +33,60 @@ from services.single_api_pipeline import (
     rag_query_data,
 )
 
-# 加载环境变量
+# 加载环境变量（优先从项目根目录的 .env 加载，便于统一配置）
+_env_path = os.path.join(_project_root, ".env")
+if os.path.isfile(_env_path):
+    load_dotenv(_env_path)
 load_dotenv()
 
+# 向量服务（Qdrant + OpenAI Embedding）：用于场景/接口的语义检索，未配置则退化为关键词排序
+_vector_service = None
+if os.getenv("QDRANT_URL"):
+    try:
+        from services.vector_service import VectorService
+        _vector_service = VectorService(
+            os.getenv("QDRANT_URL"),
+            os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY") or "",
+            qdrant_api_key=os.getenv("QDRANT_API_KEY"),
+            openai_base_url=os.getenv("OPENAI_BASE_URL"),
+        )
+        if _vector_service.enabled:
+            print("向量服务已启用（场景/接口将优先按语义检索）")
+    except Exception as _e:
+        print(f"向量服务初始化失败，将使用关键词检索: {_e}")
+        _vector_service = None
+
+async def _sync_project_apis_to_vector(project_id: str):
+    """将项目下全部 API 同步到向量库，便于语义检索。"""
+    if not _vector_service or not getattr(_vector_service, "enabled", False):
+        return
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute(
+        "SELECT id, path, method, summary, description, base_url, parameters, request_body, headers, project_id FROM apis WHERE project_id = ?",
+        (project_id,),
+    )
+    rows = c.fetchall()
+    conn.close()
+    for row in rows:
+        api = {
+            "id": row["id"],
+            "path": row["path"] or "",
+            "method": row["method"] or "",
+            "summary": row["summary"] or "",
+            "description": row["description"] or "",
+            "base_url": row["base_url"] or "",
+            "parameters": row["parameters"],
+            "request_body": row["request_body"],
+            "headers": row["headers"],
+            "project_id": str(row["project_id"] or ""),
+        }
+        await _vector_service.index_api(api)
+
 app = FastAPI(title="AI Testing API - Unified Edition")
+# 供 API 管理路由在单增/更新接口后自动同步该项目到向量库
+app.state.sync_project_to_vector = _sync_project_apis_to_vector
 
 from routers import api_management, import_router
 app.include_router(api_management.router)
@@ -647,9 +698,12 @@ class LocalDataImportService:
             conn.commit()
             conn.close()
 
-            # Dummy vector index
-            for api in enhanced_apis:
-                await self.vector_service.index_api(api)
+            # 向量索引：若启用则同步该项目 API 到向量库
+            if getattr(self.vector_service, "enabled", False):
+                await _sync_project_apis_to_vector(project_id)
+            else:
+                for api in enhanced_apis:
+                    await self.vector_service.index_api(api)
                 
             return {
                 "success": True, 
@@ -677,7 +731,7 @@ class LocalDataImportService:
             "details": results
         }
 
-data_import_service = LocalDataImportService(DummyVectorService())
+data_import_service = LocalDataImportService(_vector_service if _vector_service else DummyVectorService())
 
 # ============= 数据库初始化 =============
 
@@ -963,7 +1017,8 @@ async def single_api_understand(req: SingleApiUnderstandRequest):
     """阶段1：需求理解 — 解析用户意图 + RAG 检索，返回结构化 API 信息"""
     try:
         result = await requirement_understanding(
-            ai_client, req.natural_language_input, req.project_id, DB_PATH
+            ai_client, req.natural_language_input, req.project_id, DB_PATH,
+            vector_service=_vector_service,
         )
         return result
     except Exception as e:
@@ -1429,7 +1484,8 @@ async def single_api_full_pipeline(req: SingleApiFullPipelineRequest):
     try:
         # 1. 需求理解
         structured = await requirement_understanding(
-            ai_client, req.natural_language_input, req.project_id, DB_PATH
+            ai_client, req.natural_language_input, req.project_id, DB_PATH,
+            vector_service=_vector_service,
         )
         # 2. 测试计划
         plan_md, plan_payload = await generate_test_plan_md(
@@ -1538,6 +1594,21 @@ async def list_environments(project_id: str):
     conn.close()
     return [dict(row) for row in rows]
 
+
+@app.post("/api/v1/projects/{project_id}/sync-vector")
+async def sync_project_to_vector(project_id: str):
+    """将该项目下全部 API 同步到向量库，用于语义检索。未配置 Qdrant 时返回 503。"""
+    if not _vector_service or not getattr(_vector_service, "enabled", False):
+        raise HTTPException(status_code=503, detail="未配置向量服务（请设置 QDRANT_URL 与 OPENAI_API_KEY）")
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM apis WHERE project_id = ?", (project_id,))
+    n = (cursor.fetchone() or (0,))[0]
+    conn.close()
+    await _sync_project_apis_to_vector(project_id)
+    return {"success": True, "message": f"已同步 {n} 个 API 到向量库", "count": n}
+
+
 @app.post("/api/v1/projects/{project_id}/environments")
 async def save_environment(project_id: str, env: EnvironmentBase):
     conn = sqlite3.connect(DB_PATH)
@@ -1608,16 +1679,25 @@ def _rank_apis_by_intent(all_apis: List[Dict], nlu_result: Any) -> List[Dict]:
                 intent_text += " " + str(e.get("name", ""))
             elif isinstance(e, str):
                 intent_text += " " + e
-    # 领域关键词：开关台完整流程常包含的步骤，确保这些接口优先
+    # 领域关键词 + 中英/业务同义词，便于 path 为英文时也能命中（如 点单 -> order, 立结 -> pay）
     domain_keywords = ["开台", "关台", "清扫", "开关台", "收银", "完整流程", "open", "close", "clean", "cleanup", "session"]
+    synonym_map = {
+        "点单": ["点单", "order", "additional-order", "点单立结"],
+        "立结": ["立结", "pay", "settle", "additional-order-pay"],
+        "订单": ["订单", "order"],
+        "加单": ["加单", "additional", "order"],
+    }
     keywords = set()
     for w in domain_keywords:
         keywords.add(w)
     # 从意图和动作中提取词（简单按空格/逗号分，以及 2~4 字连续子串避免漏词）
-    for part in (intent_text + " " + " ".join(str(a) for a in actions_list)).replace("，", " ").replace(",", " ").split():
+    raw_parts = (intent_text + " " + " ".join(str(a) for a in actions_list)).replace("，", " ").replace(",", " ").split()
+    for part in raw_parts:
         part = (part or "").strip()
         if len(part) >= 2:
             keywords.add(part)
+            for syn in synonym_map.get(part, []):
+                keywords.add(syn)
         if len(part) >= 4:
             for i in range(len(part) - 2):
                 keywords.add(part[i : i + 3])
@@ -1828,17 +1908,62 @@ async def generate_case(scenario_id: int):
         if not row: raise HTTPException(status_code=404, detail="场景不存在")
         scenario = dict(row)
         
-        # 2. 获取项目下全部 API，按意图关键词排序（未使用向量或知识图谱，仅用 path/summary/description 与意图文本的关键词匹配打分排序）
+        # 2. 检索 API：优先向量语义检索，未配置或无结果时退化为关键词排序
         cursor.execute("""
-            SELECT path, method, summary, description, base_url, parameters, request_body, headers
+            SELECT id, path, method, summary, description, base_url, parameters, request_body, headers
             FROM apis 
             WHERE project_id = ?
         """, (scenario["project_id"],))
         rows_apis = cursor.fetchall()
         all_apis = [dict(row) for row in rows_apis]
-        ranked_apis = _rank_apis_by_intent(all_apis, scenario.get("nlu_result"))
-        # 传入 AI 的 API 数量放宽到 80，且已按意图排序，清扫等接口会优先在内
-        apis_for_prompt = ranked_apis[:80]
+        apis_for_prompt = []
+        project_id_str = str(scenario["project_id"] or "")
+        # 构建检索查询文本（意图 + 用户描述）
+        _nlu = scenario.get("nlu_result")
+        if isinstance(_nlu, str):
+            try:
+                _nlu = json.loads(_nlu) if _nlu else {}
+            except Exception:
+                _nlu = {}
+        query_parts = [scenario.get("natural_language_input") or "", (_nlu or {}).get("intent") or ""]
+        query_parts.extend((_nlu or {}).get("actions") or [])
+        query_text = " ".join(str(x) for x in query_parts if x).strip() or "测试场景"
+        if _vector_service and getattr(_vector_service, "enabled", False):
+            hits = await _vector_service.semantic_search(
+                query=query_text,
+                filter_type="api",
+                project_id=project_id_str,
+                limit=50,
+            )
+            if hits:
+                api_ids = [h["payload"].get("api_id") for h in hits if h.get("payload")]
+                if api_ids:
+                    placeholders = ",".join("?" * len(api_ids))
+                    cursor.execute(
+                        f"SELECT id, path, method, summary, description, base_url, parameters, request_body, headers FROM apis WHERE id IN ({placeholders})",
+                        api_ids,
+                    )
+                    by_id = {dict(r)["id"]: dict(r) for r in cursor.fetchall()}
+                    apis_for_prompt = [by_id[i] for i in api_ids if i in by_id]
+            if not apis_for_prompt and all_apis:
+                await _sync_project_apis_to_vector(project_id_str)
+                hits = await _vector_service.semantic_search(query=query_text, filter_type="api", project_id=project_id_str, limit=50)
+                if hits:
+                    api_ids = [h["payload"].get("api_id") for h in hits if h.get("payload")]
+                    if api_ids:
+                        placeholders = ",".join("?" * len(api_ids))
+                        cursor.execute(
+                            f"SELECT id, path, method, summary, description, base_url, parameters, request_body, headers FROM apis WHERE id IN ({placeholders})",
+                            api_ids,
+                        )
+                        by_id = {dict(r)["id"]: dict(r) for r in cursor.fetchall()}
+                        apis_for_prompt = [by_id[i] for i in api_ids if i in by_id]
+        if not apis_for_prompt:
+            ranked_apis = _rank_apis_by_intent(all_apis, scenario.get("nlu_result"))
+            apis_for_prompt = ranked_apis[:80]
+        # 兜底：若项目有 API 但检索仍为空（如 path 纯英文、描述与描述不一致），则传入全部 API 让模型自己选
+        if not apis_for_prompt and all_apis:
+            apis_for_prompt = all_apis[:80]
         
         # 3. AI 编排 (增强版 - 智能识别参数依赖)
         # 原始逻辑：意图 + 可用 API 列表（原为 all_apis[:50]），由模型按规则生成 steps；规则 1～6 为依赖/鉴权/格式等，不写死具体业务步骤。
@@ -1864,7 +1989,7 @@ async def generate_case(scenario_id: int):
         if not steps or not isinstance(steps, list):
             raise HTTPException(
                 status_code=500,
-                detail="生成失败：未得到任何测试步骤。请检查场景描述是否与项目内 API 匹配（当前按项目下 API 的 path/summary/description 做关键词匹配，未使用向量或知识图谱），或换一种描述重试。"
+                detail="生成失败：未得到任何测试步骤。请检查场景描述是否与项目内 API 匹配（已启用向量语义检索与关键词兜底），或换一种描述重试。"
             )
         if len(steps) == 0:
             raise HTTPException(

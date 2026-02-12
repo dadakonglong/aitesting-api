@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Plus, Edit2, Trash2, FolderOpen, Settings, Download, Upload } from 'lucide-react'
+import { Plus, Edit2, Trash2, FolderOpen, Settings, Download, Upload, RefreshCw } from 'lucide-react'
 
 interface Project {
     id: string
@@ -19,6 +19,7 @@ export default function ProjectManagementTab() {
         description: ''
     })
     const [importLoading, setImportLoading] = useState(false)
+    const [syncVectorProjectId, setSyncVectorProjectId] = useState<string | null>(null)
 
     const handleExport = async (project: Project) => {
         try {
@@ -141,6 +142,23 @@ export default function ProjectManagementTab() {
             }
         } catch (error) {
             console.error('删除项目失败:', error)
+        }
+    }
+
+    const handleSyncVector = async (projectId: string) => {
+        setSyncVectorProjectId(projectId)
+        try {
+            const res = await fetch(
+                `${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/projects/${encodeURIComponent(projectId)}/sync-vector`,
+                { method: 'POST' }
+            )
+            const data = await res.json().catch(() => ({}))
+            if (res.ok) alert(data.message || '已同步到向量库')
+            else alert(data.detail || '同步失败（未配置向量服务会返回 503）')
+        } catch (e: any) {
+            alert(e.message || '同步失败')
+        } finally {
+            setSyncVectorProjectId(null)
         }
     }
 
@@ -333,7 +351,7 @@ export default function ProjectManagementTab() {
                         <p style={{ color: '#6B7280', fontSize: '0.875rem', marginBottom: '1rem', minHeight: '2.5rem' }}>
                             {project.description || '暂无描述'}
                         </p>
-                        <div style={{ display: 'flex', gap: '0.5rem' }}>
+                        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                             <button
                                 onClick={() => window.location.href = `/environments?project=${project.id}`}
                                 style={{
@@ -354,6 +372,27 @@ export default function ProjectManagementTab() {
                             >
                                 <Settings size={16} />
                                 管理
+                            </button>
+                            <button
+                                onClick={(e) => { e.stopPropagation(); handleSyncVector(project.id) }}
+                                disabled={syncVectorProjectId === project.id}
+                                title="将该项目下所有 API 同步到向量库"
+                                style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    gap: '0.25rem',
+                                    padding: '0.5rem',
+                                    background: syncVectorProjectId === project.id ? '#D1FAE5' : '#ECFDF5',
+                                    color: '#059669',
+                                    border: '1px solid #10B981',
+                                    borderRadius: '0.375rem',
+                                    cursor: syncVectorProjectId === project.id ? 'not-allowed' : 'pointer',
+                                    fontSize: '0.875rem'
+                                }}
+                            >
+                                <RefreshCw size={16} className={syncVectorProjectId === project.id ? 'animate-spin' : ''} />
+                                {syncVectorProjectId === project.id ? '同步中' : '向量'}
                             </button>
                             <button
                                 onClick={() => handleExport(project)}

@@ -22,15 +22,21 @@ import logging
 logger = logging.getLogger(__name__)
 
 class VectorService:
-    def __init__(self, qdrant_url: str, openai_api_key: str):
+    def __init__(self, qdrant_url: str, openai_api_key: str, qdrant_api_key: Optional[str] = None, openai_base_url: Optional[str] = None):
         self.enabled = False
         if QdrantClient is None:
             logger.warning("QdrantClient库未安装，向量服务将不可用。请安装 qdrant-client。")
             return
 
         try:
-            self.qdrant = QdrantClient(url=qdrant_url)
-            self.openai = AsyncOpenAI(api_key=openai_api_key)
+            kwargs = {"url": qdrant_url}
+            if qdrant_api_key:
+                kwargs["api_key"] = qdrant_api_key
+            self.qdrant = QdrantClient(**kwargs)
+            client_kwargs = {"api_key": openai_api_key}
+            if openai_base_url:
+                client_kwargs["base_url"] = openai_base_url
+            self.openai = AsyncOpenAI(**client_kwargs)
             self.collection_name = "api_knowledge"
             self.embedding_model = "text-embedding-3-small"
             self.embedding_dim = 1536
@@ -69,16 +75,16 @@ class VectorService:
             return []
     
     async def index_api(self, api: Dict):
-        """索引API"""
+        """索引API（api 可含 name 或 summary，id 可为 int）"""
         if not self.enabled: return
         
         try:
-            text = self._build_api_text(api)
+            name = api.get('name') or api.get('summary', '')
+            text = self._build_api_text({**api, "name": name})
             vector = await self.embed_text(text)
             if not vector: return
 
-            point_id = self._generate_id(api['id'])
-            
+            point_id = self._generate_id(str(api['id']))
             self.qdrant.upsert(
                 collection_name=self.collection_name,
                 points=[
@@ -88,12 +94,12 @@ class VectorService:
                         payload={
                             "type": "api",
                             "api_id": api['id'],
-                            "name": api['name'],
-                            "path": api['path'],
-                            "method": api['method'],
+                            "name": name,
+                            "path": api.get('path', ''),
+                            "method": api.get('method', ''),
                             "description": api.get('description', ''),
                             "tags": api.get('tags', []),
-                            "project_id": api.get('project_id', ''),
+                            "project_id": str(api.get('project_id', '')),
                         }
                     )
                 ]
@@ -101,81 +107,6 @@ class VectorService:
         except Exception as e:
             logger.error(f"Index API failed: {e}")
     
-    async def index_test_case(self, test_case: Dict):
-        """索引测试用例"""
-        text = self._build_test_case_text(test_case)
-        vector = await self.embed_text(text)
-        point_id = self._generate_id(test_case['id'])
-        
-        self.qdrant.upsert(
-            collection_name=self.collection_name,
-            points=[
-                PointStruct(
-                    id=point_id,
-                    vector=vector,
-                    payload={
-                        "type": "test_case",
-                        "test_case_id": test_case['id'],
-                        "name": test_case['name'],
-                        "description": test_case.get('description', ''),
-                        "project_id": test_case.get('project_id', ''),
-                    }
-                )
-            ]
-        )
-    
-    async def index_scenario(self, scenario: Dict):
-        """索引场景"""
-        text = self._build_scenario_text(scenario)
-        vector = await self.embed_text(text)
-        point_id = self._generate_id(scenario['id'])
-        
-        self.qdrant.upsert(
-            collection_name=self.collection_name,
-            points=[
-                PointStruct(
-                    id=point_id,
-                    vector=vector,
-                    payload={
-                        "type": "scenario",
-                        "scenario_id": scenario['id'],
-                        "name": scenario['name'],
-                        "description": scenario.get('description', ''),
-                        "project_id": scenario.get('project_id', ''),
-                    }
-                )
-            ]
-        )
-    
-    async def semantic_search(
-        self,
-        query: str,
-        limit: int = 10,
-        filter_type: Optional[str] = None,
-        project_id: Optional[str] = None
-    ) -> List[Dict]:
-        """语义搜索"""
-        query_vector = await self.embed_text(query)
-        
-        must_conditions = []
-        if filter_type:
-            must_conditions.append(
-                FieldCondition(key="type", match=MatchValue(value=filter_type))
-            )
-        if project_id:
-            must_conditions.append(
-                FieldCondition(key="project_id", match=MatchValue(value=project_id))
-            )
-        
-        search_filter = Filter(must=must_conditions) if must_conditions else None
-        
-        results = self.qdrant.search(
-            collection_name=self.collection_name,
-            query_vector=query_vector,
-            limit=limit,
-            query_filter=search_filter
-        )
-        
     async def index_test_case(self, test_case: Dict):
         """索引测试用例"""
         if not self.enabled: return
@@ -275,11 +206,12 @@ class VectorService:
             return []
     
     def _build_api_text(self, api: Dict) -> str:
-        """构建API文本描述"""
+        """构建API文本描述（name 可为 name 或 summary）"""
+        name = api.get('name') or api.get('summary', '')
         parts = [
-            f"接口名称: {api['name']}",
-            f"请求方法: {api['method']}",
-            f"路径: {api['path']}",
+            f"接口: {name}",
+            f"方法: {api.get('method', '')}",
+            f"路径: {api.get('path', '')}",
         ]
         if api.get('description'):
             parts.append(f"描述: {api['description']}")
@@ -299,9 +231,9 @@ class VectorService:
             parts.append(f"描述: {scenario['description']}")
         return "\n".join(parts)
     
-    def _generate_id(self, item_id: str) -> str:
-        """生成向量点ID"""
-        return hashlib.md5(item_id.encode()).hexdigest()
+    def _generate_id(self, item_id) -> str:
+        """生成向量点ID（接受 int 或 str）"""
+        return hashlib.md5(str(item_id).encode()).hexdigest()
     
     def list_apis(self, project_id: Optional[str] = None, limit: int = 100) -> List[Dict]:
         """获取所有已索引的API列表"""

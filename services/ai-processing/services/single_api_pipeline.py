@@ -382,13 +382,32 @@ async def requirement_understanding(
     user_input: str,
     project_id: str,
     db_path: str,
+    vector_service: Any = None,
 ) -> Dict[str, Any]:
     """
-    阶段 1（接口分析）：RAG 检索 + 大模型结构化分析，仅分析当前目标接口；相关接口可列出但不分析。
+    阶段 1（接口分析）：优先向量语义检索，否则关键词 RAG 检索 + 大模型结构化分析。
     返回：entities, relationships, chunks, api_candidates, intent
     """
-    # 1) 从知识库检索（综合检索 mix 模式，增强关键词 + 补全，便于命中「手机登录」等）
-    api_candidates = rag_query_data(db_path, project_id, user_input, limit=10, mode="mix")
+    # 1) 检索相关 API：优先向量语义检索，无结果时用关键词 mix 模式
+    api_candidates = []
+    if vector_service and getattr(vector_service, "enabled", False):
+        try:
+            hits = await vector_service.semantic_search(
+                query=user_input,
+                filter_type="api",
+                project_id=str(project_id),
+                limit=10,
+            )
+            if hits:
+                api_ids = [h["payload"].get("api_id") for h in hits if h.get("payload")]
+                if api_ids:
+                    all_apis = _load_apis_from_db(db_path, project_id, limit=None)
+                    by_id = {a["id"]: a for a in all_apis}
+                    api_candidates = [by_id[i] for i in api_ids if i in by_id]
+        except Exception as e:
+            _log(f"Vector retrieval failed, fallback to keyword: {e}")
+    if not api_candidates:
+        api_candidates = rag_query_data(db_path, project_id, user_input, limit=10, mode="mix")
     if not api_candidates:
         # 无数据时仍调用大模型做意图理解
         user_prompt = f"用户描述：{user_input}\n\n知识库中未检索到匹配的 API 接口。请根据用户描述推断意图，并返回 JSON：entities（至少一项未识别接口）、relationships、chunks（说明未找到接口）。"

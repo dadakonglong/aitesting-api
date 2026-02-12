@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Database, Search, Tag, ChevronDown, ChevronUp, Info, Trash2, Play, CheckCircle, XCircle, Globe, Plus, Code, Edit2 } from 'lucide-react'
+import { Database, Search, Tag, ChevronDown, ChevronUp, Info, Trash2, Play, CheckCircle, XCircle, Globe, Plus, Code, Edit2, RefreshCw } from 'lucide-react'
 import { useProject } from '../contexts/ProjectContext'
 
 interface API {
@@ -66,6 +66,7 @@ export default function APIListContent() {
     const [stressTestRunning, setStressTestRunning] = useState(false)
     const [stressTestResult, setStressTestResult] = useState<any>(null)
     const [expandedRequests, setExpandedRequests] = useState<Set<number>>(new Set())
+    const [syncVectorLoading, setSyncVectorLoading] = useState(false)
 
     useEffect(() => {
         fetchAPIs()
@@ -473,6 +474,43 @@ export default function APIListContent() {
                         >
                             <Plus size={18} />
                             手动添加接口
+                        </button>
+                        <button
+                            onClick={async () => {
+                                if (!currentProject) { alert('请先选择项目'); return }
+                                setSyncVectorLoading(true)
+                                try {
+                                    const res = await fetch(
+                                        `${process.env.NEXT_PUBLIC_AI_API_URL}/api/v1/projects/${encodeURIComponent(currentProject)}/sync-vector`,
+                                        { method: 'POST' }
+                                    )
+                                    const data = await res.json().catch(() => ({}))
+                                    if (res.ok) alert(data.message || '已同步到向量库')
+                                    else alert(data.detail || '同步失败')
+                                } catch (e: any) {
+                                    alert(e.message || '同步失败')
+                                } finally {
+                                    setSyncVectorLoading(false)
+                                }
+                            }}
+                            disabled={syncVectorLoading}
+                            title="将当前项目下所有 API 同步到向量库，用于场景/接口语义检索"
+                            style={{
+                                padding: '0.75rem 1rem',
+                                border: '1px solid #10B981',
+                                borderRadius: '0.75rem',
+                                background: syncVectorLoading ? '#D1FAE5' : '#ECFDF5',
+                                color: '#059669',
+                                cursor: syncVectorLoading ? 'not-allowed' : 'pointer',
+                                fontSize: '0.875rem',
+                                fontWeight: '500',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '0.5rem'
+                            }}
+                        >
+                            <RefreshCw size={18} className={syncVectorLoading ? 'animate-spin' : ''} />
+                            {syncVectorLoading ? '同步中...' : '同步到向量库'}
                         </button>
                         <Globe size={18} style={{ color: '#6B7280' }} />
                         <select
