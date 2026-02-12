@@ -132,6 +132,7 @@ function formatAgentSummary(result: any): string {
     // Executor Agent
     const r4 = result.phase4_result
     lines.push('执行测试...')
+    lines.push('   ✓ 自动解析前置依赖（KG + AI）')
     if (r4) {
         const total = r4.total_cases ?? 0
         const passed = r4.passed_cases ?? 0

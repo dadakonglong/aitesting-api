@@ -60,6 +60,313 @@ app.add_middleware(
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DB_PATH = os.path.join(BASE_DIR, "data/apis.db")
 
+# ============= 自动依赖链 (KG + AI) =============
+
+DEP_ANALYSIS_PROMPT = """你是接口依赖分析专家。
+给定目标接口信息和从知识图谱检索出的关联接口列表，请分析目标接口的**前置依赖**。
+
+## 场景示例
+- 场景1：目标接口是"下单"，关联接口有"登录"、"获取房间"。分析结果应为：[登录, 获取房间]。
+- 场景2：目标接口是"登录"或"注册"。分析结果应为：[] (无依赖)。
+- 场景3：目标接口包含 Authorization 头。分析结果应包含：[登录]。
+
+## 规则
+1. ** Authorization 依赖**：如果目标接口需要 Authorization/token，必须找出能提供 token 的登录/认证类接口。
+2. **业务参数依赖**：如果目标的 params/body 中包含动态 ID (如 sessionId, orderId)，找出返回值中包含这些字段的接口。
+3. **跳过自身**：如果目标接口本身是登录/认证类，不要添加任何前置依赖。
+4. **最大深度**：依赖链包含目标接口在内总长度不超过 3。
+5. **提取路径**：常见的 token 提取路径为 data.token, token, data.accessToken。sessionId 提取路径通常为 data.sessionId。
+
+请以 JSON 格式返回，严禁使用 markdown 代码块包裹：
+{
+  "needs_deps": true,
+  "reason": "执行下单前需要先登录获取 token，并获取房间 ID",
+  "dependency_chain": [
+    {
+      "api_path": "/api/v1/login",
+      "api_method": "POST",
+      "reason": "获取 token",
+      "provides": [
+        {"from_field": "data.token", "to_field": "Authorization", "to_type": "headers", "prefix": "Bearer "}
+      ]
+    },
+    {
+       "api_path": "/api/v3/room/list",
+       "api_method": "GET",
+       "reason": "获取第一个可用房间的 roomId",
+       "provides": [
+         {"from_field": "data[0].id", "to_field": "roomId", "to_type": "params"}
+       ]
+    }
+  ]
+}
+如果无需依赖，返回 {"needs_deps": false, "reason": "接口可独立执行", "dependency_chain": []}
+"""
+
+# 全局依赖缓存：(project_id, method, path) -> dependency_chain
+_DEP_CACHE = {}
+
+
+async def _resolve_dependencies(
+    steps: List[Dict],
+    plan: Dict,
+    project_id: str,
+    db_path: str,
+    ai_client: Any,
+) -> List[Dict]:
+    """
+    自动依赖解析逻辑：
+    1. 提取目标接口特征
+    2. RAG 检索关联接口 (Knowledge Graph)
+    3. AI 分析依赖链
+    4. 构建前置步骤并配置映射
+    """
+    import os as _os
+    _dep_log = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "dep_debug.log")
+    
+    def _dlog(msg):
+        try:
+            with open(_dep_log, "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.now()}] {msg}\n")
+        except:
+            pass
+        print(f"DEP_DEBUG: {msg}")
+    
+    if not steps:
+        _dlog("steps 为空，跳过依赖分析")
+        return steps
+    
+    target_step = steps[0]
+    method = target_step.get("api_method", "GET").upper()
+    path = target_step.get("api_path", "")
+    
+    _dlog(f"开始依赖分析: {method} {path}, steps数量={len(steps)}")
+    
+    # 1. 检查缓存
+    cache_key = (project_id, method, path)
+    if cache_key in _DEP_CACHE:
+        _dlog(f"命中依赖缓存: {cache_key}, chain长度={len(_DEP_CACHE[cache_key])}")
+        return _apply_dep_chain(steps, _DEP_CACHE[cache_key], project_id, db_path)
+
+    # 2. 如果是登录相关接口，直接跳过
+    login_keywords = ["login", "signin", "auth", "token", "verify-code", "register"]
+    if any(k in path.lower() for k in login_keywords):
+        _dlog(f"登录类接口，跳过依赖分析: {path}")
+        return steps
+
+    # 3. RAG 检索
+    summary = target_step.get("summary", "")
+    query = f"{method} {path} {summary}"
+    _dlog(f"RAG 检索关键词: {query}")
+    
+    try:
+        # ★ 多查询词策略：扩大检索范围，找到更多潜在依赖
+        queries = [query]  # 原始查询
+        params_keys = list((target_step.get("params") or {}).keys())
+        has_auth_header = any("auth" in k.lower() for k in (target_step.get("headers") or {}).keys())
+        has_auth_param = any("token" in k.lower() for k in params_keys)
+        has_session = any("session" in k.lower() for k in params_keys)
+        has_order = any("order" in k.lower() or "booking" in k.lower() for k in params_keys)
+        
+        # 根据目标接口特征，添加额外的语义查询
+        if has_auth_header or has_auth_param:
+            queries.append("登录 认证 token 鉴权 auth login")
+            _dlog("检测到需要鉴权，添加查询: 登录 认证 token")
+            
+        if has_session:
+            queries.append("开台 创建会话 session 房间")
+            _dlog("检测到需要 session，添加查询: 开台 创建会话")
+            
+        if has_order:
+            queries.append("订单 预订 booking order")
+            _dlog("检测到需要 order，添加查询: 订单 预订")
+        
+        # 执行多次查询并合并结果
+        all_related = []
+        for q in queries:
+            _dlog(f"执行 RAG 查询: {q}")
+            apis = rag_query_data(db_path, project_id, query=q, limit=10, mode="mix")
+            all_related.extend(apis)
+            _dlog(f"  返回 {len(apis)} 个接口")
+        
+        # 去重（按 id）
+        seen_ids = set()
+        related_apis = []
+        for api in all_related:
+            api_id = api.get("id")
+            if api_id and api_id not in seen_ids:
+                seen_ids.add(api_id)
+                related_apis.append(api)
+        
+        _dlog(f"合并去重后共 {len(related_apis)} 个关联接口")
+        
+        if not related_apis:
+            _dlog("未检索到任何关联接口，跳过依赖分析")
+            return steps
+            
+        api_list_for_ai = []
+        for ra in related_apis:
+            api_list_for_ai.append({
+                "path": ra.get("path"),
+                "method": ra.get("method"),
+                "summary": ra.get("summary")
+            })
+        _dlog(f"传给 AI 的接口列表: {json.dumps(api_list_for_ai, ensure_ascii=False)}")
+            
+        # 为 AI 准备目标接口信息（只传字段名，不传完整值，避免超 token）
+        params_keys = list((target_step.get("params") or {}).keys())
+        headers_keys = list((target_step.get("headers") or {}).keys())
+        target_info = {
+            "path": path,
+            "method": method,
+            "summary": summary,
+            "headers_keys": headers_keys,
+            "params_keys": params_keys,
+            "has_authorization": any("auth" in k.lower() for k in headers_keys),
+        }
+        
+        user_prompt = f"## 目标接口\n{json.dumps(target_info, ensure_ascii=False, indent=2)}\n\n## 关联接口列表\n{json.dumps(api_list_for_ai, ensure_ascii=False, indent=2)}"
+        _dlog(f"AI 提示词长度: {len(user_prompt)} 字符")
+        
+        dep_res = await ai_client.chat(DEP_ANALYSIS_PROMPT, user_prompt)
+        _dlog(f"AI 返回结果: {json.dumps(dep_res, ensure_ascii=False)}")
+        
+        if not dep_res or not dep_res.get("needs_deps"):
+            _dlog(f"AI 判定无需依赖: {dep_res.get('reason', 'N/A')}")
+            return steps
+            
+        chain = dep_res.get("dependency_chain") or []
+        _dlog(f"AI 解析出 {len(chain)} 个前置依赖: {json.dumps(chain, ensure_ascii=False)}")
+        _DEP_CACHE[cache_key] = chain
+        
+        result = _apply_dep_chain(steps, chain, project_id, db_path)
+        _dlog(f"依赖链构建完成，最终 steps 数量: {len(result)} (原始: {len(steps)})")
+        return result
+        
+    except Exception as e:
+        _dlog(f"依赖分析异常: {e}")
+        import traceback
+        traceback.print_exc()
+        return steps
+
+
+def _apply_dep_chain(target_steps: List[Dict], chain: List[Dict], project_id: str, db_path: str) -> List[Dict]:
+    """将 AI 解析出的依赖链转化为真实的执行步骤"""
+    import os as _os
+    _dep_log = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "dep_debug.log")
+    def _dlog(msg):
+        try:
+            with open(_dep_log, "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.now()}] APPLY_CHAIN: {msg}\n")
+        except:
+            pass
+        print(f"DEP_DEBUG APPLY: {msg}")
+    
+    if not chain:
+        return target_steps
+        
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    new_steps = []
+    step_order_ptr = 1
+    path_to_step_index = {}
+
+    for dep in chain:
+        d_path = dep.get("api_path")
+        d_method = dep.get("api_method", "POST").upper()
+        
+        _dlog(f"查找依赖接口: {d_method} {d_path}")
+        
+        # 先精确匹配
+        cursor.execute(
+            "SELECT request_body, base_url, headers FROM apis WHERE project_id = ? AND path = ? AND method = ?",
+            (project_id, d_path, d_method)
+        )
+        row = cursor.fetchone()
+        
+        # 如果精确匹配失败，尝试模糊匹配（path 包含关键部分）
+        if not row and d_path:
+            path_part = d_path.rstrip("/").split("/")[-1]  # 取最后一段
+            cursor.execute(
+                "SELECT request_body, base_url, headers, path, method FROM apis WHERE project_id = ? AND path LIKE ? AND method = ?",
+                (project_id, f"%{path_part}%", d_method)
+            )
+            row = cursor.fetchone()
+            if row:
+                _dlog(f"精确匹配失败，模糊匹配到: {row['method']} {row['path']}")
+                d_path = row["path"]  # 更新为真实路径
+        
+        if not row:
+            _dlog(f"数据库中未找到依赖接口: {d_method} {d_path}，跳过")
+            continue
+            
+        try:
+            req_body = json.loads(row["request_body"] or "{}")
+        except:
+            req_body = {}
+        
+        try:
+            headers = json.loads(row["headers"] or "{}")
+        except:
+            headers = {}
+            
+        step = {
+            "step_order": step_order_ptr,
+            "api_path": d_path,
+            "api_method": d_method,
+            "params": req_body,
+            "headers": headers,
+            "base_url": row["base_url"] or "",
+            "param_mappings": [],
+            "description": f"[前置依赖] {dep.get('reason', '')}"
+        }
+        _dlog(f"创建依赖步骤 step_order={step_order_ptr}: {d_method} {d_path}, params字段={list(req_body.keys())[:5]}")
+        new_steps.append(step)
+        path_to_step_index[(d_method, d_path)] = step_order_ptr
+        step_order_ptr += 1
+        
+    conn.close()
+    
+    if not new_steps:
+        _dlog("未能创建任何依赖步骤（全部未在数据库中找到）")
+        return target_steps
+        
+    # 为后续步骤打补丁：如果是目标接口，注入 param_mappings
+    # 注意：前面的依赖步骤也可能相互依赖，这里简单处理：目标步骤依赖所有前置
+    for ts in target_steps:
+        ts["step_order"] = step_order_ptr
+        step_order_ptr += 1
+        
+        if "param_mappings" not in ts or not isinstance(ts["param_mappings"], list):
+            ts["param_mappings"] = []
+            
+        # 遍历 AI 链，找到 provides 加入 mapping
+        for dep in chain:
+            d_key = (dep.get("api_method", "POST").upper(), dep.get("api_path"))
+            from_step = path_to_step_index.get(d_key)
+            if not from_step:
+                continue
+            
+            for prov in dep.get("provides") or []:
+                # 避免重复
+                exists = any(
+                    m.get("to_field") == prov.get("to_field") and m.get("to_type") == prov.get("to_type")
+                    for m in ts["param_mappings"]
+                )
+                if not exists:
+                    ts["param_mappings"].append({
+                        "from_step": from_step,
+                        "from_field": prov.get("from_field"),
+                        "to_field": prov.get("to_field"),
+                        "to_type": prov.get("to_type", "headers"),
+                        "prefix": prov.get("prefix", "")
+                    })
+                    
+    return new_steps + target_steps
+
+
 # ============= 模型适配层 =============
 
 from openai import AsyncOpenAI
@@ -1065,6 +1372,11 @@ async def single_api_execute(req: SingleApiExecuteRequest):
                 detail="计划中无可用用例（endpoints 中无 cases）。请重新在「AI生成」中生成接口用例后再执行。",
             )
 
+        # ★ 自动依赖解析：检测前置依赖并插入（KG + AI）
+        steps = await _resolve_dependencies(
+            steps, req.plan, req.project_id, DB_PATH, ai_client
+        )
+
         start_ts = datetime.now()
         step_results = await _run_steps(steps, base_url)
         duration_ms = int((datetime.now() - start_ts).total_seconds() * 1000)
@@ -1177,6 +1489,10 @@ async def single_api_full_pipeline(req: SingleApiFullPipelineRequest):
             if base_url:
                 steps = _single_api_plan_to_steps(plan_payload)
                 if steps:
+                    # ★ 自动依赖解析（KG + AI）
+                    steps = await _resolve_dependencies(
+                        steps, plan_payload, req.project_id, DB_PATH, ai_client
+                    )
                     start_ts = datetime.now()
                     step_results = await _run_steps(steps, base_url)
                     duration_ms = int((datetime.now() - start_ts).total_seconds() * 1000)
@@ -1269,6 +1585,57 @@ async def list_scenarios():
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+def _rank_apis_by_intent(all_apis: List[Dict], nlu_result: Any) -> List[Dict]:
+    """按业务意图对 API 排序，使与意图相关的接口（如开台、关台、清扫）优先进入编排，避免被截断遗漏。"""
+    if not all_apis:
+        return all_apis
+    # 解析意图文本与动作
+    intent_text = ""
+    actions_list = []
+    if isinstance(nlu_result, str):
+        try:
+            nlu_result = json.loads(nlu_result) if nlu_result else {}
+        except Exception:
+            nlu_result = {}
+    if isinstance(nlu_result, dict):
+        intent_text = (nlu_result.get("intent") or "") + " " + (nlu_result.get("natural_language_input") or "")
+        actions_list = nlu_result.get("actions") or []
+        if isinstance(actions_list, str):
+            actions_list = [actions_list]
+        for e in (nlu_result.get("entities") or [])[:20]:
+            if isinstance(e, dict) and e.get("name"):
+                intent_text += " " + str(e.get("name", ""))
+            elif isinstance(e, str):
+                intent_text += " " + e
+    # 领域关键词：开关台完整流程常包含的步骤，确保这些接口优先
+    domain_keywords = ["开台", "关台", "清扫", "开关台", "收银", "完整流程", "open", "close", "clean", "cleanup", "session"]
+    keywords = set()
+    for w in domain_keywords:
+        keywords.add(w)
+    # 从意图和动作中提取词（简单按空格/逗号分，以及 2~4 字连续子串避免漏词）
+    for part in (intent_text + " " + " ".join(str(a) for a in actions_list)).replace("，", " ").replace(",", " ").split():
+        part = (part or "").strip()
+        if len(part) >= 2:
+            keywords.add(part)
+        if len(part) >= 4:
+            for i in range(len(part) - 2):
+                keywords.add(part[i : i + 3])
+    keywords = [k for k in keywords if k and len(k) >= 2]
+    if not keywords:
+        return all_apis[:80]
+    # 对每个 API 打分：path + summary + description 中命中关键词次数
+    def score(api: Dict) -> int:
+        text = " ".join(
+            str(api.get(k, ""))
+            for k in ("path", "method", "summary", "description")
+            if api.get(k)
+        ).lower()
+        return sum(1 for kw in keywords if kw.lower() in text or kw in text)
+    scored = [(score(api), api) for api in all_apis]
+    scored.sort(key=lambda x: (-x[0], x[1].get("path", "")))
+    return [api for _, api in scored]
+
 
 @app.post("/api/v1/scenarios/{scenario_id}/generate-case")
 async def generate_case(scenario_id: int):
@@ -1455,12 +1822,13 @@ async def generate_case(scenario_id: int):
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
-        # 1. 获取场景信息
+        # 1. 获取场景信息（转为 dict，避免 sqlite3.Row 无 .get() 导致报错）
         cursor.execute("SELECT * FROM scenarios WHERE id = ?", (scenario_id,))
-        scenario = cursor.fetchone()
-        if not scenario: raise HTTPException(status_code=404, detail="场景不存在")
+        row = cursor.fetchone()
+        if not row: raise HTTPException(status_code=404, detail="场景不存在")
+        scenario = dict(row)
         
-        # 2. RAG: 简易语义检索 (包含完整参数和请求体以供 AI 精准识别)
+        # 2. 获取项目下全部 API，按意图关键词排序（未使用向量或知识图谱，仅用 path/summary/description 与意图文本的关键词匹配打分排序）
         cursor.execute("""
             SELECT path, method, summary, description, base_url, parameters, request_body, headers
             FROM apis 
@@ -1468,8 +1836,12 @@ async def generate_case(scenario_id: int):
         """, (scenario["project_id"],))
         rows_apis = cursor.fetchall()
         all_apis = [dict(row) for row in rows_apis]
+        ranked_apis = _rank_apis_by_intent(all_apis, scenario.get("nlu_result"))
+        # 传入 AI 的 API 数量放宽到 80，且已按意图排序，清扫等接口会优先在内
+        apis_for_prompt = ranked_apis[:80]
         
         # 3. AI 编排 (增强版 - 智能识别参数依赖)
+        # 原始逻辑：意图 + 可用 API 列表（原为 all_apis[:50]），由模型按规则生成 steps；规则 1～6 为依赖/鉴权/格式等，不写死具体业务步骤。
         system_prompt = """你是个资深自动化专家。任务：根据【业务意图】和【API列表】，生成 JSON 测试步骤。
 关键规则：
 1. 必须识别依赖：若 A 返回 data.token，B 需使用，则配置 param_mappings。
@@ -1478,18 +1850,32 @@ async def generate_case(scenario_id: int):
 4. 第一步通常无依赖：第一个步骤（通常是登录）的param_mappings应该为空[]。
 5. 字段区分：params 放 Body (POST/PUT)，url_params 放 Query String。
 6. 真实数据：生成符合逻辑的姓名、手机号等，不要用 {}。
+7. 完整覆盖：默认编排完整流程，从 API 列表中选出该流程下的全部相关接口，不要遗漏。
+8. 步骤顺序：必须按业务流程的真实先后顺序编排。例如开台(open-pay)→关台(close-room)→清扫(clean-room-finish) 时，清扫必须在关台之后，不能把清扫插在开台和关台之间。先根据业务语义确定正确顺序，再生成 steps。
 格式：{ "scenario_name": "...", "steps": [{ "step_order": 1, "api_path": "...", "api_method": "...", "params": {}, "url_params": {}, "headers": {}, "param_mappings": [{ "from_step": 1, "from_field": "data.token", "to_field": "Authorization", "to_type": "headers" }] }] }"""
         
-        user_prompt = f"意图: {scenario['nlu_result']}\n可用 API: {json.dumps(all_apis[:50])}" 
+        user_prompt = f"意图: {scenario['nlu_result']}\n可用 API: {json.dumps(apis_for_prompt)}" 
         case_result = await ai_client.chat(system_prompt, user_prompt)
+
+        # 校验：模型必须返回有效步骤，否则不保存、不执行，直接报错
+        if not isinstance(case_result, dict):
+            raise HTTPException(status_code=500, detail="生成失败：模型返回格式异常，请稍后重试")
+        steps = case_result.get("steps")
+        if not steps or not isinstance(steps, list):
+            raise HTTPException(
+                status_code=500,
+                detail="生成失败：未得到任何测试步骤。请检查场景描述是否与项目内 API 匹配（当前按项目下 API 的 path/summary/description 做关键词匹配，未使用向量或知识图谱），或换一种描述重试。"
+            )
+        if len(steps) == 0:
+            raise HTTPException(
+                status_code=500,
+                detail="生成失败：测试步骤为空。请检查场景描述与项目 API 是否相关，或稍后重试。"
+            )
 
         # 3.5 生成后增强：自动合并 API headers，并补齐动态头映射（避免漏 X-Employee-Id / X-Venue-Id 等）
         try:
-            steps = case_result.get("steps") if isinstance(case_result, dict) else None
-            if isinstance(steps, list):
-                case_result["steps"] = _enhance_steps_with_headers(scenario["project_id"], steps, cursor)
+            case_result["steps"] = _enhance_steps_with_headers(scenario["project_id"], steps, cursor)
         except Exception as _e:
-            # 不阻断主流程：增强失败时仍保存 AI 产物
             print(f"DEBUG: enhance steps headers failed: {str(_e)}")
         
         # 4. 保存测试用例
@@ -1945,7 +2331,12 @@ async def execute_case(req: ExecutionRequest):
             conn.close()
             if not case:
                 raise HTTPException(status_code=404, detail="用例不存在")
-            steps = json.loads(case["steps"])
+            raw = case["steps"]
+            steps = json.loads(raw) if raw else []
+            if steps is None:
+                steps = []
+            if not steps:
+                raise HTTPException(status_code=400, detail="该用例无执行步骤（步骤数为 0），请重新生成用例")
             for i, s in enumerate(steps):
                 if not s.get("step_order"):
                     s["step_order"] = i + 1

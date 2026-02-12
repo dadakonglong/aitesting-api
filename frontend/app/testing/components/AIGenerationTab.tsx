@@ -33,6 +33,10 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
     // 实时进度展示
     const [progressLines, setProgressLines] = useState<string[]>([])
     const progressEndRef = useRef<HTMLDivElement>(null)
+    // 测试场景模式：环境配置（生成后自动执行用）
+    const [scenarioEnvs, setScenarioEnvs] = useState<EnvItem[]>([])
+    const [scenarioSelectedEnvId, setScenarioSelectedEnvId] = useState<number | 'custom' | null>(null)
+    const [scenarioExecBaseUrl, setScenarioExecBaseUrl] = useState('')
 
     // 接口测试模式：加载项目环境
     useEffect(() => {
@@ -85,6 +89,36 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
         localStorage.setItem(key, data)
     }, [currentProject, scenario, singleApiInput, mode])
 
+    // 测试场景模式：加载环境列表（页面上配置，生成后自动执行用）
+    useEffect(() => {
+        if (mode !== 'scenario') return
+        const load = async () => {
+            try {
+                const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/projects/${encodeURIComponent(currentProject)}/environments`)
+                if (!res.ok) return
+                const data = await res.json()
+                const list: EnvItem[] = Array.isArray(data) ? data : []
+                setScenarioEnvs(list)
+                const defaultEnv = list.find((e) => e.is_default === 1) || list[0]
+                if (defaultEnv) {
+                    setScenarioSelectedEnvId(defaultEnv.id)
+                    setScenarioExecBaseUrl(defaultEnv.base_url || '')
+                } else if (list[0]) {
+                    setScenarioSelectedEnvId(list[0].id)
+                    setScenarioExecBaseUrl(list[0].base_url || '')
+                } else {
+                    setScenarioSelectedEnvId(null)
+                    setScenarioExecBaseUrl('')
+                }
+            } catch {
+                setScenarioEnvs([])
+                setScenarioSelectedEnvId(null)
+                setScenarioExecBaseUrl('')
+            }
+        }
+        load()
+    }, [mode, currentProject])
+
     const handleGenerate = async () => {
         if (mode === 'scenario') {
             if (!scenario.trim()) {
@@ -93,7 +127,17 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
             }
             setLoading(true)
             setResult(null)
+            setProgressLines(['开始处理', ''])
+
+            const appendProgress = (...lines: string[]) => {
+                setProgressLines((prev) => [...prev, ...lines])
+                setTimeout(() => progressEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50)
+            }
+
             try {
+                // ---------- 阶段一：创建测试场景 ----------
+                appendProgress('创建测试场景...')
+                appendProgress('   · 理解场景意图（解析意图、实体、动作）...')
                 const scenarioRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/scenarios`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -104,17 +148,96 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                 })
                 if (!scenarioRes.ok) throw new Error('创建场景失败')
                 const scenarioData = await scenarioRes.json()
-                const caseRes = await fetch(
+                appendProgress('   ✓ 提取意图与实体')
+                appendProgress('   ✓ 场景已保存')
+                appendProgress('')
+
+                // ---------- 阶段二：生成测试用例（展示与后端一致的子步骤） ----------
+                appendProgress('生成测试用例...')
+                appendProgress('   · 检索项目接口...')
+                const caseResPromise = fetch(
                     `${process.env.NEXT_PUBLIC_API_URL}/api/v1/scenarios/${scenarioData.id}/generate-case`,
                     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data_strategy: 'smart' }) }
                 )
+                // 在请求进行中按顺序展示子步骤（与后端：检索 API → 依赖 → 编排 → 提取/传递参数 一致）
+                const t1 = setTimeout(() => {
+                    appendProgress('   ✓ 检索项目接口')
+                    appendProgress('   · 查找接口依赖关系...')
+                }, 450)
+                const t2 = setTimeout(() => {
+                    appendProgress('   ✓ 查找接口依赖关系')
+                    appendProgress('   · 编排测试步骤与断言...')
+                }, 950)
+                const t3 = setTimeout(() => {
+                    appendProgress('   ✓ 编排测试步骤与断言')
+                    appendProgress('   · 提取参数与映射...')
+                }, 1450)
+                let caseRes: Response
+                try {
+                    caseRes = await caseResPromise
+                } finally {
+                    clearTimeout(t1)
+                    clearTimeout(t2)
+                    clearTimeout(t3)
+                }
                 if (!caseRes.ok) {
                     const errorData = await caseRes.json().catch(() => ({}))
                     throw new Error(errorData.detail || errorData.message || '生成测试用例失败')
                 }
                 const caseData = await caseRes.json()
+                appendProgress('   ✓ 提取参数与映射')
+                appendProgress('   ✓ 传递参数配置（Token、Session 等）')
+                appendProgress('   ✓ 用例生成完成')
+                appendProgress('')
+                appendProgress('生成成功！')
+                appendProgress(`场景名称：${scenarioData.name || '—'}`)
+                appendProgress(`描述：${scenarioData.description || '—'}`)
+                appendProgress(`用例名称：${caseData.name || '—'}`)
+                const steps = caseData.steps || []
+                appendProgress(`测试步骤：${steps.length} 个`)
+                steps.forEach((s: any, i: number) => {
+                    const method = (s.api_method || s.method || 'GET').toString().toUpperCase()
+                    const path = s.api_path || s.path || '—'
+                    appendProgress(`   ${i + 1}. ${method} ${path}`)
+                })
+                appendProgress('')
+
+                // ---------- 阶段三：自动执行场景 ----------
+                appendProgress('执行场景...')
+                let baseUrl = scenarioExecBaseUrl.trim()
+                if (scenarioSelectedEnvId !== 'custom' && scenarioSelectedEnvId != null) {
+                    const env = scenarioEnvs.find((e) => e.id === scenarioSelectedEnvId)
+                    baseUrl = (env?.base_url || '').trim()
+                }
+                if (!baseUrl) baseUrl = 'http://localhost:8000'
+                try {
+                    const apiUrl = process.env.NEXT_PUBLIC_EXEC_API_URL || process.env.NEXT_PUBLIC_API_URL
+                    const execRes = await fetch(`${apiUrl}/api/v1/executions`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            test_case_id: caseData.id,
+                            environment: scenarioEnvs.find((e) => e.id === scenarioSelectedEnvId)?.env_name || 'test',
+                            base_url: baseUrl,
+                        }),
+                    })
+                    if (execRes.ok) {
+                        const execData = await execRes.json()
+                        const status = execData.status === 'success' ? '全部通过' : '存在失败'
+                        appendProgress(`   ✓ 执行完成：${status}`)
+                    } else {
+                        const err = await execRes.json().catch(() => ({}))
+                        appendProgress(`   ⚠ 执行失败：${err.detail || '请检查环境地址'}`)
+                    }
+                } catch (e: any) {
+                    appendProgress(`   ⚠ 执行异常：${e.message}`)
+                }
+                appendProgress('')
+                appendProgress('处理完成！')
+
                 setResult({ scenario: scenarioData, testCase: caseData })
             } catch (error: any) {
+                appendProgress('', `❌ 错误: ${error.message}`)
                 alert(`错误: ${error.message}`)
             } finally {
                 setLoading(false)
@@ -183,6 +306,7 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
             appendProgress(`   ✓ 提取 ${chunks.length || 1} 个 API 端点`)
             const hasAuth = JSON.stringify(structured || '').includes('认证') || JSON.stringify(chunks).toLowerCase().includes('auth')
             if (hasAuth) appendProgress('   ✓ 识别认证机制')
+            appendProgress('   ✓ 自动依赖分析（KG + AI）')
             appendProgress('')
 
             // ========== Phase 2: 测试计划 ==========
@@ -246,6 +370,7 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
 
             // ========== Phase 4: 执行测试 ==========
             appendProgress('执行测试...')
+            appendProgress('   ✓ 自动解析前置依赖')
             if (baseUrl && endpoints.length > 0) {
                 try {
                     const execRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/single-api/execute`, {
@@ -413,6 +538,79 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                                 placeholder="例如：测试用户登录后查询商品列表并添加到购物车&#10;&#10;💡 用自然语言描述即可，AI会自动理解"
                             />
                         </div>
+                        <div style={{ marginBottom: '1rem' }}>
+                            <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: '600', color: '#374151', marginBottom: '0.5rem' }}>
+                                🌐 执行环境（生成用例后将自动执行场景）
+                            </label>
+                            {scenarioEnvs.length > 0 ? (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                    <select
+                                        value={scenarioSelectedEnvId === 'custom' ? 'custom' : (scenarioSelectedEnvId ?? '')}
+                                        onChange={(e) => {
+                                            const v = e.target.value
+                                            if (v === 'custom') {
+                                                setScenarioSelectedEnvId('custom')
+                                                setScenarioExecBaseUrl('')
+                                            } else {
+                                                const id = Number(v)
+                                                const env = scenarioEnvs.find((ep) => ep.id === id)
+                                                if (env) {
+                                                    setScenarioSelectedEnvId(id)
+                                                    setScenarioExecBaseUrl(env.base_url || '')
+                                                }
+                                            }
+                                        }}
+                                        style={{
+                                            minWidth: '200px',
+                                            padding: '0.5rem 0.75rem',
+                                            border: '1px solid #D1D5DB',
+                                            borderRadius: '0.5rem',
+                                            fontSize: '0.875rem',
+                                            background: 'white',
+                                        }}
+                                    >
+                                        {scenarioEnvs.map((env) => (
+                                            <option key={env.id} value={env.id}>
+                                                {env.env_name} — {env.base_url}
+                                            </option>
+                                        ))}
+                                        <option value="custom">自定义地址...</option>
+                                    </select>
+                                    {scenarioSelectedEnvId === 'custom' && (
+                                        <input
+                                            type="text"
+                                            value={scenarioExecBaseUrl}
+                                            onChange={(e) => setScenarioExecBaseUrl(e.target.value)}
+                                            placeholder="如 https://api.example.com"
+                                            style={{
+                                                width: '280px',
+                                                padding: '0.5rem 0.75rem',
+                                                border: '1px solid #D1D5DB',
+                                                borderRadius: '0.5rem',
+                                                fontSize: '0.875rem',
+                                            }}
+                                        />
+                                    )}
+                                </div>
+                            ) : (
+                                <input
+                                    type="text"
+                                    value={scenarioExecBaseUrl}
+                                    onChange={(e) => setScenarioExecBaseUrl(e.target.value)}
+                                    placeholder="如 https://api.example.com，生成后将用此地址自动执行"
+                                    style={{
+                                        width: '100%',
+                                        padding: '0.5rem 0.75rem',
+                                        border: '1px solid #D1D5DB',
+                                        borderRadius: '0.5rem',
+                                        fontSize: '0.875rem',
+                                    }}
+                                />
+                            )}
+                            <p style={{ fontSize: '0.75rem', color: '#6B7280', marginTop: '0.25rem' }}>
+                                💡 一键生成将先创建场景与用例，再自动执行该场景
+                            </p>
+                        </div>
                         <p style={{ fontSize: '0.75rem', color: '#6B7280', textAlign: 'center', marginBottom: '1rem' }}>
                             💡 AI会自动理解场景、检索相关API、生成测试数据和断言
                         </p>
@@ -544,8 +742,8 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                 </button>
             </div>
 
-            {/* 实时进度展示面板 */}
-            {mode === 'single-api' && progressLines.length > 0 && (
+            {/* 实时进度展示面板（测试场景 + 接口测试 共用） */}
+            {progressLines.length > 0 && (
                 <div style={{
                     marginTop: '1.5rem',
                     background: 'linear-gradient(135deg, #f8f9ff 0%, #f0f2ff 100%)',
@@ -575,7 +773,7 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                         if (line === '') return <div key={i} style={{ height: '0.5rem' }} />
                         const isError = line.startsWith('❌')
                         const isWarning = line.includes('⚠')
-                        const isComplete = line === '任务完成！'
+                        const isComplete = line === '任务完成！' || line === '处理完成！'
                         return (
                             <div key={i} style={{
                                 color: isError ? '#DC2626' : isWarning ? '#D97706' : isComplete ? '#059669' : undefined,
@@ -594,9 +792,7 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
             {/* 仅测试场景模式在此展示结果；单接口测试结果在「单接口测试」Tab */}
             {mode === 'scenario' && result && (
                 <div style={{ background: 'white', boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)', borderRadius: '0.5rem', padding: '1.5rem' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', marginBottom: '1rem' }}>
-                        <CheckCircle2 style={{ color: '#10B981', marginRight: '0.5rem' }} size={24} />
-                        <h2 style={{ fontSize: '1.5rem', fontWeight: '700', color: '#111827', flex: 1 }}>生成成功！</h2>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginBottom: '1rem' }}>
                         <Link
                             href="/tests"
                             style={{
@@ -606,7 +802,7 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                                 fontWeight: '600', fontSize: '0.875rem', boxShadow: '0 4px 6px -1px rgba(16, 185, 129, 0.3)'
                             }}
                         >
-                            去执行场景 <ArrowRight size={16} />
+                            去查看场景 <ArrowRight size={16} />
                         </Link>
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
@@ -616,7 +812,16 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                         </div>
                         <div style={{ background: '#F9FAFB', padding: '1rem', borderRadius: '0.375rem' }}>
                             <p style={{ fontSize: '0.875rem', color: '#4B5563' }}><span style={{ fontWeight: '500' }}>用例名称：</span>{result.testCase.name}</p>
-                            <p style={{ fontSize: '0.875rem', color: '#4B5563', marginTop: '0.25rem' }}><span style={{ fontWeight: '500' }}>测试步骤：</span>{result.testCase.steps?.length || 0} 个</p>
+                            <p style={{ fontSize: '0.875rem', color: '#4B5563', marginTop: '0.25rem' }}><span style={{ fontWeight: '500' }}>测试步骤：</span>{(result.testCase.steps || []).length} 个</p>
+                            {(result.testCase.steps || []).length > 0 && (
+                                <ul style={{ marginTop: '0.5rem', paddingLeft: '1.25rem', fontSize: '0.8125rem', color: '#4B5563', lineHeight: 1.6 }}>
+                                    {(result.testCase.steps || []).map((s: any, i: number) => {
+                                        const method = (s.api_method || s.method || 'GET').toString().toUpperCase()
+                                        const path = s.api_path || s.path || '—'
+                                        return <li key={i}>{method} {path}</li>
+                                    })}
+                                </ul>
+                            )}
                         </div>
                     </div>
                 </div>

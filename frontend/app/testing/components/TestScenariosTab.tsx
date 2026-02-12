@@ -743,26 +743,35 @@ export default function TestScenariosTab() {
                                     </div>
                                 </div>
 
-                                {/* 编排预览 */}
-                                {scenario.test_case_steps && (
+                                {/* 编排预览（安全解析：test_case_steps 可能为 null/无效 JSON） */}
+                                {(() => {
+                                    let steps: any[] = []
+                                    if (scenario.test_case_steps) {
+                                        try {
+                                            const p = JSON.parse(scenario.test_case_steps)
+                                            steps = Array.isArray(p) ? p : []
+                                        } catch (_) { /* 解析失败当空 */ }
+                                    }
+                                    if (steps.length === 0) return null
+                                    return (
                                     <div style={{ marginBottom: '1rem' }}>
                                         <div onClick={() => togglePreview(scenario.id)} style={{
                                             fontSize: '0.75rem', color: '#2563EB', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '0.25rem',
                                             padding: '0.4rem 0.75rem', background: '#EFF6FF', borderRadius: '0.5rem', border: '1px solid #DBEAFE'
                                         }}>
                                             <FileText size={14} />
-                                            编排详情: {JSON.parse(scenario.test_case_steps).length} 个步骤
+                                            编排详情: {steps.length} 个步骤
                                             {previewScenarios.has(scenario.id) ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                                         </div>
                                         {previewScenarios.has(scenario.id) && (
                                             <div style={{ marginTop: '0.75rem', padding: '1rem', background: '#F8FAFC', borderRadius: '0.75rem', border: '1px solid #E2E8F0' }}>
-                                                {JSON.parse(scenario.test_case_steps).map((step: any, idx: number) => {
+                                                {steps.map((step: any, idx: number) => {
                                                     const stepKey = `${scenario.id}_${step.step_order}`
                                                     const singleResult = singleStepResults[stepKey]
                                                     const isExecuting = executingSingleStep === stepKey
 
                                                     return (
-                                                        <div key={idx} style={{ marginBottom: idx === JSON.parse(scenario.test_case_steps).length - 1 ? 0 : '1rem' }}>
+                                                        <div key={idx} style={{ marginBottom: idx === steps.length - 1 ? 0 : '1rem' }}>
                                                             {/* 步骤信息和执行按钮 */}
                                                             <div style={{ fontSize: '0.8125rem', display: 'flex', gap: '1rem', padding: '0.5rem 0', alignItems: 'center' }}>
                                                                 <b style={{ color: '#94A3B8', minWidth: '1.5rem' }}>{step.step_order}.</b>
@@ -913,7 +922,7 @@ export default function TestScenariosTab() {
                                                             )}
 
                                                             {/* 分隔线 */}
-                                                            {idx !== JSON.parse(scenario.test_case_steps).length - 1 && !singleResult && (
+                                                            {idx !== steps.length - 1 && !singleResult && (
                                                                 <div style={{ borderBottom: '1px dashed #E2E8F0', marginTop: '0.5rem' }} />
                                                             )}
                                                         </div>
@@ -922,7 +931,8 @@ export default function TestScenariosTab() {
                                             </div>
                                         )}
                                     </div>
-                                )}
+                                    )
+                                })()}
 
                                 {/* 执行结果 */}
                                 {executionResults[scenario.id] && (
