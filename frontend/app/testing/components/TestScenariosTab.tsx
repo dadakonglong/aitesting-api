@@ -331,7 +331,10 @@ export default function TestScenariosTab() {
                 setExpandedScenarios(prev => new Set(prev).add(scenarioId))
             } else {
                 const errData = await response.json().catch(() => ({}))
-                throw new Error(errData.detail || '接口执行失败，请检查 Base URL 是否有效')
+                const msg = errData.detail || '接口执行失败，请检查 Base URL 是否有效'
+                setExecutionResults(prev => ({ ...prev, [scenarioId]: { error: msg, id: errData.execution_id } }))
+                setExpandedScenarios(prev => new Set(prev).add(scenarioId))
+                return
             }
         } catch (error: any) {
             setExecutionResults(prev => ({ ...prev, [scenarioId]: { error: error.message } }))
@@ -1025,11 +1028,12 @@ export default function TestScenariosTab() {
                                             <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
                                                 {executionResults[scenario.id].error && (
                                                     <button
+                                                        title={executionResults[scenario.id].id ? '根据本次执行结果修复用例' : '需要执行记录才能修复，请重试执行'}
                                                         onClick={(e) => {
                                                             e.stopPropagation()
-                                                            runHealApply(scenario, executionResults[scenario.id].id)
+                                                            if (executionResults[scenario.id].id) runHealApply(scenario, executionResults[scenario.id].id)
                                                         }}
-                                                        disabled={healApplyLoading[scenario.id]}
+                                                        disabled={!executionResults[scenario.id].id || healApplyLoading[scenario.id]}
                                                         style={{
                                                             padding: '0.35rem 0.75rem',
                                                             background: healApplyLoading[scenario.id] ? '#FCA5A5' : '#EF4444',

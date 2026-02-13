@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import json
 import os
 import sys
@@ -204,6 +205,22 @@ async def _resolve_dependencies(
     if any(k in path.lower() for k in login_keywords):
         _dlog(f"登录类接口，跳过依赖分析: {path}")
         return steps
+
+    # 2.5 知识图谱：若有前置依赖则直接构建链并返回（优先于 RAG+AI）
+    if _kg:
+        try:
+            node_id = f"{project_id}:{method}:{path}"
+            preds = _kg.get_predecessors(node_id, min_confidence=0.5, limit=5)
+            if preds:
+                chain = [
+                    {"api_path": p.get("path", ""), "api_method": (p.get("method") or "GET").upper(), "reason": "知识图谱前置"}
+                    for p in preds
+                ]
+                _dlog(f"知识图谱返回 {len(chain)} 个前置依赖，直接应用")
+                _DEP_CACHE[cache_key] = chain
+                return _apply_dep_chain(steps, chain, project_id, db_path)
+        except Exception as _e:
+            _dlog(f"知识图谱查询跳过: {_e}")
 
     # 3. RAG 检索
     summary = target_step.get("summary", "")
@@ -633,6 +650,128 @@ api_planner = ApiPlanner(DB_PATH)
 # API Healer（失败用例分析与自愈）
 healer_agent = HealerAgent(ai_client, DB_PATH)
 
+# 知识图谱（可选，初始化失败不影响主流程）
+_kg = None
+try:
+    from lightweight_services import LightweightKnowledgeGraph
+    _KG_PATH = os.path.join(os.path.dirname(DB_PATH), "knowledge_graph.pkl")
+    _kg = LightweightKnowledgeGraph(_KG_PATH)
+    print("知识图谱已启用（导入/执行时将学习接口依赖）")
+except Exception as _e:
+    print(f"知识图谱初始化跳过: {_e}")
+
+
+def _kg_node_id(project_id: str, step: Dict) -> str:
+    """从步骤构建图谱节点 ID"""
+    m = str(step.get("api_method") or step.get("method") or "GET").upper()
+    p = str(step.get("api_path") or step.get("path") or "")
+    return f"{project_id}:{m}:{p}"
+
+
+def _complement_steps_mappings_from_kg(project_id: str, steps: List[Dict]) -> List[Dict]:
+    """执行前用图谱补全步骤中缺失的 param_mappings，仅当 _kg 存在且步骤已有节点时生效，失败不影响主流程。"""
+    if not _kg or not steps or not project_id:
+        return steps
+    try:
+        steps_sorted = sorted(steps, key=lambda s: int(s.get("step_order") or 0))
+        node_ids = [_kg_node_id(project_id, s) for s in steps_sorted]
+        for i, s in enumerate(steps_sorted):
+            if i >= len(node_ids):
+                continue
+            nid = node_ids[i]
+            existing = s.get("param_mappings") or []
+            if not isinstance(existing, list):
+                existing = []
+            existing_keys = {(m.get("from_step"), m.get("to_field")) for m in existing if isinstance(m, dict) and m.get("to_field")}
+            preds = _kg.get_predecessors(nid, min_confidence=0.5, limit=5)
+            for p in preds:
+                from_nid = p.get("from_api")
+                if not from_nid:
+                    continue
+                j = None
+                for k, n in enumerate(node_ids):
+                    if n == from_nid:
+                        j = k
+                        break
+                if j is None or j >= i:
+                    continue
+                from_step = j + 1
+                fm = p.get("field_mapping") or {}
+                for key, from_field in fm.items():
+                    if not from_field or not key:
+                        continue
+                    to_field = key
+                    to_type = "params"
+                    if "@" in key:
+                        parts = key.split("@", 1)
+                        to_field = parts[0]
+                        to_type = parts[1] if len(parts) > 1 else "params"
+                    if (from_step, to_field) in existing_keys:
+                        continue
+                    existing.append({
+                        "from_step": from_step,
+                        "from_field": from_field,
+                        "to_field": to_field,
+                        "to_type": to_type,
+                    })
+                    existing_keys.add((from_step, to_field))
+            s["param_mappings"] = existing
+        return steps_sorted
+    except Exception as e:
+        print(f"知识图谱补全映射跳过: {e}")
+        return steps
+
+
+def _learn_steps_to_kg(project_id: str, steps: List[Dict], is_success: bool, source_id: Any = None):
+    """从执行步骤学习依赖边到知识图谱，仅当 _kg 存在时执行，失败不影响主流程"""
+    if not _kg or not steps or not project_id:
+        return
+    try:
+        steps_sorted = sorted(steps, key=lambda s: int(s.get("step_order") or 0))
+        node_ids = []
+        for s in steps_sorted:
+            nid = _kg_node_id(project_id, s)
+            node_ids.append(nid)
+            _kg.ensure_api_node(
+                nid,
+                path=s.get("api_path") or s.get("path") or "",
+                method=str(s.get("api_method") or s.get("method") or "GET").upper(),
+                name=s.get("description") or s.get("api_name") or "",
+            )
+        for i, s in enumerate(steps_sorted):
+            mappings = s.get("param_mappings") or []
+            if not mappings or i >= len(node_ids):
+                continue
+            to_nid = node_ids[i]
+            by_from = {}
+            for m in mappings:
+                if not isinstance(m, dict):
+                    continue
+                fs = m.get("from_step")
+                ff = m.get("from_field")
+                tf = m.get("to_field")
+                tt = m.get("to_type", "params")
+                if fs is None or tf is None:
+                    continue
+                idx = int(fs) - 1
+                if 0 <= idx < len(node_ids):
+                    from_nid = node_ids[idx]
+                    if from_nid not in by_from:
+                        by_from[from_nid] = {}
+                    key = f"{tf}@{tt}"
+                    by_from[from_nid][key] = ff
+            for from_nid, fm in by_from.items():
+                field_mapping = {k: v for k, v in fm.items()}
+                _kg.add_dependency(
+                    from_nid, to_nid,
+                    field_mapping=field_mapping,
+                    source_type="execution",
+                    source_id=source_id,
+                    success=is_success,
+                )
+    except Exception as e:
+        print(f"知识图谱学习跳过: {e}")
+
 # ============= 数据导入服务 (本地版) =============
 from adapters.data_source_adapter import AdapterFactory
 
@@ -641,8 +780,9 @@ class DummyVectorService:
         print(f"[Dummy] 假装索引 API: {api.get('method')} {api.get('path')}")
 
 class LocalDataImportService:
-    def __init__(self, vector: DummyVectorService):
+    def __init__(self, vector: DummyVectorService, kg=None):
         self.vector_service = vector
+        self.kg = kg
 
     async def _enhance_apis(self, apis: List[Dict], project_id: str) -> List[Dict]:
         enhanced = []
@@ -704,6 +844,15 @@ class LocalDataImportService:
             else:
                 for api in enhanced_apis:
                     await self.vector_service.index_api(api)
+
+            # 知识图谱：导入时将每个 API 作为节点加入（仅节点，无边）
+            if self.kg:
+                try:
+                    for api in enhanced_apis:
+                        nid = f"{project_id}:{api.get('method','')}:{api.get('path','')}"
+                        self.kg.ensure_api_node(nid, path=api.get('path',''), method=api.get('method',''), name=api.get('name') or api.get('summary',''))
+                except Exception as _e:
+                    print(f"知识图谱添加节点跳过: {_e}")
                 
             return {
                 "success": True, 
@@ -731,7 +880,10 @@ class LocalDataImportService:
             "details": results
         }
 
-data_import_service = LocalDataImportService(_vector_service if _vector_service else DummyVectorService())
+data_import_service = LocalDataImportService(
+    _vector_service if _vector_service else DummyVectorService(),
+    kg=_kg,
+)
 
 # ============= 数据库初始化 =============
 
@@ -1645,6 +1797,128 @@ async def sync_project_to_vector(project_id: str):
     return {"success": True, "message": f"已同步 {n} 个 API 到向量库", "count": n}
 
 
+# ---------- 知识图谱管理（阶段四） ----------
+
+
+@app.get("/api/v1/kg/status")
+async def get_kg_status():
+    """查询知识图谱是否启用及当前统计（节点数、边数）。"""
+    if not _kg:
+        return {"enabled": False, "message": "知识图谱未启用（初始化失败或未配置）"}
+    try:
+        stats = _kg.get_stats()
+        return {
+            "enabled": True,
+            "message": "知识图谱已启用",
+            "stats": {
+                "total_apis": stats.get("total_apis", 0),
+                "total_dependencies": stats.get("total_dependencies", 0),
+                "avg_dependencies": round(stats.get("avg_dependencies", 0), 2),
+            },
+        }
+    except Exception as e:
+        return {"enabled": False, "message": str(e)}
+
+
+def _rebuild_kg_for_project(project_id: str) -> Dict[str, Any]:
+    """按项目从历史 test_cases 重建知识图谱（先清空该项目节点再按用例重新写入）。"""
+    if not _kg:
+        return {"success": False, "error": "知识图谱未启用"}
+    try:
+        for nid in _kg.list_project_node_ids(project_id):
+            _kg.remove_node(nid)
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT id, name, steps, project_id FROM test_cases WHERE project_id = ? AND steps IS NOT NULL AND steps != ''", (project_id,))
+        rows = cur.fetchall()
+        conn.close()
+        nodes_added = set()
+        edges_added = 0
+        for row in rows:
+            tc_id = row["id"]
+            pid = row["project_id"] or "default-project"
+            try:
+                steps = json.loads(row["steps"] or "[]")
+            except Exception:
+                continue
+            if not isinstance(steps, list) or not steps:
+                continue
+            steps_sorted = sorted(steps, key=lambda s: int(s.get("step_order") or 0))
+            for s in steps_sorted:
+                m = str(s.get("api_method") or s.get("method") or "GET").upper()
+                p = str(s.get("api_path") or s.get("path") or "")
+                if not p:
+                    continue
+                nid = f"{pid}:{m}:{p}"
+                if nid not in nodes_added:
+                    _kg.ensure_api_node(nid, path=p, method=m, name=s.get("description") or s.get("api_name") or "")
+                    nodes_added.add(nid)
+            node_ids = [f"{pid}:{str(s.get('api_method') or s.get('method') or 'GET').upper()}:{str(s.get('api_path') or s.get('path') or '')}" for s in steps_sorted]
+            for i, s in enumerate(steps_sorted):
+                mappings = s.get("param_mappings") or []
+                if not mappings or i >= len(node_ids):
+                    continue
+                to_nid = node_ids[i]
+                by_from = {}
+                for m in mappings:
+                    if not isinstance(m, dict):
+                        continue
+                    fs, ff, tf, tt = m.get("from_step"), m.get("from_field"), m.get("to_field"), m.get("to_type", "params")
+                    if fs is None or tf is None:
+                        continue
+                    idx = int(fs) - 1
+                    if 0 <= idx < len(node_ids):
+                        from_nid = node_ids[idx]
+                        if from_nid not in by_from:
+                            by_from[from_nid] = {}
+                        by_from[from_nid][f"{tf}@{tt}"] = ff
+                for from_nid, fm in by_from.items():
+                    _kg.add_dependency(from_nid, to_nid, field_mapping=dict(fm), source_type="manual", source_id=f"tc:{tc_id}", success=True)
+                    edges_added += 1
+        stats = _kg.get_stats()
+        return {"success": True, "message": f"已重建该项目图谱", "nodes": len(nodes_added), "edges": edges_added, "total_nodes": stats["total_apis"], "total_edges": stats["total_dependencies"]}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+class KGEdgeDeleteBody(BaseModel):
+    from_api: str
+    to_api: str
+
+
+@app.get("/api/v1/projects/{project_id}/kg/export")
+async def export_kg_project(project_id: str):
+    """导出该项目在知识图谱中的子图（节点与边），便于人工检查或备份。"""
+    if not _kg:
+        raise HTTPException(status_code=503, detail="知识图谱未启用")
+    try:
+        data = _kg.export_project_subgraph(project_id)
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/v1/projects/{project_id}/kg/edges")
+async def delete_kg_edge(project_id: str, body: KGEdgeDeleteBody):
+    """删除一条依赖边。from_api / to_api 为节点 ID，格式：project_id:METHOD:path。"""
+    if not _kg:
+        raise HTTPException(status_code=503, detail="知识图谱未启用")
+    ok = _kg.remove_dependency(body.from_api, body.to_api)
+    if not ok:
+        raise HTTPException(status_code=404, detail="边不存在")
+    return {"success": True, "message": "已删除该依赖边"}
+
+
+@app.post("/api/v1/projects/{project_id}/kg/rebuild")
+async def rebuild_kg_project(project_id: str):
+    """从该项目历史 test_cases 重建知识图谱（先清空该项目节点再按用例重新写入）。"""
+    result = _rebuild_kg_for_project(project_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "重建失败"))
+    return result
+
+
 @app.post("/api/v1/projects/{project_id}/environments")
 async def save_environment(project_id: str, env: EnvironmentBase):
     conn = sqlite3.connect(DB_PATH)
@@ -2001,8 +2275,23 @@ async def generate_case(scenario_id: int):
         if not apis_for_prompt and all_apis:
             apis_for_prompt = all_apis[:80]
         
-        # 3. AI 编排 (增强版 - 智能识别参数依赖)
-        # 原始逻辑：意图 + 可用 API 列表（原为 all_apis[:50]），由模型按规则生成 steps；规则 1～6 为依赖/鉴权/格式等，不写死具体业务步骤。
+        # 3. 知识图谱：取与候选 API 相关的高置信度依赖边，作为生成时的上下文增强
+        graph_context = ""
+        if _kg and apis_for_prompt:
+            try:
+                kg_edges = _kg.get_edges_for_prompt(project_id_str, apis_for_prompt, min_confidence=0.5, limit=40)
+                if kg_edges:
+                    lines = []
+                    for e in kg_edges:
+                        fm = e.get("field_mapping") or {}
+                        fm_str = ", ".join(f"{k} <- {v}" for k, v in fm.items()) if fm else "—"
+                        lines.append(f"  {e['from_api']} → {e['to_api']}  映射: {fm_str}  (置信度 {e.get('confidence', 0)})")
+                    graph_context = "\n【知识图谱：常见依赖关系（可参考，非强制）】\n" + "\n".join(lines) + "\n"
+            except Exception as _e:
+                print(f"知识图谱上下文获取跳过: {_e}")
+
+        # 3. AI 编排 (增强版 - 智能识别参数依赖 + 图谱上下文)
+        # 意图 + 可用 API 列表 + 图谱常见依赖，由模型按规则生成 steps。
         system_prompt = """你是个资深自动化专家。任务：根据【业务意图】和【API列表】，生成 JSON 测试步骤。
 关键规则：
 1. 必须识别依赖：若 A 返回 data.token，B 需使用，则配置 param_mappings。
@@ -2013,9 +2302,10 @@ async def generate_case(scenario_id: int):
 6. 真实数据：生成符合逻辑的姓名、手机号等，不要用 {}。
 7. 完整覆盖：默认编排完整流程，从 API 列表中选出该流程下的全部相关接口，不要遗漏。
 8. 步骤顺序：必须按业务流程的真实先后顺序编排。例如开台(open-pay)→关台(close-room)→清扫(clean-room-finish) 时，清扫必须在关台之后，不能把清扫插在开台和关台之间。先根据业务语义确定正确顺序，再生成 steps。
+9. 若下方提供了【知识图谱：常见依赖关系】，优先参考其中的接口先后顺序与字段映射；若无冲突请沿用，若有更优方案可灵活调整。
 格式：{ "scenario_name": "...", "steps": [{ "step_order": 1, "api_path": "...", "api_method": "...", "params": {}, "url_params": {}, "headers": {}, "param_mappings": [{ "from_step": 1, "from_field": "data.token", "to_field": "Authorization", "to_type": "headers" }] }] }"""
-        
-        user_prompt = f"意图: {scenario['nlu_result']}\n可用 API: {json.dumps(apis_for_prompt)}" 
+
+        user_prompt = f"意图: {scenario['nlu_result']}\n可用 API: {json.dumps(apis_for_prompt)}{graph_context}" 
         case_result = await ai_client.chat(system_prompt, user_prompt)
 
         # 校验：模型必须返回有效步骤，否则不保存、不执行，直接报错
@@ -2481,6 +2771,7 @@ async def execute_case(req: ExecutionRequest):
     """万能执行引擎：支持场景用例和实时单接口执行"""
     try:
         steps = []
+        project_id_for_kg = None
         if req.steps:
             steps = req.steps
         elif req.test_case_id:
@@ -2488,11 +2779,13 @@ async def execute_case(req: ExecutionRequest):
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM test_cases WHERE id = ?", (req.test_case_id,))
-            case = cursor.fetchone()
+            row = cursor.fetchone()
             conn.close()
-            if not case:
+            if not row:
                 raise HTTPException(status_code=404, detail="用例不存在")
-            raw = case["steps"]
+            case = dict(row)
+            project_id_for_kg = case.get("project_id") or "default-project"
+            raw = case.get("steps")
             steps = json.loads(raw) if raw else []
             if steps is None:
                 steps = []
@@ -2504,8 +2797,17 @@ async def execute_case(req: ExecutionRequest):
         else:
             raise HTTPException(status_code=400, detail="必须提供 test_case_id 或 steps")
 
+        # 阶段三：执行前用图谱补全缺失的 param_mappings（仅场景用例且图谱可用时）
+        if project_id_for_kg and _kg:
+            steps = _complement_steps_mappings_from_kg(project_id_for_kg, steps)
+
         step_results = await _run_steps(steps, req.base_url)
         final_status = "success" if all(s.get("success", False) for s in step_results) else "failed"
+
+        # 知识图谱：场景用例执行后学习依赖（仅 test_case_id 场景，且不影响主流程）
+        if project_id_for_kg and _kg:
+            _learn_steps_to_kg(project_id_for_kg, steps, is_success=(final_status == "success"), source_id=req.test_case_id)
+
         try:
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
@@ -2519,10 +2821,29 @@ async def execute_case(req: ExecutionRequest):
         except Exception:
             exec_id = 0
         return {"id": exec_id, "status": final_status, "results": step_results}
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        exec_id = None
+        if getattr(req, "test_case_id", None):
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO executions (test_case_id, status, results) VALUES (?, ?, ?)",
+                    (req.test_case_id or 0, "failed", json.dumps([{"success": False, "error": str(e)}])),
+                )
+                exec_id = cursor.lastrowid
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
+        return JSONResponse(
+            status_code=500,
+            content={"detail": str(e), "execution_id": exec_id},
+        )
 
 # --- 导入与列表 (保持原有逻辑) ---
 
@@ -3982,27 +4303,25 @@ async def heal_apply(req: HealApplyRequest):
     if (not req.test_case_id or req.test_case_id <= 0) and (not req.api_test_case_id or req.api_test_case_id <= 0):
         raise HTTPException(status_code=400, detail="请提供有效的 test_case_id 或 api_test_case_id")
     
+    if not req.execution_id:
+        raise HTTPException(status_code=400, detail="请提供 execution_id 以指定用于修复的执行记录")
+
     try:
         execution_result = None
-        if req.execution_id:
-            conn = sqlite3.connect(DB_PATH)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute("SELECT results FROM executions WHERE id = ?", (req.execution_id,))
-            row = cursor.fetchone()
-            conn.close()
-            if row:
-                try:
-                    results = json.loads(row["results"] or "[]")
-                except Exception:
-                    results = []
-                # 兼容处理：如果是接口用例（单步），results 可能就是 steps 列表；
-                # 如果是场景用例，通常也是 steps 列表。
-                # _normalize_results_to_steps 主要用于补充一些字段
-                execution_result = {"steps": _normalize_results_to_steps(results)}
-
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT results FROM executions WHERE id = ?", (req.execution_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            try:
+                results = json.loads(row["results"] or "[]")
+            except Exception:
+                results = []
+            execution_result = {"steps": _normalize_results_to_steps(results)}
         if not execution_result or not execution_result.get("steps"):
-            raise HTTPException(status_code=400, detail="请提供 execution_id 以指定用于修复的执行记录")
+            raise HTTPException(status_code=400, detail="未找到该执行记录或记录无步骤结果，请先执行用例后再使用一键修复")
 
         # 分发处理
         if req.api_test_case_id and req.api_test_case_id > 0:
@@ -4015,8 +4334,6 @@ async def heal_apply(req: HealApplyRequest):
         raise
     except Exception as e:
         import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 

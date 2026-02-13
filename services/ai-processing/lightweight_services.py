@@ -43,8 +43,22 @@ class LightweightKnowledgeGraph:
         self.graph.add_node(api_id, **attributes, node_type='api')
         self.save_graph()
         logger.debug(f"添加API节点: {api_id}")
+
+    def ensure_api_node(self, api_id: str, **attributes):
+        """若节点不存在则添加，存在则跳过（用于导入时建节点，不覆盖）"""
+        if api_id not in self.graph:
+            self.add_api(api_id, **attributes)
     
-    def add_dependency(self, from_api: str, to_api: str, field_mapping: Dict = None, **attributes):
+    def add_dependency(
+        self,
+        from_api: str,
+        to_api: str,
+        field_mapping: Dict = None,
+        source_type: str = "execution",
+        source_id: Any = None,
+        success: bool = True,
+        **attributes,
+    ):
         """
         添加API依赖关系
         
@@ -52,28 +66,95 @@ class LightweightKnowledgeGraph:
             from_api: 源API ID
             to_api: 目标API ID
             field_mapping: 字段映射关系
+            source_type: 来源类型 execution|doc|manual
+            source_id: 来源ID（如 execution_id, test_case_id）
+            success: 本次是否成功，用于更新 success_count
             **attributes: 其他属性
         """
-        if from_api not in self.graph or to_api not in self.graph:
-            logger.warning(f"API节点不存在: {from_api} -> {to_api}")
+        if from_api not in self.graph:
+            logger.warning(f"API节点不存在: {from_api}，跳过依赖记录")
+            return
+        if to_api not in self.graph:
+            logger.warning(f"API节点不存在: {to_api}，跳过依赖记录")
             return
         
-        # 如果边已存在,增加计数
+        fm = field_mapping or {}
         if self.graph.has_edge(from_api, to_api):
-            self.graph[from_api][to_api]['count'] = self.graph[from_api][to_api].get('count', 0) + 1
-            self.graph[from_api][to_api]['last_used'] = datetime.now().isoformat()
+            edge = self.graph[from_api][to_api]
+            edge['count'] = edge.get('count', 0) + 1
+            edge['last_used'] = datetime.now().isoformat()
+            if success:
+                edge['success_count'] = edge.get('success_count', 0) + 1
+            else:
+                # 阶段四：失败时降低置信度，便于低质量边自动淡出
+                edge['success_count'] = max(0, edge.get('success_count', 0) - 1)
+            # 合并 field_mapping（新映射覆盖旧）
+            existing_fm = edge.get('field_mapping') or {}
+            existing_fm.update(fm)
+            edge['field_mapping'] = existing_fm
+            if source_id:
+                edge['last_source_id'] = source_id
+            if source_type:
+                edge['source_type'] = source_type
         else:
             self.graph.add_edge(
                 from_api, to_api,
-                field_mapping=field_mapping or {},
+                field_mapping=fm,
                 count=1,
+                success_count=1 if success else 0,
+                source_type=source_type or "execution",
+                source_id=source_id,
                 created_at=datetime.now().isoformat(),
                 last_used=datetime.now().isoformat(),
-                **attributes
+                **attributes,
             )
         
         self.save_graph()
         logger.debug(f"添加依赖关系: {from_api} -> {to_api}")
+
+    def remove_dependency(self, from_api: str, to_api: str) -> bool:
+        """删除一条依赖边，用于管理修正。返回是否删除了边。"""
+        if not self.graph.has_edge(from_api, to_api):
+            return False
+        self.graph.remove_edge(from_api, to_api)
+        self.save_graph()
+        logger.debug(f"删除依赖关系: {from_api} -> {to_api}")
+        return True
+
+    def remove_node(self, api_id: str) -> bool:
+        """删除节点及其所有连边，用于按项目重建时先清空。"""
+        if api_id not in self.graph:
+            return False
+        self.graph.remove_node(api_id)
+        self.save_graph()
+        logger.debug(f"删除节点: {api_id}")
+        return True
+
+    def list_project_node_ids(self, project_id: str) -> List[str]:
+        """返回所有以 project_id: 开头的节点 ID 列表。"""
+        prefix = f"{project_id}:"
+        return [n for n in self.graph.nodes() if isinstance(n, str) and n.startswith(prefix)]
+
+    def export_project_subgraph(self, project_id: str) -> Dict:
+        """导出某项目相关的节点与边（节点 ID 以 project_id: 开头），便于人工检查或备份。"""
+        prefix = f"{project_id}:"
+        nodes = []
+        for nid, attrs in self.graph.nodes(data=True):
+            if isinstance(nid, str) and nid.startswith(prefix):
+                nodes.append({"id": nid, **{k: v for k, v in attrs.items() if k != "node_type"}})
+        edges = []
+        for u, v in self.graph.edges():
+            if isinstance(u, str) and isinstance(v, str) and u.startswith(prefix) and v.startswith(prefix):
+                edge = self.graph[u][v]
+                edges.append({
+                    "from": u,
+                    "to": v,
+                    "field_mapping": edge.get("field_mapping", {}),
+                    "count": edge.get("count", 0),
+                    "success_count": edge.get("success_count", 0),
+                    "confidence": round((edge.get("success_count", 0) or 0) / max(1, edge.get("count", 1)), 2),
+                })
+        return {"project_id": project_id, "nodes": nodes, "edges": edges}
     
     def get_dependencies(self, api_id: str, limit: int = 5) -> List[Dict]:
         """
@@ -133,7 +214,83 @@ class LightweightKnowledgeGraph:
             'total_dependencies': len(self.graph.edges),
             'avg_dependencies': len(self.graph.edges) / len(self.graph.nodes) if len(self.graph.nodes) > 0 else 0
         }
-    
+
+    def get_edges_for_prompt(
+        self,
+        project_id: str,
+        apis_for_prompt: List[Dict],
+        min_confidence: float = 0.5,
+        limit: int = 50,
+    ) -> List[Dict]:
+        """
+        获取与当前候选 API 相关的依赖边，用于生成场景时的上下文增强。
+        只返回两端节点都在 apis_for_prompt 中的边，且 success_count/count >= min_confidence。
+        """
+        if not apis_for_prompt or not project_id:
+            return []
+        node_ids = set()
+        for a in apis_for_prompt:
+            m = str(a.get("method") or "GET").strip().upper()
+            p = str(a.get("path") or "").strip()
+            if p:
+                node_ids.add(f"{project_id}:{m}:{p}")
+        if not node_ids:
+            return []
+        edges_out = []
+        for u, v in self.graph.edges():
+            if u not in node_ids or v not in node_ids:
+                continue
+            edge = self.graph[u][v]
+            count = edge.get("count") or 0
+            if count <= 0:
+                continue
+            success_count = edge.get("success_count", 0)
+            confidence = success_count / count
+            if confidence < min_confidence:
+                continue
+            edges_out.append({
+                "from_api": u,
+                "to_api": v,
+                "field_mapping": edge.get("field_mapping") or {},
+                "confidence": round(confidence, 2),
+                "count": count,
+            })
+        edges_out.sort(key=lambda x: (-x["confidence"], -x["count"]))
+        return edges_out[:limit]
+
+    def get_predecessors(
+        self,
+        api_id: str,
+        min_confidence: float = 0.5,
+        limit: int = 5,
+    ) -> List[Dict]:
+        """
+        获取「谁在调用当前 API 之前」的前置依赖（入边）。
+        用于执行时补全 param_mappings 或单接口流水线解析依赖链。
+        """
+        if api_id not in self.graph:
+            return []
+        out = []
+        for from_api in self.graph.predecessors(api_id):
+            edge = self.graph[from_api][api_id]
+            count = edge.get("count") or 0
+            if count <= 0:
+                continue
+            success_count = edge.get("success_count", 0)
+            confidence = success_count / count
+            if confidence < min_confidence:
+                continue
+            node_attrs = dict(self.graph.nodes[from_api])
+            out.append({
+                "from_api": from_api,
+                "field_mapping": edge.get("field_mapping") or {},
+                "confidence": round(confidence, 2),
+                "path": node_attrs.get("path", ""),
+                "method": node_attrs.get("method", "GET"),
+            })
+        out.sort(key=lambda x: (-x["confidence"],))
+        return out[:limit]
+
     def save_graph(self):
         """持久化图谱到文件"""
         try:
