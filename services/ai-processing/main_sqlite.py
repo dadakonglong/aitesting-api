@@ -50,6 +50,9 @@ if os.getenv("QDRANT_URL"):
             os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY") or "",
             qdrant_api_key=os.getenv("QDRANT_API_KEY"),
             openai_base_url=os.getenv("OPENAI_BASE_URL"),
+            embedding_base_url=os.getenv("EMBEDDING_BASE_URL"),
+            embedding_model=os.getenv("EMBEDDING_MODEL"),
+            embedding_api_key=os.getenv("EMBEDDING_API_KEY"),
         )
         if _vector_service.enabled:
             print("向量服务已启用（场景/接口将优先按语义检索）")
@@ -441,10 +444,46 @@ from openai import AsyncOpenAI
 import re
 
 
+def _salvage_steps_json(raw: str, error_pos: int) -> Optional[Dict]:
+    """
+    从被截断的 JSON 中恢复 scenario_name 和 steps。
+    错误位置通常在未闭合的字符串内，向前找到最后一个完整 step 的结束位置，截断并补全 ]} 后解析。
+    """
+    if error_pos <= 0 or "steps" not in raw:
+        return None
+    idx_steps = raw.find('"steps"')
+    if idx_steps == -1:
+        idx_steps = raw.find("steps")
+    idx_bracket = raw.find("[", idx_steps)
+    if idx_bracket == -1:
+        return None
+    search_end = min(error_pos, len(raw))
+    # 最后一个完整步骤的结束：},\n 或 }\n 或 }, \n（步骤对象边界）
+    last_end = raw.rfind("},\n", 0, search_end)
+    if last_end == -1:
+        last_end = raw.rfind("}, \n", 0, search_end)
+    if last_end == -1:
+        last_end = raw.rfind("}\n", 0, search_end)
+    if last_end == -1:
+        for m in re.finditer(r"\}\s*,\s*\n", raw[:search_end]):
+            last_end = m.start()
+    if last_end == -1:
+        return None
+    segment = raw[: last_end + 1]
+    segment += "\n  ]}"
+    try:
+        obj = json.loads(segment)
+        if isinstance(obj, dict) and isinstance(obj.get("steps"), list) and len(obj["steps"]) > 0:
+            return obj
+    except json.JSONDecodeError:
+        pass
+    return None
+
+
 def _parse_ai_json(content: str) -> Dict:
     """
     容错解析大模型返回的 JSON：空返回、顶层数组、markdown 包裹、尾部逗号、双引号转义等。
-    解析失败时返回 {} 并打日志，不抛错，避免整次调用报「无法解析」。
+    解析失败时尝试从截断内容恢复 steps；仍失败则返回 {} 并打日志。
     """
     if content is None:
         return {}
@@ -544,17 +583,27 @@ def _parse_ai_json(content: str) -> Dict:
                 error_context = fixed[max(0, error_pos-50):error_pos+50]
                 print(f"DEBUG: JSON解析错误位置 {error_pos}: ...{error_context}...")
     
-    # 解析失败不抛错，返回空并打日志（便于排查「json 非法」指哪里）
+    # 解析失败：尝试从截断的 JSON 中恢复 steps（模型返回被 max_tokens 截断时常见）
+    try:
+        json.loads(raw)
+    except json.JSONDecodeError as e:
+        err_pos = getattr(e, "pos", None)
+        err_msg = str(e)
+        if err_pos is not None and ("Unterminated" in err_msg or "Expecting" in err_msg):
+            salvaged = _salvage_steps_json(raw, err_pos)
+            if salvaged:
+                print(f"✅ 已从截断的 JSON 中恢复 steps（共 {len(salvaged.get('steps', []))} 步）")
+                return salvaged
+    # 无法恢复则打日志并返回空
     preview = (raw[:500] + "…") if len(raw) > 500 else raw
     print(f"⚠️ AI 返回无法解析为 JSON，已当空处理。")
     print(f"   内容预览（前500字符）: {preview!r}")
     print(f"   内容长度: {len(raw)} 字符")
-    # 尝试输出更详细的错误信息
     try:
-        json.loads(raw)  # 这会抛出详细的错误信息
+        json.loads(raw)
     except json.JSONDecodeError as e:
         print(f"   JSON错误详情: {str(e)}")
-        if hasattr(e, 'pos'):
+        if hasattr(e, "pos"):
             print(f"   错误位置: {e.pos}")
             if e.pos < len(raw):
                 print(f"   错误位置上下文: {raw[max(0, e.pos-30):e.pos+30]!r}")
@@ -606,7 +655,8 @@ class AIProvider:
                     {"role": "user", "content": user_prompt}
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.3
+                temperature=0.3,
+                max_tokens=8192,
             )
             print(f"✅ AI 响应成功")
             if not response.choices or not response.choices[0].message:
@@ -616,7 +666,10 @@ class AIProvider:
             if not (content and str(content).strip()):
                 print("⚠️ AI 返回内容为空，当空对象处理")
                 return {}
-            return _parse_ai_json(str(content))
+            parsed = _parse_ai_json(str(content))
+            if isinstance(parsed, dict) and not parsed and len(str(content).strip()) > 0:
+                print("⚠️ AI 返回了非空内容但解析为空对象，可能非合法 JSON。原始长度:", len(content))
+            return parsed
         except Exception as e:
             print(f"❌ AI 调用异常: {str(e)}")
             raise Exception(f"AI 服务不可用: {str(e)}")
@@ -1967,8 +2020,37 @@ async def list_scenarios():
     conn.close()
     return [dict(row) for row in rows]
 
+def _expand_query_with_synonyms(query: str) -> str:
+    """对场景描述做同义词扩展，便于向量检索命中接口名称、path 等（如 点单流程 -> 点单 点单立结 order）。"""
+    if not (query and query.strip()):
+        return query
+    synonym_map = {
+        "点单": ["点单", "order", "additional-order", "点单立结"],
+        "立结": ["立结", "pay", "settle", "additional-order-pay"],
+        "订单": ["订单", "order"],
+        "加单": ["加单", "additional", "order"],
+        "流程": ["流程", "flow"],
+    }
+    raw = query.replace("，", " ").replace(",", " ").strip()
+    parts = [p.strip() for p in raw.split() if p.strip()]
+    extra = []
+    for part in parts:
+        if len(part) >= 2:
+            extra.append(part)
+            for syn in synonym_map.get(part, []):
+                extra.append(syn)
+        if len(part) >= 2:
+            for i in range(len(part) - 1):
+                two = part[i : i + 2]
+                for syn in synonym_map.get(two, []):
+                    extra.append(syn)
+    if not extra:
+        return query
+    return query + " " + " ".join(set(extra))
+
+
 def _rank_apis_by_intent(all_apis: List[Dict], nlu_result: Any) -> List[Dict]:
-    """按业务意图对 API 排序，使与意图相关的接口（如开台、关台、清扫）优先进入编排，避免被截断遗漏。"""
+    """按业务意图对 API 排序，使与意图相关的接口（如开台、关台、点单立结）优先进入编排；接口名称与描述加权。"""
     if not all_apis:
         return all_apis
     # 解析意图文本与动作
@@ -2000,7 +2082,7 @@ def _rank_apis_by_intent(all_apis: List[Dict], nlu_result: Any) -> List[Dict]:
     keywords = set()
     for w in domain_keywords:
         keywords.add(w)
-    # 从意图和动作中提取词（简单按空格/逗号分，以及 2~4 字连续子串避免漏词）
+    # 从意图和动作中提取词：整词 + 2/3 字子串（便于「测试点单流程」命中「点单」「点单立结」等）
     raw_parts = (intent_text + " " + " ".join(str(a) for a in actions_list)).replace("，", " ").replace(",", " ").split()
     for part in raw_parts:
         part = (part or "").strip()
@@ -2008,20 +2090,40 @@ def _rank_apis_by_intent(all_apis: List[Dict], nlu_result: Any) -> List[Dict]:
             keywords.add(part)
             for syn in synonym_map.get(part, []):
                 keywords.add(syn)
+        # 2 字子串（关键：使「测试点单流程」能拆出「点单」并触发同义词「点单立结」）
+        if len(part) >= 2:
+            for i in range(len(part) - 1):
+                two = part[i : i + 2]
+                keywords.add(two)
+                for syn in synonym_map.get(two, []):
+                    keywords.add(syn)
         if len(part) >= 4:
             for i in range(len(part) - 2):
-                keywords.add(part[i : i + 3])
+                three = part[i : i + 3]
+                keywords.add(three)
+                for syn in synonym_map.get(three, []):
+                    keywords.add(syn)
     keywords = [k for k in keywords if k and len(k) >= 2]
     if not keywords:
         return all_apis[:80]
-    # 对每个 API 打分：path + summary + description 中命中关键词次数
+    # 按接口名称(summary)、描述(description)优先打分，path/method 次之，便于「点单流程」匹配「点单立结」
     def score(api: Dict) -> int:
-        text = " ".join(
-            str(api.get(k, ""))
-            for k in ("path", "method", "summary", "description")
-            if api.get(k)
-        ).lower()
-        return sum(1 for kw in keywords if kw.lower() in text or kw in text)
+        summary_text = (api.get("summary") or "").lower()
+        desc_text = (api.get("description") or "").lower()
+        path_text = (api.get("path") or "").lower()
+        method_text = (api.get("method") or "").lower()
+        total = 0
+        for kw in keywords:
+            kw_l = kw.lower()
+            if kw_l in summary_text or kw in summary_text:
+                total += 2
+            if kw_l in desc_text or kw in desc_text:
+                total += 2
+            if kw_l in path_text or kw in path_text:
+                total += 1
+            if kw_l in method_text or kw in method_text:
+                total += 1
+        return total
     scored = [(score(api), api) for api in all_apis]
     scored.sort(key=lambda x: (-x[0], x[1].get("path", "")))
     return [api for _, api in scored]
@@ -2226,6 +2328,11 @@ async def generate_case(scenario_id: int):
         """, (scenario["project_id"],))
         rows_apis = cursor.fetchall()
         all_apis = [dict(row) for row in rows_apis]
+        if not all_apis:
+            raise HTTPException(
+                status_code=400,
+                detail="项目下暂无 API，请先添加接口后再生成测试场景。"
+            )
         apis_for_prompt = []
         project_id_str = str(scenario["project_id"] or "")
         # 构建检索查询文本（意图 + 用户描述）
@@ -2238,9 +2345,11 @@ async def generate_case(scenario_id: int):
         query_parts = [scenario.get("natural_language_input") or "", (_nlu or {}).get("intent") or ""]
         query_parts.extend((_nlu or {}).get("actions") or [])
         query_text = " ".join(str(x) for x in query_parts if x).strip() or "测试场景"
+        # 同义词扩展：使「点单流程」等查询能匹配接口名「点单立结」、path additional-order-pay 等
+        query_text_expanded = _expand_query_with_synonyms(query_text)
         if _vector_service and getattr(_vector_service, "enabled", False):
             hits = await _vector_service.semantic_search(
-                query=query_text,
+                query=query_text_expanded,
                 filter_type="api",
                 project_id=project_id_str,
                 limit=50,
@@ -2257,7 +2366,7 @@ async def generate_case(scenario_id: int):
                     apis_for_prompt = [by_id[i] for i in api_ids if i in by_id]
             if not apis_for_prompt and all_apis:
                 await _sync_project_apis_to_vector(project_id_str)
-                hits = await _vector_service.semantic_search(query=query_text, filter_type="api", project_id=project_id_str, limit=50)
+                hits = await _vector_service.semantic_search(query=query_text_expanded, filter_type="api", project_id=project_id_str, limit=50)
                 if hits:
                     api_ids = [h["payload"].get("api_id") for h in hits if h.get("payload")]
                     if api_ids:
@@ -2268,10 +2377,17 @@ async def generate_case(scenario_id: int):
                         )
                         by_id = {dict(r)["id"]: dict(r) for r in cursor.fetchall()}
                         apis_for_prompt = [by_id[i] for i in api_ids if i in by_id]
+        ranked_apis = _rank_apis_by_intent(all_apis, scenario.get("nlu_result"))[:80]
         if not apis_for_prompt:
-            ranked_apis = _rank_apis_by_intent(all_apis, scenario.get("nlu_result"))
-            apis_for_prompt = ranked_apis[:80]
-        # 兜底：若项目有 API 但检索仍为空（如 path 纯英文、描述与描述不一致），则传入全部 API 让模型自己选
+            apis_for_prompt = ranked_apis
+        else:
+            # 合并向量结果与关键词排序：向量优先，再用按接口名/描述排序的结果补足，避免漏检（如「点单流程」未命中向量但关键词能命中「点单立结」）
+            seen_ids = {a.get("id") for a in apis_for_prompt if a.get("id")}
+            for api in ranked_apis:
+                if api.get("id") not in seen_ids and len(apis_for_prompt) < 80:
+                    apis_for_prompt.append(api)
+                    seen_ids.add(api.get("id"))
+        # 兜底：若项目有 API 但检索仍为空，则传入全部 API 让模型自己选
         if not apis_for_prompt and all_apis:
             apis_for_prompt = all_apis[:80]
         
@@ -2303,19 +2419,45 @@ async def generate_case(scenario_id: int):
 7. 完整覆盖：默认编排完整流程，从 API 列表中选出该流程下的全部相关接口，不要遗漏。
 8. 步骤顺序：必须按业务流程的真实先后顺序编排。例如开台(open-pay)→关台(close-room)→清扫(clean-room-finish) 时，清扫必须在关台之后，不能把清扫插在开台和关台之间。先根据业务语义确定正确顺序，再生成 steps。
 9. 若下方提供了【知识图谱：常见依赖关系】，优先参考其中的接口先后顺序与字段映射；若无冲突请沿用，若有更优方案可灵活调整。
-格式：{ "scenario_name": "...", "steps": [{ "step_order": 1, "api_path": "...", "api_method": "...", "params": {}, "url_params": {}, "headers": {}, "param_mappings": [{ "from_step": 1, "from_field": "data.token", "to_field": "Authorization", "to_type": "headers" }] }] }"""
+格式：{ "scenario_name": "...", "steps": [{ "step_order": 1, "api_path": "...", "api_method": "...", "params": {}, "url_params": {}, "headers": {}, "param_mappings": [{ "from_step": 1, "from_field": "data.token", "to_field": "Authorization", "to_type": "headers" }] }] }
+请只输出上述 JSON 对象，不要输出其他说明或键（如 reason、message 等）。必须返回 steps 数组且至少包含 1 个步骤；若无法完整编排也请从可用 API 中选用最相关的 1 个生成 1 步。禁止返回空 steps 或仅返回 reason。"""
 
-        user_prompt = f"意图: {scenario['nlu_result']}\n可用 API: {json.dumps(apis_for_prompt)}{graph_context}" 
+        # 传给模型的 API 列表不宜过长，避免超出上下文或导致模型无法产出有效 JSON
+        apis_to_model = apis_for_prompt[:30] if len(apis_for_prompt) > 30 else apis_for_prompt
+        if len(apis_for_prompt) > 30:
+            graph_context = (graph_context or "") + "\n(已仅传入前30个最相关 API，请从中选用)\n"
+        user_prompt = f"意图: {scenario['nlu_result']}\n可用 API: {json.dumps(apis_to_model)}{graph_context}"
+        # 诊断：确认检索到的 API 数量与名称（便于排查「检索到了但模型未返回步骤」）
+        api_preview = [a.get("summary") or a.get("path") or str(a.get("id")) for a in apis_to_model[:10]]
+        print(f"[场景生成] 检索到 {len(apis_for_prompt)} 个 API，传入模型 {len(apis_to_model)} 个，前10个: {api_preview}")
         case_result = await ai_client.chat(system_prompt, user_prompt)
 
         # 校验：模型必须返回有效步骤，否则不保存、不执行，直接报错
         if not isinstance(case_result, dict):
             raise HTTPException(status_code=500, detail="生成失败：模型返回格式异常，请稍后重试")
+        # 兼容多种返回键名：steps / test_steps / testSteps / data.steps
         steps = case_result.get("steps")
         if not steps or not isinstance(steps, list):
+            steps = case_result.get("test_steps") or case_result.get("testSteps")
+        if not steps or not isinstance(steps, list):
+            data = case_result.get("data")
+            if isinstance(data, dict):
+                steps = data.get("steps")
+        if not steps or not isinstance(steps, list):
+            # 诊断日志：便于排查是检索问题还是模型返回问题
+            try:
+                preview = json.dumps(case_result, ensure_ascii=False)[:600]
+            except Exception:
+                preview = repr(case_result)[:600]
+            print(f"⚠️ 场景生成未得到有效 steps。case_result 键: {list(case_result.keys())!r}, steps 类型: {type(case_result.get('steps'))!r}")
+            print(f"⚠️ 模型返回内容预览: {preview}")
+            reason = case_result.get("reason") or case_result.get("message") or case_result.get("error")
+            if isinstance(reason, str) and len(reason) > 200:
+                reason = reason[:200] + "…"
+            hint = f" 模型说明: {reason}" if reason else ""
             raise HTTPException(
                 status_code=500,
-                detail="生成失败：未得到任何测试步骤。请检查场景描述是否与项目内 API 匹配（已启用向量语义检索与关键词兜底），或换一种描述重试。"
+                detail="生成失败：未得到任何测试步骤。请查看服务端控制台「模型返回内容预览」以排查；确认 .env 中 AI_PROVIDER/OPENAI/DEEPSEEK 配置正确。" + hint
             )
         if len(steps) == 0:
             raise HTTPException(

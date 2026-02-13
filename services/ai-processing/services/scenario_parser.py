@@ -3,7 +3,7 @@
 基于NLU结果和知识图谱，生成完整的测试步骤
 """
 from openai import AsyncOpenAI
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import json
 import sqlite3
 
@@ -17,7 +17,8 @@ class ScenarioParser:
         nlu_result: Dict,
         project_id: str,
         api_candidates: List[Dict] = None,
-        db_path: str = None
+        db_path: str = None,
+        kg_service: Optional[Any] = None,
     ) -> Dict:
         """
         解析场景，生成测试步骤
@@ -26,6 +27,8 @@ class ScenarioParser:
             nlu_result: NLU理解结果
             project_id: 项目ID
             api_candidates: 候选API列表（从向量检索获取）
+            db_path: 数据库路径（用于加载 API 候选列表）
+            kg_service: 可选的知识图谱服务实例，用于注入已知依赖提示
             
         Returns:
             结构化的测试场景
@@ -96,12 +99,43 @@ class ScenarioParser:
 }
 """
         
+        # ===== 知识图谱增强（可选，不影响现有逻辑） =====
+        kg_hints_section = ""
+        if kg_service and api_candidates:
+            try:
+                edges = kg_service.get_edges_for_prompt(
+                    project_id, api_candidates, min_confidence=0.5, limit=20
+                )
+                if edges:
+                    lines = []
+                    for edge in edges:
+                        from_api = edge.get("from_api", "")
+                        to_api = edge.get("to_api", "")
+                        fm = edge.get("field_mapping", {})
+                        conf = edge.get("confidence", 0)
+                        # 提取可读的 method:path
+                        from_parts = from_api.split(":", 2)
+                        to_parts = to_api.split(":", 2)
+                        from_label = f"{from_parts[1]} {from_parts[2]}" if len(from_parts) >= 3 else from_api
+                        to_label = f"{to_parts[1]} {to_parts[2]}" if len(to_parts) >= 3 else to_api
+                        mapping_str = ", ".join(f"{v} → {k}" for k, v in fm.items()) if fm else "无"
+                        lines.append(f"- {from_label} → {to_label} (字段映射: {mapping_str}, 置信度: {conf})")
+                    kg_hints_section = (
+                        "\n\n## 已知依赖关系（来自知识图谱，仅供参考）\n"
+                        "以下是历史执行中验证过的接口依赖关系，请优先参考这些依赖来编排步骤顺序和参数映射：\n"
+                        + "\n".join(lines)
+                    )
+                    print(f"📊 知识图谱注入 {len(edges)} 条依赖提示到场景生成 Prompt")
+            except Exception as e:
+                # 图谱查询失败不影响主流程
+                print(f"⚠️ 知识图谱查询跳过: {e}")
+
         user_prompt = f"""测试意图：
 {json.dumps(nlu_result, ensure_ascii=False, indent=2)}
 
 可用的API列表：
 {json.dumps(api_candidates or [], ensure_ascii=False, indent=2)}
-
+{kg_hints_section}
 请根据测试意图，从可用API中选择合适的接口，编排成完整的测试步骤序列。
 """
         

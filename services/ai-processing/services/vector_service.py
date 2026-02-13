@@ -19,10 +19,30 @@ from typing import List, Dict, Optional
 import hashlib
 import logging
 
+try:
+    import httpx
+except ImportError:
+    httpx = None
+
 logger = logging.getLogger(__name__)
 
 class VectorService:
-    def __init__(self, qdrant_url: str, openai_api_key: str, qdrant_api_key: Optional[str] = None, openai_base_url: Optional[str] = None):
+    def __init__(
+        self,
+        qdrant_url: str,
+        openai_api_key: str,
+        qdrant_api_key: Optional[str] = None,
+        openai_base_url: Optional[str] = None,
+        embedding_base_url: Optional[str] = None,
+        embedding_model: Optional[str] = None,
+        embedding_api_key: Optional[str] = None,
+    ):
+        """
+        embedding_base_url: 专用于向量化的 API 地址。若不设则使用 openai_base_url。
+        DeepSeek 等仅提供对话接口，不提供 embedding，请设为 OpenAI 或其它支持 embedding 的地址（如 https://api.openai.com/v1）。
+        embedding_model: 向量化模型名，默认 text-embedding-3-small。
+        embedding_api_key: 专用于向量化的 API Key；不设则使用 openai_api_key。
+        """
         self.enabled = False
         if QdrantClient is None:
             logger.warning("QdrantClient库未安装，向量服务将不可用。请安装 qdrant-client。")
@@ -33,15 +53,22 @@ class VectorService:
             if qdrant_api_key:
                 kwargs["api_key"] = qdrant_api_key
             self.qdrant = QdrantClient(**kwargs)
-            client_kwargs = {"api_key": openai_api_key}
-            if openai_base_url:
-                client_kwargs["base_url"] = openai_base_url
+            base = embedding_base_url or openai_base_url
+            client_kwargs = {"api_key": embedding_api_key or openai_api_key}
+            if base:
+                client_kwargs["base_url"] = base
+            if httpx is not None:
+                client_kwargs["http_client"] = httpx.AsyncClient(
+                    timeout=60.0,
+                    trust_env=False,
+                    verify=True,
+                )
             self.openai = AsyncOpenAI(**client_kwargs)
             self.collection_name = "api_knowledge"
-            self.embedding_model = "text-embedding-3-small"
+            self.embedding_model = embedding_model or "text-embedding-3-small"
             self.embedding_dim = 1536
             self.enabled = True
-            
+
             self._init_collection()
         except Exception as e:
             logger.error(f"向量服务初始失败: {e}")
@@ -71,7 +98,10 @@ class VectorService:
             )
             return response.data[0].embedding
         except Exception as e:
-            logger.error(f"Embedding failed: {e}")
+            logger.error(
+                f"Embedding failed: {e}. "
+                "若对话使用 DeepSeek(OPENAI_BASE_URL)，向量化需单独配置：在 .env 中设置 EMBEDDING_BASE_URL=https://api.openai.com/v1 和有效的 OPENAI_API_KEY（或 EMBEDDING_API_KEY），并确保网络可访问。"
+            )
             return []
     
     async def index_api(self, api: Dict):

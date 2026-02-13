@@ -180,6 +180,17 @@ data_import_service = DataImportService(
     db_path=DB_PATH
 )
 
+# 知识图谱（可选，初始化失败不影响主流程）
+_kg = None
+try:
+    from lightweight_services import LightweightKnowledgeGraph
+    import os as _os_kg
+    _KG_PATH = _os_kg.path.join(_os_kg.path.dirname(DB_PATH), "knowledge_graph.pkl")
+    _kg = LightweightKnowledgeGraph(_KG_PATH)
+    print("✅ 知识图谱已启用（场景生成将使用依赖提示增强）")
+except Exception as _e:
+    print(f"⚠️ 知识图谱初始化跳过（不影响主流程）: {_e}")
+
 # ============= 请求/响应模型 =============
 
 class ScenarioUnderstandingRequest(BaseModel):
@@ -265,7 +276,8 @@ async def parse_scenario(request: ScenarioParseRequest):
         result = await scenario_parser.parse_scenario(
             nlu_result=request.nlu_result,
             project_id=request.project_id,
-            db_path=DB_PATH
+            db_path=DB_PATH,
+            kg_service=_kg,
         )
         return result
     except Exception as e:
