@@ -780,6 +780,11 @@ def init_database():
         test_case_id INTEGER,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
+    # 旧库迁移：为场景增加生成过程日志字段
+    try:
+        cursor.execute("ALTER TABLE scenarios ADD COLUMN generation_log TEXT")
+    except Exception:
+        pass
     
     # 测试用例表 (步骤序列) - 场景级用例
     cursor.execute('''CREATE TABLE IF NOT EXISTS test_cases (
@@ -934,11 +939,42 @@ async def create_scenario(req: ScenarioCreateRequest):
         conn.commit()
         conn.close()
         
-        return {"id": scenario_id, "name": nlu_result.get("intent"), "description": req.natural_language_input}
+        # 返回时带上意图分析结果，便于前端在生成过程里结构化展示
+        return {
+            "id": scenario_id,
+            "name": nlu_result.get("intent"),
+            "description": req.natural_language_input,
+            "nlu_result": nlu_result,
+        }
     except Exception as e:
         print(f"❌ 场景创建失败: {str(e)}")
         import traceback
         traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ScenarioGenerationLog(BaseModel):
+    """前端用于保存场景生成过程（分析/编排日志）"""
+    log: str
+
+
+@app.post("/api/v1/scenarios/{scenario_id}/generation-log")
+async def save_scenario_generation_log(scenario_id: int, body: ScenarioGenerationLog):
+    """
+    保存场景测试的生成/分析过程日志，便于在场景列表中回看。
+    仅保存文本，不影响原有用例执行。
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE scenarios SET generation_log = ? WHERE id = ?",
+            (body.log, scenario_id),
+        )
+        conn.commit()
+        conn.close()
+        return {"success": True}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/v1/scenarios/{scenario_id}")

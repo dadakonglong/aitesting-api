@@ -33,6 +33,8 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
     // 实时进度展示
     const [progressLines, setProgressLines] = useState<string[]>([])
     const progressEndRef = useRef<HTMLDivElement>(null)
+    // 将进度同时存入 ref，便于生成完成后整体保存到后端
+    const progressRef = useRef<string[]>([])
     // 测试场景模式：环境配置（生成后自动执行用）
     const [scenarioEnvs, setScenarioEnvs] = useState<EnvItem[]>([])
     const [scenarioSelectedEnvId, setScenarioSelectedEnvId] = useState<number | 'custom' | null>(null)
@@ -127,10 +129,16 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
             }
             setLoading(true)
             setResult(null)
-            setProgressLines(['开始处理', ''])
+            const initialLines = ['开始处理', '']
+            progressRef.current = initialLines
+            setProgressLines(initialLines)
 
             const appendProgress = (...lines: string[]) => {
-                setProgressLines((prev) => [...prev, ...lines])
+                setProgressLines((prev) => {
+                    const next = [...prev, ...lines]
+                    progressRef.current = next
+                    return next
+                })
                 setTimeout(() => progressEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50)
             }
 
@@ -149,6 +157,57 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                 if (!scenarioRes.ok) throw new Error('创建场景失败')
                 const scenarioData = await scenarioRes.json()
                 appendProgress('   ✓ 提取意图与实体')
+
+                // 结构化展示意图分析结果（意图 / 实体 / 动作 / 预期），直接作为生成过程的一部分
+                try {
+                    let nlu: any = scenarioData.nlu_result
+                    if (nlu && typeof nlu === 'string') {
+                        try {
+                            nlu = JSON.parse(nlu)
+                        } catch {
+                            // ignore
+                        }
+                    }
+                    if (nlu && typeof nlu === 'object') {
+                        if (nlu.intent) {
+                            appendProgress(`   意图：${nlu.intent}`)
+                        }
+                        const entitiesRaw = Array.isArray(nlu.entities) ? nlu.entities : []
+                        const entities = entitiesRaw
+                            .map((e: any) => {
+                                if (typeof e === 'string') return e
+                                if (!e || typeof e !== 'object') return ''
+                                return e.name || e.type || e.label || ''
+                            })
+                            .filter((x: string) => x)
+                        if (entities.length > 0) {
+                            appendProgress(`   关键实体：${entities.join('，')}`)
+                        }
+                        const actionsRaw = Array.isArray(nlu.actions) ? nlu.actions : []
+                        if (actionsRaw.length > 0) {
+                            appendProgress('   动作拆解：')
+                            actionsRaw.forEach((a: any, idx: number) => {
+                                let text = ''
+                                if (typeof a === 'string') text = a
+                                else if (a && typeof a === 'object') text = a.name || a.action || a.description || ''
+                                appendProgress(`      ${idx + 1}. ${text || '（未命名动作）'}`)
+                            })
+                        }
+                        const expectedRaw = Array.isArray(nlu.expected_results) ? nlu.expected_results : []
+                        if (expectedRaw.length > 0) {
+                            appendProgress('   预期结果：')
+                            expectedRaw.forEach((r: any, idx: number) => {
+                                let text = ''
+                                if (typeof r === 'string') text = r
+                                else if (r && typeof r === 'object') text = r.description || r.expectation || ''
+                                appendProgress(`      ${idx + 1}. ${text || '（未描述）'}`)
+                            })
+                        }
+                    }
+                } catch {
+                    // 意图展示失败不影响主流程
+                }
+
                 appendProgress('   ✓ 场景已保存')
                 appendProgress('')
 
@@ -198,7 +257,8 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                 steps.forEach((s: any, i: number) => {
                     const method = (s.api_method || s.method || 'GET').toString().toUpperCase()
                     const path = s.api_path || s.path || '—'
-                    appendProgress(`   ${i + 1}. ${method} ${path}`)
+                    const name = s.description || s.api_name || s.name || ''
+                    appendProgress(`   ${i + 1}. ${method} ${path}${name ? `（${name}）` : ''}`)
                 })
                 appendProgress('')
 
@@ -236,6 +296,20 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                 appendProgress('处理完成！')
 
                 setResult({ scenario: scenarioData, testCase: caseData })
+
+                // 将本次生成过程保存到后端，便于在场景列表中回看
+                try {
+                    const apiUrl = process.env.NEXT_PUBLIC_AI_API_URL || process.env.NEXT_PUBLIC_API_URL
+                    await fetch(`${apiUrl}/api/v1/scenarios/${scenarioData.id}/generation-log`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            log: (progressRef.current || []).join('\n'),
+                        }),
+                    })
+                } catch (e) {
+                    console.error('保存生成过程失败:', e)
+                }
             } catch (error: any) {
                 appendProgress('', `❌ 错误: ${error.message}`)
                 alert(`错误: ${error.message}`)

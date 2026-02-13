@@ -62,6 +62,8 @@ export default function TestScenariosTab() {
         is_active: true
     })
     const [projectFeishuWebhook, setProjectFeishuWebhook] = useState('')
+    // 场景生成过程展开状态
+    const [analysisExpandedScenarios, setAnalysisExpandedScenarios] = useState<Set<number>>(new Set())
 
     useEffect(() => {
         const init = async () => {
@@ -458,6 +460,15 @@ export default function TestScenariosTab() {
         })
     }
 
+    const toggleAnalysis = (scenarioId: number) => {
+        setAnalysisExpandedScenarios(prev => {
+            const next = new Set(prev)
+            if (next.has(scenarioId)) next.delete(scenarioId)
+            else next.add(scenarioId)
+            return next
+        })
+    }
+
     const toggleExpand = (scenarioId: number) => {
         setExpandedScenarios(prev => {
             const next = new Set(prev)
@@ -742,6 +753,70 @@ export default function TestScenariosTab() {
                                         </button>
                                     </div>
                                 </div>
+
+                                {/* 场景生成过程回看入口 */}
+                                {scenario.generation_log && (
+                                    <div style={{ marginBottom: '0.5rem' }}>
+                                        <div
+                                            onClick={() => toggleAnalysis(scenario.id)}
+                                            style={{
+                                                fontSize: '0.75rem',
+                                                color: '#4B5563',
+                                                cursor: 'pointer',
+                                                display: 'inline-flex',
+                                                alignItems: 'center',
+                                                gap: '0.25rem',
+                                                padding: '0.35rem 0.7rem',
+                                                background: '#F3F4F6',
+                                                borderRadius: '999px',
+                                                border: '1px solid #E5E7EB'
+                                            }}
+                                            title="查看该场景生成测试用例时的分析与编排过程"
+                                        >
+                                            <Wand2 size={14} />
+                                            生成过程
+                                            {analysisExpandedScenarios.has(scenario.id) ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                                        </div>
+                                        {analysisExpandedScenarios.has(scenario.id) && (
+                                            <div
+                                                style={{
+                                                    marginTop: '0.5rem',
+                                                    padding: '0.75rem 0.9rem',
+                                                    background: '#F9FAFB',
+                                                    borderRadius: '0.75rem',
+                                                    border: '1px solid #E5E7EB',
+                                                    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+                                                    fontSize: '0.75rem',
+                                                    maxHeight: '220px',
+                                                    overflowY: 'auto',
+                                                    color: '#374151'
+                                                }}
+                                            >
+                                                {String(scenario.generation_log || '')
+                                                    .split(/\r?\n/)
+                                                    .filter((line: string) => line !== '')
+                                                    .map((line: string, idx: number) => {
+                                                        const isError = line.startsWith('❌')
+                                                        const isWarning = line.includes('⚠')
+                                                        const isComplete = line === '任务完成！' || line === '处理完成！'
+                                                        return (
+                                                            <div
+                                                                key={idx}
+                                                                style={{
+                                                                    whiteSpace: 'pre-wrap',
+                                                                    color: isError ? '#DC2626' : isWarning ? '#D97706' : isComplete ? '#059669' : undefined,
+                                                                    fontWeight: isComplete ? 700 : undefined,
+                                                                    marginTop: idx === 0 ? 0 : '0.15rem',
+                                                                }}
+                                                            >
+                                                                {line}
+                                                            </div>
+                                                        )
+                                                    })}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
 
                                 {/* 编排预览（安全解析：test_case_steps 可能为 null/无效 JSON） */}
                                 {(() => {
