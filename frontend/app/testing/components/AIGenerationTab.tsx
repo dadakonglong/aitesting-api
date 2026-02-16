@@ -264,33 +264,133 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
 
                 // ---------- 阶段三：自动执行场景 ----------
                 appendProgress('执行场景...')
-                let baseUrl = scenarioExecBaseUrl.trim()
-                if (scenarioSelectedEnvId !== 'custom' && scenarioSelectedEnvId != null) {
-                    const env = scenarioEnvs.find((e) => e.id === scenarioSelectedEnvId)
-                    baseUrl = (env?.base_url || '').trim()
-                }
-                if (!baseUrl) baseUrl = 'http://localhost:8000'
-                try {
-                    const apiUrl = process.env.NEXT_PUBLIC_EXEC_API_URL || process.env.NEXT_PUBLIC_API_URL
-                    const execRes = await fetch(`${apiUrl}/api/v1/executions`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            test_case_id: caseData.id,
-                            environment: scenarioEnvs.find((e) => e.id === scenarioSelectedEnvId)?.env_name || 'test',
-                            base_url: baseUrl,
-                        }),
-                    })
-                    if (execRes.ok) {
-                        const execData = await execRes.json()
-                        const status = execData.status === 'success' ? '全部通过' : '存在失败'
-                        appendProgress(`   ✓ 执行完成：${status}`)
-                    } else {
-                        const err = await execRes.json().catch(() => ({}))
-                        appendProgress(`   ⚠ 执行失败：${err.detail || '请检查环境地址'}`)
+                
+                // 调试：打印返回的数据
+                console.log('场景生成返回数据:', JSON.stringify(caseData, null, 2))
+                console.log('execution存在:', !!caseData.execution)
+                console.log('analysis存在:', !!caseData.analysis)
+                
+                // 使用后端返回的执行结果和分析结果（如果存在）
+                // 注意：即使执行失败，后端也应该返回execution和analysis，避免重复执行
+                if (caseData.execution && caseData.analysis) {
+                    const execData = caseData.execution
+                    const analysisData = caseData.analysis
+                    
+                    // 显示执行结果
+                    const status = execData.status === 'success' ? '全部通过' : '存在失败'
+                    appendProgress(`   ✓ 执行完成：${status}`)
+                    appendProgress('')
+                    appendProgress('执行结果：')
+                    appendProgress(`   总步骤数：${analysisData.total_steps || 0}`)
+                    appendProgress(`   通过步骤：${analysisData.passed_steps || 0}`)
+                    appendProgress(`   失败步骤：${analysisData.failed_steps || 0}`)
+                    
+                    // 显示每个步骤的执行结果
+                    if (analysisData.analysis && analysisData.analysis.length > 0) {
+                        appendProgress('')
+                        appendProgress('步骤详情：')
+                        analysisData.analysis.forEach((stepAnalysis: any) => {
+                            const stepStatus = stepAnalysis.status === 'passed' ? '✓' : '✗'
+                            const stepStatusText = stepAnalysis.status === 'passed' ? '通过' : '失败'
+                            appendProgress(`   ${stepStatus} 步骤${stepAnalysis.step_order}：${stepAnalysis.api_path || '—'}`)
+                            appendProgress(`     状态：${stepStatusText}`)
+                            if (stepAnalysis.http_status) {
+                                appendProgress(`     HTTP状态码：${stepAnalysis.http_status}`)
+                            }
+                            if (stepAnalysis.business_code !== null && stepAnalysis.business_code !== undefined) {
+                                appendProgress(`     业务状态码：${stepAnalysis.business_code}`)
+                            }
+                            if (stepAnalysis.message) {
+                                appendProgress(`     消息：${stepAnalysis.message}`)
+                            }
+                            if (stepAnalysis.failure_reason) {
+                                appendProgress(`     失败原因：${stepAnalysis.failure_reason}`)
+                            }
+                        })
                     }
-                } catch (e: any) {
-                    appendProgress(`   ⚠ 执行异常：${e.message}`)
+                    
+                    // 显示结果分析摘要
+                    if (analysisData.summary) {
+                        appendProgress('')
+                        appendProgress('结果分析：')
+                        appendProgress(`   ${analysisData.summary}`)
+                    }
+                    
+                    // 显示大模型深度分析结果
+                    if (analysisData.ai_analysis) {
+                        const aiAnalysis = analysisData.ai_analysis
+                        appendProgress('')
+                        appendProgress('AI深度分析：')
+                        
+                        if (aiAnalysis.overview) {
+                            appendProgress(`   执行概览：${aiAnalysis.overview}`)
+                        }
+                        
+                        if (aiAnalysis.failed_analysis && aiAnalysis.failed_analysis.length > 0) {
+                            appendProgress('')
+                            appendProgress('   失败步骤深度分析：')
+                            aiAnalysis.failed_analysis.forEach((failed: any) => {
+                                appendProgress(`     步骤${failed.step_order}（${failed.api_path || '—'}）：`)
+                                if (failed.root_cause) {
+                                    appendProgress(`       根因：${failed.root_cause}`)
+                                }
+                                if (failed.suggestions) {
+                                    appendProgress(`       建议：${failed.suggestions}`)
+                                }
+                            })
+                        }
+                        
+                        if (aiAnalysis.success_evaluation) {
+                            appendProgress('')
+                            appendProgress(`   成功步骤评估：${aiAnalysis.success_evaluation}`)
+                        }
+                        
+                        if (aiAnalysis.business_flow_completeness) {
+                            appendProgress('')
+                            appendProgress(`   业务流程完整性：${aiAnalysis.business_flow_completeness}`)
+                        }
+                        
+                        if (aiAnalysis.improvement_suggestions && aiAnalysis.improvement_suggestions.length > 0) {
+                            appendProgress('')
+                            appendProgress('   改进建议：')
+                            aiAnalysis.improvement_suggestions.forEach((suggestion: string, idx: number) => {
+                                appendProgress(`     ${idx + 1}. ${suggestion}`)
+                            })
+                        }
+                    }
+                    
+                    // 如果有自愈结果，显示自愈信息
+                    if (caseData.heal) {
+                        appendProgress('')
+                        appendProgress('自愈修复：')
+                        if (caseData.heal.status === 'healed') {
+                            appendProgress('   ✓ 已自动修复测试用例')
+                            if (caseData.heal.message) {
+                                appendProgress(`   ${caseData.heal.message}`)
+                            }
+                            if (caseData.heal.changes && caseData.heal.changes.length > 0) {
+                                appendProgress('   修复内容：')
+                                caseData.heal.changes.forEach((change: any) => {
+                                    appendProgress(`     步骤${change.step_order}：`)
+                                    if (change.changes) {
+                                        change.changes.forEach((c: any) => {
+                                            appendProgress(`       - ${c.field}：${c.old} → ${c.new}`)
+                                        })
+                                    }
+                                })
+                            }
+                        } else if (caseData.heal.status === 'cannot_heal') {
+                            appendProgress('   ⚠ 无法自动修复，需要人工介入')
+                            if (caseData.heal.message) {
+                                appendProgress(`   ${caseData.heal.message}`)
+                            }
+                        }
+                    }
+                } else {
+                    // 如果后端没有返回执行结果，说明后端可能没有执行或者执行失败
+                    // 为了避免重复执行导致"请求频繁"的问题，这里只显示提示信息
+                    appendProgress('   ⚠ 后端未返回执行结果，请手动执行测试')
+                    appendProgress('   提示：后端已在生成时执行过一次，为避免重复执行，请到场景列表手动执行')
                 }
                 appendProgress('')
                 appendProgress('处理完成！')
@@ -298,18 +398,24 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                 setResult({ scenario: scenarioData, testCase: caseData })
 
                 // 将本次生成过程保存到后端，便于在场景列表中回看
-                try {
-                    const apiUrl = process.env.NEXT_PUBLIC_AI_API_URL || process.env.NEXT_PUBLIC_API_URL
-                    await fetch(`${apiUrl}/api/v1/scenarios/${scenarioData.id}/generation-log`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            log: (progressRef.current || []).join('\n'),
-                        }),
-                    })
-                } catch (e) {
-                    console.error('保存生成过程失败:', e)
-                }
+                // 注意：确保在所有内容都添加到 progressRef 后再保存
+                // 使用 setTimeout 确保所有 appendProgress 调用都已完成
+                setTimeout(async () => {
+                    try {
+                        const apiUrl = process.env.NEXT_PUBLIC_AI_API_URL || process.env.NEXT_PUBLIC_API_URL
+                        const logContent = (progressRef.current || []).join('\n')
+                        console.log('保存生成过程，内容长度:', logContent.length)
+                        await fetch(`${apiUrl}/api/v1/scenarios/${scenarioData.id}/generation-log`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                log: logContent,
+                            }),
+                        })
+                    } catch (e) {
+                        console.error('保存生成过程失败:', e)
+                    }
+                }, 100)
             } catch (error: any) {
                 appendProgress('', `❌ 错误: ${error.message}`)
                 alert(`错误: ${error.message}`)

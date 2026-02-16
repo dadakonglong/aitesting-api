@@ -2188,7 +2188,15 @@ async def generate_case(scenario_id: int):
             return mappings
 
         def _enhance_steps_with_headers(project_id: str, steps: List[Dict[str, Any]], cursor):
-            """生成用例后，自动补齐 headers + 动态依赖（如 token、员工/门店ID、sessionId 等）的 param_mappings。"""
+            """
+            生成用例后，自动补齐 headers + 动态依赖（如 token、员工/门店ID、sessionId 等）的 param_mappings。
+            
+            说明：
+            1. AI生成的映射：基于业务理解，可能生成部分映射，但可能不准确（不知道实际响应结构）
+            2. 增强函数的自动补齐：基于规则和模式，知道常见响应结构（data.token, data.sessionId等），更可靠
+            3. 策略：保留AI生成的映射，但增强函数会智能补充遗漏的关键映射（如Authorization、X-Venue-Id等）
+            4. 增强函数使用多候选路径策略（如data.token, token, data.access_token），提高成功率
+            """
             if not isinstance(steps, list) or not steps:
                 return steps
 
@@ -2289,21 +2297,33 @@ async def generate_case(scenario_id: int):
 
                 # 5) 通用 body 依赖自动补齐：同名字段 data.xxx -> params.xxx
                 # 只对第2步及之后生效，且不会覆盖已有人工映射
+                # 策略：智能补充AI可能遗漏的映射，但不会覆盖已有的映射
                 if isinstance(params_body, dict) and int(current_step_order) > 1:
                     from_step_for_generic = int(current_step_order) - 1
                     for field_name in list(params_body.keys()):
-                        # 已有专门逻辑或已配置映射的字段跳过
+                        # 已有专门逻辑的字段跳过（sessionId有专门逻辑）
                         if field_name in ("sessionId",):
                             continue
+                        # 如果该字段已经有映射（AI生成的或之前添加的），跳过
                         if _has_mapping(param_mappings, field_name, to_type="params"):
                             continue
-                        # 自动假定上一步响应中存在 data.<field_name>
-                        param_mappings.append({
-                            "from_step": from_step_for_generic,
-                            "from_field": f"data.{field_name}",
-                            "to_field": field_name,
-                            "to_type": "params"
-                        })
+                        # 智能判断：如果字段名看起来像ID或需要依赖的字段（如xxxId, xxxToken等），才自动添加
+                        # 避免为所有字段都添加映射，减少错误映射
+                        field_lower = field_name.lower()
+                        is_likely_dependency = (
+                            field_lower.endswith("id") or 
+                            field_lower.endswith("token") or
+                            field_lower.endswith("session") or
+                            field_lower in ("orderid", "userid", "venueid", "employeeid", "roomid")
+                        )
+                        if is_likely_dependency:
+                            # 自动假定上一步响应中存在 data.<field_name>
+                            param_mappings.append({
+                                "from_step": from_step_for_generic,
+                                "from_field": f"data.{field_name}",
+                                "to_field": field_name,
+                                "to_type": "params"
+                            })
 
                 step["headers"] = headers
                 step["param_mappings"] = param_mappings
@@ -2464,12 +2484,32 @@ async def generate_case(scenario_id: int):
                 status_code=500,
                 detail="生成失败：测试步骤为空。请检查场景描述与项目 API 是否相关，或稍后重试。"
             )
+        
+        # 确保每个步骤都有 param_mappings 字段（即使为空列表）
+        for i, step in enumerate(steps):
+            if isinstance(step, dict):
+                if "param_mappings" not in step:
+                    step["param_mappings"] = []
+                elif not isinstance(step.get("param_mappings"), list):
+                    step["param_mappings"] = []
+                # 调试：打印AI生成的param_mappings
+                if step.get("param_mappings"):
+                    print(f"DEBUG: AI生成的步骤{step.get('step_order', i+1)} param_mappings: {step.get('param_mappings')}")
 
         # 3.5 生成后增强：自动合并 API headers，并补齐动态头映射（避免漏 X-Employee-Id / X-Venue-Id 等）
+        # 说明：
+        # 1. AI生成的映射：基于业务理解，可能生成部分映射，但可能不准确（不知道实际响应结构）
+        # 2. 增强函数的自动补齐：基于规则和模式，知道常见响应结构（data.token, data.sessionId等），更可靠
+        # 3. 策略：保留AI生成的映射，但增强函数的自动补齐逻辑会智能补充遗漏的映射
+        # 4. 增强函数会确保：Authorization、X-Venue-Id、X-Employee-Id等关键映射一定存在
         try:
             case_result["steps"] = _enhance_steps_with_headers(scenario["project_id"], steps, cursor)
         except Exception as _e:
             print(f"DEBUG: enhance steps headers failed: {str(_e)}")
+            import traceback
+            traceback.print_exc()
+            # 如果增强失败，使用原始步骤
+            case_result["steps"] = steps
         
         # 4. 保存测试用例
         cursor.execute(
@@ -2478,9 +2518,182 @@ async def generate_case(scenario_id: int):
         )
         case_id = cursor.lastrowid
         cursor.execute("UPDATE scenarios SET test_case_id = ? WHERE id = ?", (case_id, scenario_id))
+        
+        # 5. 阶段3：自动执行与分析（生成后自动执行并分析）
+        execution_result = None
+        analysis_result = None
+        heal_result = None
+        try:
+            # 获取base_url（从项目环境配置或默认值）
+            base_url = "http://localhost:8000"
+            cursor.execute(
+                "SELECT base_url FROM project_environments WHERE project_id = ? AND is_default = 1 LIMIT 1",
+                (scenario["project_id"],)
+            )
+            env_row = cursor.fetchone()
+            if env_row:
+                base_url = env_row[0] or base_url
+            
+            # 执行测试步骤
+            steps_to_execute = case_result.get("steps") or []
+            if steps_to_execute:
+                try:
+                    step_results = await _run_steps(steps_to_execute, base_url)
+                    
+                    # 结果分析（规则分析）
+                    analysis_result = _analyze_execution_results(step_results)
+                    
+                    # 大模型深度分析
+                    try:
+                        ai_analysis = await _analyze_execution_results_with_ai(
+                            ai_client,
+                            step_results,
+                            analysis_result,
+                            scenario_name=scenario.get("name", ""),
+                            case_name=case_result.get("scenario_name", "")
+                        )
+                        # 将大模型分析结果添加到analysis_result中
+                        analysis_result["ai_analysis"] = ai_analysis
+                    except Exception as ai_e:
+                        # 大模型分析失败不影响主流程
+                        print(f"DEBUG: 大模型分析失败: {str(ai_e)}")
+                    
+                    # 判断整体状态
+                    all_passed = analysis_result["overall_status"] == "passed"
+                    final_status = "success" if all_passed else "failed"
+                    
+                    # 保存执行记录
+                    cursor.execute(
+                        "INSERT INTO executions (test_case_id, status, results) VALUES (?, ?, ?)",
+                        (case_id, final_status, json.dumps(step_results)),
+                    )
+                    exec_id = cursor.lastrowid
+                    
+                    # 知识图谱：只有所有步骤都通过才学习
+                    project_id_for_kg = scenario.get("project_id") or "default-project"
+                    if _kg and all_passed:
+                        _learn_steps_to_kg(project_id_for_kg, steps_to_execute, is_success=True, source_id=case_id)
+                    
+                    execution_result = {
+                        "id": exec_id,
+                        "status": final_status,
+                        "results": step_results
+                    }
+                    
+                    # 阶段4：如果执行失败，尝试自愈修复
+                    if not all_passed:
+                        try:
+                            # 构建执行结果格式（供healer使用）
+                            execution_result_for_healer = {
+                                "steps": step_results
+                            }
+                            
+                            # 调用自愈分析
+                            heal_analysis = await healer_agent.analyze_failure(execution_result_for_healer)
+                            
+                            # 如果可自愈，执行自动修复
+                            if heal_analysis.get("healable", False):
+                                heal_result = await healer_agent.heal(case_id, execution_result_for_healer)
+                                
+                                # 如果修复成功，可以再次执行（可选，这里先不自动执行，让用户手动触发）
+                                if heal_result.get("status") == "healed":
+                                    # 更新用例步骤（heal已经更新了数据库）
+                                    # 可以在这里选择是否自动重新执行，暂时不自动执行
+                                    pass
+                        except Exception as heal_e:
+                            # 自愈失败不影响主流程
+                            print(f"DEBUG: 场景用例自愈失败: {str(heal_e)}")
+                            import traceback
+                            traceback.print_exc()
+                except Exception as run_e:
+                    # 执行失败也要返回错误信息
+                    print(f"DEBUG: 场景用例执行步骤失败: {str(run_e)}")
+                    import traceback
+                    traceback.print_exc()
+                    # 即使执行失败，也要返回空的执行结果，避免前端重复执行
+                    execution_result = {
+                        "id": None,
+                        "status": "failed",
+                        "results": [],
+                        "error": str(run_e)
+                    }
+                    analysis_result = {
+                        "overall_status": "failed",
+                        "total_steps": len(steps_to_execute),
+                        "passed_steps": 0,
+                        "failed_steps": len(steps_to_execute),
+                        "analysis": [],
+                        "summary": f"执行失败: {str(run_e)}"
+                    }
+            else:
+                # 如果没有步骤，也要返回空结果
+                execution_result = {
+                    "id": None,
+                    "status": "skipped",
+                    "results": []
+                }
+                analysis_result = {
+                    "overall_status": "skipped",
+                    "total_steps": 0,
+                    "passed_steps": 0,
+                    "failed_steps": 0,
+                    "analysis": [],
+                    "summary": "没有可执行的步骤"
+                }
+        except Exception as exec_e:
+            # 执行失败不影响用例生成，但返回错误信息
+            print(f"DEBUG: 场景用例生成后自动执行失败: {str(exec_e)}")
+            import traceback
+            traceback.print_exc()
+            # 即使异常，也要返回错误信息，避免前端重复执行
+            execution_result = {
+                "id": None,
+                "status": "error",
+                "results": [],
+                "error": str(exec_e)
+            }
+            analysis_result = {
+                "overall_status": "error",
+                "total_steps": 0,
+                "passed_steps": 0,
+                "failed_steps": 0,
+                "analysis": [],
+                "summary": f"执行异常: {str(exec_e)}"
+            }
+        
         conn.commit()
         conn.close()
-        return {**case_result, "name": case_result.get("scenario_name"), "id": case_id}
+        
+        # 返回生成结果和执行分析结果
+        result = {**case_result, "name": case_result.get("scenario_name"), "id": case_id}
+        
+        # 确保 steps 中包含完整的 param_mappings
+        if "steps" in result and isinstance(result["steps"], list):
+            for step in result["steps"]:
+                if isinstance(step, dict):
+                    # 确保 param_mappings 存在且是列表
+                    if "param_mappings" not in step or not isinstance(step.get("param_mappings"), list):
+                        step["param_mappings"] = []
+                    # 调试：打印每个步骤的 param_mappings
+                    if step.get("param_mappings"):
+                        print(f"DEBUG: 步骤{step.get('step_order', '?')} param_mappings: {step.get('param_mappings')}")
+        
+        if execution_result:
+            result["execution"] = execution_result
+        if analysis_result:
+            result["analysis"] = analysis_result
+        # 如果有自愈结果，也返回
+        if heal_result:
+            result["heal"] = heal_result
+        
+        # 调试：打印返回的数据结构
+        print(f"DEBUG: 场景生成返回数据 - execution: {execution_result is not None}, analysis: {analysis_result is not None}, heal: {heal_result is not None}")
+        print(f"DEBUG: 返回的 steps 数量: {len(result.get('steps', []))}")
+        if result.get("steps"):
+            for i, step in enumerate(result["steps"][:3]):  # 只打印前3个步骤
+                print(f"DEBUG: 步骤{i+1} 包含字段: {list(step.keys())}, param_mappings: {step.get('param_mappings')}")
+        
+        return result
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -2534,6 +2747,238 @@ def _normalize_params(params):
                  new_params[item[0]] = item[1]
         return new_params
     return params
+
+def _analyze_execution_results(step_results: List[Dict]) -> Dict:
+    """
+    阶段3子阶段2：结果分析
+    分析每个步骤的执行结果，判断业务状态码（code字段）是否为0
+    所有步骤的业务状态码都为0才算通过
+    """
+    analysis = []
+    total_steps = len(step_results)
+    passed_steps = 0
+    failed_steps = 0
+    
+    for step_result in step_results:
+        step_order = step_result.get("step_order", 0)
+        api_path = step_result.get("url", "")
+        # 从url中提取path部分
+        if api_path:
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(api_path)
+                api_path = parsed.path
+            except Exception:
+                pass
+        
+        http_status = step_result.get("status_code")
+        if isinstance(http_status, str) and http_status.isdigit():
+            http_status = int(http_status)
+        elif not isinstance(http_status, int):
+            http_status = 0
+        
+        response = step_result.get("response")
+        business_code = None
+        message = None
+        
+        # 提取业务状态码和错误信息
+        if isinstance(response, dict):
+            # 尝试多种可能的字段名
+            code_fields = ["code", "errcode", "retCode", "status", "ret", "error_code", "statusCode"]
+            message_fields = ["message", "msg", "errmsg", "info", "error", "desc", "description"]
+            
+            for field in code_fields:
+                if field in response:
+                    business_code = response[field]
+                    break
+            
+            # 如果code在data中
+            if business_code is None and "data" in response and isinstance(response["data"], dict):
+                for field in code_fields:
+                    if field in response["data"]:
+                        business_code = response["data"][field]
+                        break
+            
+            for field in message_fields:
+                if field in response:
+                    message = response[field]
+                    break
+            
+            # 如果message在data中
+            if message is None and "data" in response and isinstance(response["data"], dict):
+                for field in message_fields:
+                    if field in response["data"]:
+                        message = response["data"][field]
+                        break
+        
+        # 判断是否通过
+        # 条件：HTTP状态码在2xx范围 且 业务状态码为0（或不存在业务状态码时，HTTP状态码在2xx范围）
+        http_passed = 200 <= http_status < 300 if isinstance(http_status, int) else False
+        business_passed = True
+        
+        if business_code is not None:
+            # 业务状态码存在时，必须为0才算通过
+            try:
+                code_value = int(business_code) if not isinstance(business_code, int) else business_code
+                business_passed = (code_value == 0)
+            except (ValueError, TypeError):
+                # 如果无法转换为数字，认为业务状态码检查失败
+                business_passed = False
+        
+        step_passed = http_passed and business_passed
+        
+        if step_passed:
+            passed_steps += 1
+        else:
+            failed_steps += 1
+        
+        # 生成失败原因
+        failure_reason = None
+        if not step_passed:
+            reasons = []
+            if not http_passed:
+                reasons.append(f"HTTP状态码错误：{http_status}")
+            if business_code is not None and not business_passed:
+                reasons.append(f"业务状态码错误：{business_code}")
+                if message:
+                    reasons.append(f"错误信息：{message}")
+            elif business_code is None and not http_passed:
+                reasons.append("HTTP请求失败")
+            
+            failure_reason = "；".join(reasons) if reasons else "未知错误"
+        
+        analysis.append({
+            "step_order": step_order,
+            "api_path": api_path,
+            "status": "passed" if step_passed else "failed",
+            "http_status": http_status,
+            "business_code": business_code,
+            "message": message,
+            "failure_reason": failure_reason,
+            "response": response
+        })
+    
+    # 判断整体状态
+    overall_status = "passed" if passed_steps == total_steps and total_steps > 0 else "failed"
+    
+    # 生成摘要
+    if overall_status == "passed":
+        summary = f"场景执行成功：所有{total_steps}个步骤都通过"
+    else:
+        summary = f"场景执行失败：{failed_steps}个步骤失败，{passed_steps}个步骤通过"
+    
+    return {
+        "overall_status": overall_status,
+        "total_steps": total_steps,
+        "passed_steps": passed_steps,
+        "failed_steps": failed_steps,
+        "analysis": analysis,
+        "summary": summary
+    }
+
+
+async def _analyze_execution_results_with_ai(
+    ai_client: Any,
+    step_results: List[Dict],
+    analysis_result: Dict,
+    scenario_name: str = "",
+    case_name: str = ""
+) -> Dict:
+    """
+    使用大模型对场景用例执行结果进行深度分析
+    提供更智能、更深入的分析报告
+    """
+    try:
+        system_prompt = """你是一个场景测试结果分析专家。
+你的任务是根据场景用例的执行结果，提供深入的分析报告。
+
+## 分析内容
+
+1. **执行概览**：总结整体执行情况
+2. **失败步骤分析**：深入分析失败步骤的原因，包括：
+   - HTTP状态码分析
+   - 业务状态码分析
+   - 错误信息解读
+   - 可能的根因
+3. **成功步骤评估**：评估成功步骤是否真正符合预期
+4. **业务流程完整性**：评估整个业务流程是否完整执行
+5. **改进建议**：提供具体的优化建议
+
+## 输出格式
+
+请以 JSON 格式返回分析结果：
+{
+    "overview": "整体执行情况概述",
+    "failed_analysis": [
+        {
+            "step_order": 步骤序号,
+            "api_path": "接口路径",
+            "root_cause": "失败根因分析",
+            "suggestions": "修复建议"
+        }
+    ],
+    "success_evaluation": "成功步骤评估",
+    "business_flow_completeness": "业务流程完整性评估",
+    "improvement_suggestions": ["改进建议1", "改进建议2", ...]
+}
+
+请提供专业、深入的分析，帮助用户理解测试结果并改进测试用例。"""
+
+        # 构建用户提示词
+        failed_steps = [a for a in analysis_result.get("analysis", []) if a.get("status") == "failed"]
+        passed_steps = [a for a in analysis_result.get("analysis", []) if a.get("status") == "passed"]
+        
+        user_prompt = f"""场景名称：{scenario_name or '未命名场景'}
+用例名称：{case_name or '未命名用例'}
+
+执行统计：
+- 总步骤数：{analysis_result.get('total_steps', 0)}
+- 通过步骤：{analysis_result.get('passed_steps', 0)}
+- 失败步骤：{analysis_result.get('failed_steps', 0)}
+- 整体状态：{analysis_result.get('overall_status', 'unknown')}
+
+失败步骤详情：
+{json.dumps(failed_steps, ensure_ascii=False, indent=2) if failed_steps else '无失败步骤'}
+
+通过步骤详情：
+{json.dumps(passed_steps[:3], ensure_ascii=False, indent=2) if passed_steps else '无通过步骤'}（仅显示前3个）
+
+原始执行结果（供参考）：
+{json.dumps(step_results[:5], ensure_ascii=False, indent=2)}（仅显示前5个步骤）
+
+请根据以上信息，提供深入的分析报告。"""
+
+        # 调用大模型分析
+        ai_analysis = await ai_client.chat(system_prompt, user_prompt)
+        
+        # 如果返回的是字符串，尝试解析为JSON
+        if isinstance(ai_analysis, str):
+            try:
+                ai_analysis = json.loads(ai_analysis)
+            except:
+                # 如果无法解析，包装成结构化格式
+                ai_analysis = {
+                    "overview": ai_analysis,
+                    "failed_analysis": [],
+                    "success_evaluation": "",
+                    "business_flow_completeness": "",
+                    "improvement_suggestions": []
+                }
+        
+        return ai_analysis
+    except Exception as e:
+        # 大模型分析失败不影响主流程
+        print(f"DEBUG: 大模型结果分析失败: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "overview": "大模型分析暂时不可用",
+            "failed_analysis": [],
+            "success_evaluation": "",
+            "business_flow_completeness": "",
+            "improvement_suggestions": []
+        }
+
 
 async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
     """执行步骤列表，返回每条步骤的请求/响应与 success（按 status_code < 400 判定）。"""
@@ -2943,16 +3388,27 @@ async def execute_case(req: ExecutionRequest):
         if project_id_for_kg and _kg:
             steps = _complement_steps_mappings_from_kg(project_id_for_kg, steps)
 
+        # ========== 阶段3：测试执行 ==========
         step_results = await _run_steps(steps, req.base_url)
-        final_status = "success" if all(s.get("success", False) for s in step_results) else "failed"
+        
+        # ========== 阶段3：结果分析 ==========
+        # 分析每个步骤的业务状态码，判断是否通过
+        analysis_result = _analyze_execution_results(step_results)
+        
+        # 判断整体状态：所有步骤的业务状态码都为0才算通过
+        # HTTP状态码在2xx范围 且 业务状态码为0
+        all_passed = analysis_result["overall_status"] == "passed"
+        final_status = "success" if all_passed else "failed"
 
         # 知识图谱：场景用例执行后学习依赖（仅 test_case_id 场景，且不影响主流程）
-        if project_id_for_kg and _kg:
-            _learn_steps_to_kg(project_id_for_kg, steps, is_success=(final_status == "success"), source_id=req.test_case_id)
+        # 只有所有步骤都通过（业务状态码为0）才学习到知识图谱
+        if project_id_for_kg and _kg and all_passed:
+            _learn_steps_to_kg(project_id_for_kg, steps, is_success=True, source_id=req.test_case_id)
 
         try:
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
+            # 保存执行结果和分析结果
             cursor.execute(
                 "INSERT INTO executions (test_case_id, status, results) VALUES (?, ?, ?)",
                 (req.test_case_id or 0, final_status, json.dumps(step_results)),
@@ -2962,7 +3418,14 @@ async def execute_case(req: ExecutionRequest):
             conn.close()
         except Exception:
             exec_id = 0
-        return {"id": exec_id, "status": final_status, "results": step_results}
+        
+        # 返回执行结果和分析结果
+        return {
+            "id": exec_id,
+            "status": final_status,
+            "results": step_results,
+            "analysis": analysis_result  # 新增：分析结果
+        }
     except HTTPException:
         raise
     except Exception as e:
