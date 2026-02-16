@@ -5,6 +5,7 @@ import { Sparkles, Loader2, CheckCircle2, ArrowRight, Target } from 'lucide-reac
 import Link from 'next/link'
 import { useProject } from '../../contexts/ProjectContext'
 import { getSingleApiDisplayName } from '../page'
+import ThinkingProcess from './ThinkingProcess'
 
 type Mode = 'scenario' | 'single-api'
 
@@ -39,6 +40,12 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
     const [scenarioEnvs, setScenarioEnvs] = useState<EnvItem[]>([])
     const [scenarioSelectedEnvId, setScenarioSelectedEnvId] = useState<number | 'custom' | null>(null)
     const [scenarioExecBaseUrl, setScenarioExecBaseUrl] = useState('')
+    // 思考过程状态
+    const [thinkingPhase, setThinkingPhase] = useState<string>('')
+    const [thinkingSteps, setThinkingSteps] = useState<Array<{ id: string; title: string; status: 'thinking' | 'completed'; details?: string[] }>>([])
+    // 跟踪所有思考阶段是否完成（用于控制进度面板的显示）
+    const [allThinkingCompleted, setAllThinkingCompleted] = useState(false)
+    const allThinkingCompletedRef = useRef(false) // 使用ref确保在闭包中能访问到最新值
 
     // 接口测试模式：加载项目环境
     useEffect(() => {
@@ -129,22 +136,41 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
             }
             setLoading(true)
             setResult(null)
-            const initialLines = ['开始处理', '']
+            setAllThinkingCompleted(false) // 重置思考完成状态
+            allThinkingCompletedRef.current = false // 同时更新ref
+            const initialLines: string[] = [] // 初始不显示进度面板
             progressRef.current = initialLines
             setProgressLines(initialLines)
 
             const appendProgress = (...lines: string[]) => {
-                setProgressLines((prev) => {
-                    const next = [...prev, ...lines]
-                    progressRef.current = next
-                    return next
-                })
-                setTimeout(() => progressEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50)
+                if (allThinkingCompletedRef.current) {
+                    setProgressLines((prev) => {
+                        const next = [...prev, ...lines]
+                        progressRef.current = next
+                        return next
+                    })
+                    setTimeout(() => progressEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50)
+                } else {
+                    // 思考过程中，先保存到ref，等思考完成后再显示
+                    progressRef.current = [...(progressRef.current || []), ...lines]
+                }
             }
 
             try {
                 // ---------- 阶段一：创建测试场景 ----------
                 appendProgress('创建测试场景...')
+                
+                // 展示思考过程 - 阶段一：场景理解
+                setThinkingPhase('场景理解')
+                setThinkingSteps([
+                    { id: '1', title: '分析用户描述的业务场景', status: 'thinking', details: ['解析自然语言描述', '识别测试意图和目标'] },
+                    { id: '2', title: '提取关键实体和动作', status: 'thinking', details: ['识别涉及的接口', '提取业务动作序列'] },
+                    { id: '3', title: '确定预期结果', status: 'thinking', details: ['分析业务目标', '定义成功标准'] },
+                ])
+                
+                // 等待思考步骤显示出来（给用户时间看到思考过程）
+                await new Promise(resolve => setTimeout(resolve, 1000))
+                
                 appendProgress('   · 理解场景意图（解析意图、实体、动作）...')
                 const scenarioRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/scenarios`, {
                     method: 'POST',
@@ -156,6 +182,17 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                 })
                 if (!scenarioRes.ok) throw new Error('创建场景失败')
                 const scenarioData = await scenarioRes.json()
+                
+                // API请求完成后，更新思考步骤状态为completed
+                setThinkingSteps([
+                    { id: '1', title: '分析用户描述的业务场景', status: 'completed', details: ['解析自然语言描述', '识别测试意图和目标'] },
+                    { id: '2', title: '提取关键实体和动作', status: 'completed', details: ['识别涉及的接口', '提取业务动作序列'] },
+                    { id: '3', title: '确定预期结果', status: 'completed', details: ['分析业务目标', '定义成功标准'] },
+                ])
+                
+                // 等待用户看到完成状态
+                await new Promise(resolve => setTimeout(resolve, 1000))
+                
                 appendProgress('   ✓ 提取意图与实体')
 
                 // 结构化展示意图分析结果（意图 / 实体 / 动作 / 预期），直接作为生成过程的一部分
@@ -210,27 +247,51 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
 
                 appendProgress('   ✓ 场景已保存')
                 appendProgress('')
+                
+                // 等待一小段时间，让用户看到阶段一完成
+                await new Promise(resolve => setTimeout(resolve, 500))
+                
+                // 清除阶段一的思考过程
+                setThinkingPhase('')
+                setThinkingSteps([])
+                await new Promise(resolve => setTimeout(resolve, 300))
 
                 // ---------- 阶段二：生成测试用例（展示与后端一致的子步骤） ----------
                 appendProgress('生成测试用例...')
+                
+                // 展示思考过程 - 阶段二：场景编排
+                setThinkingPhase('场景编排')
+                setThinkingSteps([
+                    { id: '4', title: '检索相关API接口', status: 'thinking', details: ['使用向量语义检索', '匹配业务场景相关的接口'] },
+                    { id: '5', title: '分析接口依赖关系', status: 'thinking', details: ['查询知识图谱', '识别接口调用顺序'] },
+                    { id: '6', title: '编排测试步骤序列', status: 'thinking', details: ['生成步骤顺序', '配置参数映射关系'] },
+                    { id: '7', title: '优化参数传递', status: 'thinking', details: ['提取Token和Session', '配置动态头映射'] },
+                ])
+                
+                // 等待思考步骤显示出来（给用户时间看到思考过程）
+                await new Promise(resolve => setTimeout(resolve, 2000))
+                
                 appendProgress('   · 检索项目接口...')
                 const caseResPromise = fetch(
                     `${process.env.NEXT_PUBLIC_API_URL}/api/v1/scenarios/${scenarioData.id}/generate-case`,
                     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data_strategy: 'smart' }) }
                 )
-                // 在请求进行中按顺序展示子步骤（与后端：检索 API → 依赖 → 编排 → 提取/传递参数 一致）
+                // 在请求进行中按顺序更新思考步骤状态（与后端处理时间对应）
                 const t1 = setTimeout(() => {
                     appendProgress('   ✓ 检索项目接口')
+                    setThinkingSteps((prev) => prev.map((s) => s.id === '4' ? { ...s, status: 'completed' } : s))
                     appendProgress('   · 查找接口依赖关系...')
-                }, 450)
+                }, 1500)
                 const t2 = setTimeout(() => {
                     appendProgress('   ✓ 查找接口依赖关系')
+                    setThinkingSteps((prev) => prev.map((s) => s.id === '5' ? { ...s, status: 'completed' } : s))
                     appendProgress('   · 编排测试步骤与断言...')
-                }, 950)
+                }, 3000)
                 const t3 = setTimeout(() => {
                     appendProgress('   ✓ 编排测试步骤与断言')
+                    setThinkingSteps((prev) => prev.map((s) => s.id === '6' ? { ...s, status: 'completed' } : s))
                     appendProgress('   · 提取参数与映射...')
-                }, 1450)
+                }, 5000)
                 let caseRes: Response
                 try {
                     caseRes = await caseResPromise
@@ -244,6 +305,13 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                     throw new Error(errorData.detail || errorData.message || '生成测试用例失败')
                 }
                 const caseData = await caseRes.json()
+                
+                // API请求完成后，完成所有思考步骤
+                setThinkingSteps((prev) => prev.map((s) => ({ ...s, status: 'completed' as const })))
+                
+                // 等待用户看到完成状态
+                await new Promise(resolve => setTimeout(resolve, 1000))
+                
                 appendProgress('   ✓ 提取参数与映射')
                 appendProgress('   ✓ 传递参数配置（Token、Session 等）')
                 appendProgress('   ✓ 用例生成完成')
@@ -259,11 +327,46 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                     const path = s.api_path || s.path || '—'
                     const name = s.description || s.api_name || s.name || ''
                     appendProgress(`   ${i + 1}. ${method} ${path}${name ? `（${name}）` : ''}`)
+                    
+                    // 显示参数映射
+                    const paramMappings = s.param_mappings || []
+                    if (paramMappings.length > 0) {
+                        appendProgress(`      参数映射（${paramMappings.length} 个）：`)
+                        paramMappings.forEach((mapping: any) => {
+                            const fromStep = mapping.from_step || '?'
+                            const fromField = mapping.from_field || '?'
+                            const toField = mapping.to_field || '?'
+                            const toType = mapping.to_type || 'params'
+                            const toTypeLabel = toType === 'headers' ? '请求头' : toType === 'params' ? '请求参数' : 'URL参数'
+                            appendProgress(`        步骤${fromStep}.${fromField} → ${toTypeLabel}.${toField}`)
+                        })
+                    } else {
+                        appendProgress(`      参数映射：无`)
+                    }
                 })
                 appendProgress('')
+                
+                // 等待用户看到阶段二完成
+                await new Promise(resolve => setTimeout(resolve, 1000))
+                
+                // 清除阶段二的思考过程
+                setThinkingPhase('')
+                setThinkingSteps([])
+                await new Promise(resolve => setTimeout(resolve, 300))
 
                 // ---------- 阶段三：自动执行场景 ----------
                 appendProgress('执行场景...')
+                
+                // 展示思考过程 - 阶段三：测试执行与结果分析
+                setThinkingPhase('测试执行与结果分析')
+                setThinkingSteps([
+                    { id: '8', title: '执行测试步骤', status: 'thinking', details: ['按顺序执行接口调用', '处理参数映射'] },
+                    { id: '9', title: '分析执行结果', status: 'thinking', details: ['检查HTTP状态码', '验证业务状态码'] },
+                    { id: '10', title: '生成分析报告', status: 'thinking', details: ['分析失败原因', '提供改进建议'] },
+                ])
+                
+                // 等待思考步骤显示出来
+                await new Promise(resolve => setTimeout(resolve, 1000))
                 
                 // 调试：打印返回的数据
                 console.log('场景生成返回数据:', JSON.stringify(caseData, null, 2))
@@ -275,6 +378,17 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                 if (caseData.execution && caseData.analysis) {
                     const execData = caseData.execution
                     const analysisData = caseData.analysis
+                    
+                    // 执行完成后，更新思考步骤状态 - 阶段三
+                    setThinkingSteps((prev) => prev.map((s) => {
+                        if (s.id === '8') return { ...s, status: 'completed' }
+                        if (s.id === '9') return { ...s, status: 'completed' }
+                        if (s.id === '10') return { ...s, status: 'completed' }
+                        return s
+                    }))
+                    
+                    // 等待用户看到完成状态
+                    await new Promise(resolve => setTimeout(resolve, 1000))
                     
                     // 显示执行结果
                     const status = execData.status === 'success' ? '全部通过' : '存在失败'
@@ -359,11 +473,31 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                         }
                     }
                     
-                    // 如果有自愈结果，显示自愈信息
+                    // 等待一小段时间，让用户看到阶段三完成
+                    await new Promise(resolve => setTimeout(resolve, 500))
+                    
+                    // 清除阶段三的思考过程
+                    setThinkingPhase('')
+                    setThinkingSteps([])
+                    await new Promise(resolve => setTimeout(resolve, 300))
+                    
+                    // 如果有自愈结果，显示自愈信息 - 阶段四：自愈修复
                     if (caseData.heal) {
                         appendProgress('')
                         appendProgress('自愈修复：')
+                        
+                        // 展示思考过程 - 阶段四：自愈修复
+                        setThinkingPhase('自愈修复')
+                        setThinkingSteps([
+                            { id: '11', title: '分析失败原因', status: 'thinking', details: ['识别失败类型', '定位问题根因'] },
+                            { id: '12', title: '判断是否可自愈', status: 'thinking', details: ['评估修复可行性', '确定修复策略'] },
+                            { id: '13', title: '执行自动修复', status: 'thinking', details: ['更新测试用例', '优化参数配置'] },
+                        ])
+                        
                         if (caseData.heal.status === 'healed') {
+                            // 更新思考步骤状态 - 阶段四完成
+                            setThinkingSteps((prev) => prev.map((s) => ({ ...s, status: 'completed' as const })))
+                            
                             appendProgress('   ✓ 已自动修复测试用例')
                             if (caseData.heal.message) {
                                 appendProgress(`   ${caseData.heal.message}`)
@@ -380,6 +514,13 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                                 })
                             }
                         } else if (caseData.heal.status === 'cannot_heal') {
+                            // 更新思考步骤状态 - 阶段四无法自愈
+                            setThinkingSteps((prev) => prev.map((s) => {
+                                if (s.id === '11') return { ...s, status: 'completed' }
+                                if (s.id === '12') return { ...s, status: 'completed' }
+                                return s
+                            }))
+                            
                             appendProgress('   ⚠ 无法自动修复，需要人工介入')
                             if (caseData.heal.message) {
                                 appendProgress(`   ${caseData.heal.message}`)
@@ -387,6 +528,10 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                         }
                     }
                 } else {
+                    // 如果后端没有返回执行结果，清除阶段三的思考过程
+                    setThinkingPhase('')
+                    setThinkingSteps([])
+                    
                     // 如果后端没有返回执行结果，说明后端可能没有执行或者执行失败
                     // 为了避免重复执行导致"请求频繁"的问题，这里只显示提示信息
                     appendProgress('   ⚠ 后端未返回执行结果，请手动执行测试')
@@ -394,6 +539,17 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                 }
                 appendProgress('')
                 appendProgress('处理完成！')
+                
+                // 所有思考阶段完成，现在显示进度面板
+                allThinkingCompletedRef.current = true
+                setAllThinkingCompleted(true)
+                setProgressLines([...progressRef.current])
+                
+                // 清除所有思考过程
+                setTimeout(() => {
+                    setThinkingPhase('')
+                    setThinkingSteps([])
+                }, 2000)
 
                 setResult({ scenario: scenarioData, testCase: caseData })
 
@@ -432,13 +588,20 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
         }
         setLoading(true)
         setResult(null)
-        setProgressLines(['开始处理任务...', ''])
+        setAllThinkingCompleted(false) // 重置思考完成状态
+        allThinkingCompletedRef.current = false // 同时更新ref
+        setProgressLines([]) // 初始不显示进度面板
 
-        // 辅助函数：追加进度行
+        // 辅助函数：追加进度行（只在所有思考完成后才显示）
         const appendProgress = (...lines: string[]) => {
-            setProgressLines((prev) => [...prev, ...lines])
-            // 滚动到底部
-            setTimeout(() => progressEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50)
+            if (allThinkingCompletedRef.current) {
+                setProgressLines((prev) => [...prev, ...lines])
+                // 滚动到底部
+                setTimeout(() => progressEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50)
+            } else {
+                // 思考过程中，先保存到ref，等思考完成后再显示
+                progressRef.current = [...(progressRef.current || []), ...lines]
+            }
         }
 
         try {
@@ -463,6 +626,15 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
 
             // ========== Phase 1: 需求理解 ==========
             appendProgress('检索 API 文档信息...')
+            
+            // 展示思考过程
+            setThinkingPhase('需求理解')
+            setThinkingSteps([
+                { id: '1', title: '分析接口功能需求', status: 'thinking', details: ['理解用户测试意图', '识别目标接口'] },
+                { id: '2', title: '检索相关API文档', status: 'thinking', details: ['向量语义检索', '匹配接口定义'] },
+                { id: '3', title: '提取接口关键信息', status: 'thinking', details: ['解析请求参数', '分析响应结构'] },
+            ])
+            
             const phase1Res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/single-api/understand`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -473,6 +645,13 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                 throw new Error(err.detail || err.message || '需求理解失败')
             }
             const structured = await phase1Res.json()
+            
+            // 更新思考步骤状态
+            setThinkingSteps([
+                { id: '1', title: '分析接口功能需求', status: 'completed', details: ['理解用户测试意图', '识别目标接口'] },
+                { id: '2', title: '检索相关API文档', status: 'completed', details: ['向量语义检索', '匹配接口定义'] },
+                { id: '3', title: '提取接口关键信息', status: 'completed', details: ['解析请求参数', '分析响应结构'] },
+            ])
 
             // 根据 phase1 结果追加进度详情
             const entities = structured?.entities || []
@@ -491,6 +670,15 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
 
             // ========== Phase 2: 测试计划 ==========
             appendProgress('生成测试计划...')
+            
+            // 展示思考过程
+            setThinkingPhase('测试计划')
+            setThinkingSteps([
+                { id: '4', title: '评估测试策略', status: 'thinking', details: ['分析接口特性', '确定测试类型'] },
+                { id: '5', title: '设计测试用例', status: 'thinking', details: ['正向用例', '边界用例', '异常用例', '安全用例'] },
+                { id: '6', title: '生成测试计划文档', status: 'thinking', details: ['整理测试范围', '定义验收标准'] },
+            ])
+            
             const phase2Res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/single-api/plan`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -505,6 +693,14 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
             const planPayload = phase2Data.plan || {}
             const endpoints = planPayload?.endpoints || []
             const cases = endpoints.flatMap((ep: any) => ep.cases || [])
+            
+            // 更新思考步骤状态
+            setThinkingSteps([
+                { id: '4', title: '评估测试策略', status: 'completed', details: ['分析接口特性', '确定测试类型'] },
+                { id: '5', title: '设计测试用例', status: 'completed', details: ['正向用例', '边界用例', '异常用例', '安全用例'] },
+                { id: '6', title: '生成测试计划文档', status: 'completed', details: ['整理测试范围', '定义验收标准'] },
+            ])
+            
             if (cases.length > 0) appendProgress(`   ✓ 共 ${cases.length} 个测试用例`)
             if (endpoints.length > 0) appendProgress(`   ✓ 覆盖 ${endpoints.length} 个 API 端点`)
             appendProgress('')
@@ -520,6 +716,15 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
 
             // ========== Phase 3: 代码生成 ==========
             appendProgress('生成测试代码...')
+            
+            // 展示思考过程
+            setThinkingPhase('代码生成')
+            setThinkingSteps([
+                { id: '7', title: '选择测试框架', status: 'thinking', details: ['评估框架适用性', '确定代码风格'] },
+                { id: '8', title: '生成测试代码', status: 'thinking', details: ['编写测试函数', '配置断言逻辑'] },
+                { id: '9', title: '优化代码质量', status: 'thinking', details: ['检查代码规范', '确保可执行性'] },
+            ])
+            
             const targetApi = (endpoints[0]) || {}
             const apiInfo = planPayload.target_api || targetApi || (structured?.api_candidates || [{}])[0] || {}
             const phase3Res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/single-api/generate-code`, {
@@ -533,6 +738,14 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
             }
             const phase3Data = await phase3Res.json()
             const code = phase3Data.code || ''
+            
+            // 更新思考步骤状态
+            setThinkingSteps([
+                { id: '7', title: '选择测试框架', status: 'completed', details: ['评估框架适用性', '确定代码风格'] },
+                { id: '8', title: '生成测试代码', status: 'completed', details: ['编写测试函数', '配置断言逻辑'] },
+                { id: '9', title: '优化代码质量', status: 'completed', details: ['检查代码规范', '确保可执行性'] },
+            ])
+            
             appendProgress('   ✓ 生成测试文件')
             appendProgress('')
 
@@ -632,6 +845,17 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
             }
             appendProgress('')
             appendProgress('任务完成！')
+            
+            // 所有思考阶段完成，现在显示进度面板
+            allThinkingCompletedRef.current = true
+            setAllThinkingCompleted(true)
+            setProgressLines([...progressRef.current])
+            
+            // 清除思考过程
+            setTimeout(() => {
+                setThinkingPhase('')
+                setThinkingSteps([])
+            }, 2000)
 
             // 延迟 1.5 秒后切换到接口用例 Tab，让用户看到完成
             setTimeout(() => {
@@ -643,6 +867,8 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
             }, 1500)
         } catch (error: any) {
             appendProgress('', `❌ 错误: ${error.message}`)
+            setThinkingPhase('')
+            setThinkingSteps([])
         } finally {
             setLoading(false)
         }
@@ -922,8 +1148,17 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                 </button>
             </div>
 
-            {/* 实时进度展示面板（测试场景 + 接口测试 共用） */}
-            {progressLines.length > 0 && (
+            {/* AI思考过程展示 - 显示在进度面板上方 */}
+            {thinkingPhase && thinkingSteps.length > 0 && (
+                <ThinkingProcess
+                    phase={thinkingPhase}
+                    steps={thinkingSteps}
+                    isActive={loading}
+                />
+            )}
+
+            {/* 实时进度展示面板（测试场景 + 接口测试 共用）- 只在所有思考完成后显示 */}
+            {allThinkingCompleted && progressLines.length > 0 && (
                 <div style={{
                     marginTop: '1.5rem',
                     background: 'linear-gradient(135deg, #f8f9ff 0%, #f0f2ff 100%)',
