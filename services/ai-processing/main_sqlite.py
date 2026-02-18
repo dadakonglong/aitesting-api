@@ -118,40 +118,57 @@ DB_PATH = os.path.join(BASE_DIR, "data/apis.db")
 # ============= 自动依赖链 (KG + AI) =============
 
 DEP_ANALYSIS_PROMPT = """你是接口依赖分析专家。
-给定目标接口信息和从知识图谱检索出的关联接口列表，请分析目标接口的**前置依赖**。
+给定目标接口信息和从知识图谱检索出的关联接口列表，请分析目标接口的**前置依赖链**。
+
+## ★ 关键要求：依赖链的执行顺序
+**dependency_chain 必须按照实际执行顺序排列**，即：
+- 无任何前置依赖的步骤（如登录/认证）**必须排在第一位**
+- 需要前面步骤输出值的步骤必须排在后面
+- 例如：获取房间列表需要 token → [1.登录（提供token）, 2.获取房间（使用token）]
+
+## needs_from_prev 字段说明
+每个依赖步骤必须填写 `needs_from_prev`，声明它需要从前面哪个步骤提取哪些值：
+- 无需前置输入（如登录）：`"needs_from_prev": []`
+- 需要前面步骤的 token：`"needs_from_prev": [{"from_dep_path": "/api/v1/login", "from_field": "data.token", "to_field": "Authorization", "to_type": "headers", "prefix": "Bearer "}]`
 
 ## 场景示例
-- 场景1：目标接口是"下单"，关联接口有"登录"、"获取房间"。分析结果应为：[登录, 获取房间]。
-- 场景2：目标接口是"登录"或"注册"。分析结果应为：[] (无依赖)。
-- 场景3：目标接口包含 Authorization 头。分析结果应包含：[登录]。
+- 场景1：目标接口是"下单"（需要token + roomId）：
+  chain = [1.登录（无前置，提供token）, 2.获取房间（需要token，提供roomId）]
+- 场景2：目标接口是"登录"或"注册"：chain = [] (无依赖)
+- 场景3：目标接口仅需 Authorization：chain = [1.登录（提供token）]
 
 ## 规则
-1. ** Authorization 依赖**：如果目标接口需要 Authorization/token，必须找出能提供 token 的登录/认证类接口。
-2. **业务参数依赖**：如果目标的 params/body 中包含动态 ID (如 sessionId, orderId)，找出返回值中包含这些字段的接口。
-3. **跳过自身**：如果目标接口本身是登录/认证类，不要添加任何前置依赖。
-4. **最大深度**：依赖链包含目标接口在内总长度不超过 3。
-5. **提取路径**：常见的 token 提取路径为 data.token, token, data.accessToken。sessionId 提取路径通常为 data.sessionId。
+1. **Authorization 依赖**：如果目标接口需要 Authorization/token，找出能提供 token 的登录/认证类接口，**放在链的第一位**。
+2. **链内依赖**：如果链中某步骤需要前一步的输出（如获取房间列表需要 token），必须在 `needs_from_prev` 中声明。
+3. **业务参数依赖**：如果目标 params/body 中包含动态 ID（如 sessionId, orderId），找出能返回这些字段的接口。
+4. **跳过自身**：目标接口本身是登录/认证类，返回空链。
+5. **最大深度**：依赖链总长度不超过 3。
+6. **提取路径**：token 常见路径：data.token, token, data.accessToken。sessionId 常见路径：data.sessionId。
 
 请以 JSON 格式返回，严禁使用 markdown 代码块包裹：
 {
   "needs_deps": true,
-  "reason": "执行下单前需要先登录获取 token，并获取房间 ID",
+  "reason": "执行下单前需要先登录获取 token，再获取房间 ID",
   "dependency_chain": [
     {
       "api_path": "/api/v1/login",
       "api_method": "POST",
-      "reason": "获取 token",
+      "reason": "第1步：获取 token（无前置依赖，必须最先执行）",
+      "needs_from_prev": [],
       "provides": [
         {"from_field": "data.token", "to_field": "Authorization", "to_type": "headers", "prefix": "Bearer "}
       ]
     },
     {
-       "api_path": "/api/v3/room/list",
-       "api_method": "GET",
-       "reason": "获取第一个可用房间的 roomId",
-       "provides": [
-         {"from_field": "data[0].id", "to_field": "roomId", "to_type": "params"}
-       ]
+      "api_path": "/api/v3/room/list",
+      "api_method": "GET",
+      "reason": "第2步：获取房间 ID（需要第1步的 token）",
+      "needs_from_prev": [
+        {"from_dep_path": "/api/v1/login", "from_field": "data.token", "to_field": "Authorization", "to_type": "headers", "prefix": "Bearer "}
+      ],
+      "provides": [
+        {"from_field": "data[0].id", "to_field": "roomId", "to_type": "params"}
+      ]
     }
   ]
 }
@@ -215,10 +232,32 @@ async def _resolve_dependencies(
             node_id = f"{project_id}:{method}:{path}"
             preds = _kg.get_predecessors(node_id, min_confidence=0.5, limit=5)
             if preds:
-                chain = [
-                    {"api_path": p.get("path", ""), "api_method": (p.get("method") or "GET").upper(), "reason": "知识图谱前置"}
-                    for p in preds
-                ]
+                chain = []
+                for p in preds:
+                    fm = p.get("field_mapping") or {}
+                    provides = []
+                    for key, from_field in fm.items():
+                        if not from_field or not key:
+                            continue
+                        to_field = key
+                        to_type = "headers"
+                        if "@" in key:
+                            parts = key.split("@", 1)
+                            to_field = parts[0]
+                            to_type = parts[1] if len(parts) > 1 else "params"
+                        provides.append({
+                            "from_field": from_field,
+                            "to_field": to_field,
+                            "to_type": to_type,
+                            "prefix": "Bearer " if to_field.lower() == "authorization" else "",
+                        })
+                    chain.append({
+                        "api_path": p.get("path", ""),
+                        "api_method": (p.get("method") or "GET").upper(),
+                        "reason": "知识图谱前置",
+                        "needs_from_prev": [],
+                        "provides": provides,
+                    })
                 _dlog(f"知识图谱返回 {len(chain)} 个前置依赖，直接应用")
                 _DEP_CACHE[cache_key] = chain
                 return _apply_dep_chain(steps, chain, project_id, db_path)
@@ -321,8 +360,65 @@ async def _resolve_dependencies(
         return steps
 
 
+def _toposort_chain(chain: List[Dict]) -> List[Dict]:
+    """
+    对依赖链按执行顺序做拓扑排序：
+    - 若 steps 声明了 needs_from_prev，则按依赖关系拓扑排序
+    - 否则使用简单启发式：登录/认证类接口优先，其余按原顺序
+    """
+    if not chain:
+        return chain
+
+    # 检查是否存在显式的 needs_from_prev 声明
+    has_explicit_needs = any(
+        (dep.get("needs_from_prev") or []) for dep in chain
+    )
+
+    # 情况一：有显式的依赖声明，按拓扑关系排
+    if has_explicit_needs:
+        resolved: List[Dict] = []
+        remaining = list(chain)
+        max_iters = len(chain) * 2 + 1
+        for _ in range(max_iters):
+            if not remaining:
+                break
+            progress = False
+            resolved_paths = {d.get("api_path") for d in resolved}
+            for dep in list(remaining):
+                needed = {
+                    n.get("from_dep_path")
+                    for n in (dep.get("needs_from_prev") or [])
+                    if n.get("from_dep_path")
+                }
+                if needed <= resolved_paths:
+                    resolved.append(dep)
+                    remaining.remove(dep)
+                    progress = True
+            if not progress:
+                # 循环依赖或无法解析，把剩余步骤按原顺序追加
+                resolved.extend(remaining)
+                break
+        return resolved
+
+    # 情况二：没有显式 needs_from_prev，使用启发式：
+    # - path 或 reason 中包含 login/auth/token/phone 等关键字的视为登录/认证类接口，排在最前
+    login_keywords = ("login", "signin", "auth", "token", "phone", "verify-code")
+
+    def _is_login_like(dep: Dict) -> bool:
+        path = (dep.get("api_path") or "").lower()
+        reason = (dep.get("reason") or "").lower()
+        text = path + " " + reason
+        return any(k in text for k in login_keywords)
+
+    # 稳定排序：登录类优先，其余保持原相对顺序
+    return sorted(chain, key=lambda d: (0 if _is_login_like(d) else 1))
+
+
 def _apply_dep_chain(target_steps: List[Dict], chain: List[Dict], project_id: str, db_path: str) -> List[Dict]:
-    """将 AI 解析出的依赖链转化为真实的执行步骤"""
+    """
+    将依赖链转化为真实的执行步骤。
+    支持 dep 步骤之间的参数传递（通过 needs_from_prev）和 dep→target 的参数传递（通过 provides）。
+    """
     import os as _os
     _dep_log = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "dep_debug.log")
     def _dlog(msg):
@@ -332,34 +428,40 @@ def _apply_dep_chain(target_steps: List[Dict], chain: List[Dict], project_id: st
         except:
             pass
         print(f"DEP_DEBUG APPLY: {msg}")
-    
+
     if not chain:
         return target_steps
-        
+
+    # 拓扑排序，确保执行顺序正确（无前置依赖的步骤排最前）
+    chain = _toposort_chain(chain)
+    _dlog(f"拓扑排序后链顺序: {[d.get('api_path') for d in chain]}")
+
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    
-    new_steps = []
+
+    new_steps: List[Dict] = []
     step_order_ptr = 1
-    path_to_step_index = {}
+    # 双索引：(method, path) 和 仅 path，用于 needs_from_prev / 登录提供者查找
+    path_to_step_index: Dict[tuple, int] = {}   # (method, path) -> step_order
+    path_only_index: Dict[str, int] = {}        # path -> step_order
 
     for dep in chain:
         d_path = dep.get("api_path")
         d_method = dep.get("api_method", "POST").upper()
-        
+
         _dlog(f"查找依赖接口: {d_method} {d_path}")
-        
+
         # 先精确匹配
         cursor.execute(
             "SELECT request_body, base_url, headers FROM apis WHERE project_id = ? AND path = ? AND method = ?",
             (project_id, d_path, d_method)
         )
         row = cursor.fetchone()
-        
-        # 如果精确匹配失败，尝试模糊匹配（path 包含关键部分）
+
+        # 精确匹配失败 → 模糊匹配（path 最后一段）
         if not row and d_path:
-            path_part = d_path.rstrip("/").split("/")[-1]  # 取最后一段
+            path_part = d_path.rstrip("/").split("/")[-1]
             cursor.execute(
                 "SELECT request_body, base_url, headers, path, method FROM apis WHERE project_id = ? AND path LIKE ? AND method = ?",
                 (project_id, f"%{path_part}%", d_method)
@@ -367,22 +469,42 @@ def _apply_dep_chain(target_steps: List[Dict], chain: List[Dict], project_id: st
             row = cursor.fetchone()
             if row:
                 _dlog(f"精确匹配失败，模糊匹配到: {row['method']} {row['path']}")
-                d_path = row["path"]  # 更新为真实路径
-        
+                d_path = row["path"]
+
         if not row:
             _dlog(f"数据库中未找到依赖接口: {d_method} {d_path}，跳过")
             continue
-            
+
         try:
             req_body = json.loads(row["request_body"] or "{}")
-        except:
+        except Exception:
             req_body = {}
-        
         try:
             headers = json.loads(row["headers"] or "{}")
-        except:
+        except Exception:
             headers = {}
-            
+
+        # ★ 构建当前 dep 步骤自身的 param_mappings（从 needs_from_prev 声明的前置步骤提取值）
+        dep_mappings: List[Dict] = []
+        for need in (dep.get("needs_from_prev") or []):
+            from_dep_path = need.get("from_dep_path") or ""
+            from_step = path_only_index.get(from_dep_path)
+            if not from_step:
+                # 尝试 path_to_step_index 任意 method 匹配
+                for (m, p), s in path_to_step_index.items():
+                    if p == from_dep_path:
+                        from_step = s
+                        break
+            if from_step and need.get("from_field") and need.get("to_field"):
+                dep_mappings.append({
+                    "from_step": from_step,
+                    "from_field": need["from_field"],
+                    "to_field": need["to_field"],
+                    "to_type": need.get("to_type", "headers"),
+                    "prefix": need.get("prefix", ""),
+                })
+                _dlog(f"  dep步骤 {d_path} 注入: step{from_step}.{need['from_field']} → {need['to_type']}.{need['to_field']}")
+
         step = {
             "step_order": step_order_ptr,
             "api_path": d_path,
@@ -390,38 +512,150 @@ def _apply_dep_chain(target_steps: List[Dict], chain: List[Dict], project_id: st
             "params": req_body,
             "headers": headers,
             "base_url": row["base_url"] or "",
-            "param_mappings": [],
-            "description": f"[前置依赖] {dep.get('reason', '')}"
+            "param_mappings": dep_mappings,
+            "description": f"[前置依赖] {dep.get('reason', '')}",
+            "is_dep_step": True,
+            "expected_status": 200,
+            "expected_response_body": {},
         }
-        _dlog(f"创建依赖步骤 step_order={step_order_ptr}: {d_method} {d_path}, params字段={list(req_body.keys())[:5]}")
+        _dlog(f"创建依赖步骤 step_order={step_order_ptr}: {d_method} {d_path}, dep_mappings数量={len(dep_mappings)}")
         new_steps.append(step)
         path_to_step_index[(d_method, d_path)] = step_order_ptr
+        path_only_index[d_path] = step_order_ptr
         step_order_ptr += 1
-        
+
     conn.close()
-    
+
     if not new_steps:
         _dlog("未能创建任何依赖步骤（全部未在数据库中找到）")
         return target_steps
-        
-    # 为后续步骤打补丁：如果是目标接口，注入 param_mappings
-    # 注意：前面的依赖步骤也可能相互依赖，这里简单处理：目标步骤依赖所有前置
+
+    # ★ 识别“登录提供者”：谁负责提供 Authorization 头部的 token
+    login_provider = None  # (path, method, from_field, prefix)
+    for dep in chain:
+        for prov in dep.get("provides") or []:
+            to_type = (prov.get("to_type") or "").lower()
+            to_field = (prov.get("to_field") or "").lower()
+            if to_type == "headers" and to_field == "authorization":
+                login_provider = (
+                    dep.get("api_path"),
+                    (dep.get("api_method") or "POST").upper(),
+                    prov.get("from_field"),
+                    prov.get("prefix") or "",
+                )
+                break
+        if login_provider:
+            break
+
+    # ★ 若存在登录提供者，则为其他依赖步骤自动补充 token 映射
+    if login_provider:
+        lp_path, lp_method, lp_from_field, lp_prefix = login_provider
+        login_step = path_to_step_index.get((lp_method, lp_path))
+        if login_step:
+            for dep, step in zip(chain, new_steps):
+                d_path = dep.get("api_path")
+                d_method = (dep.get("api_method") or "POST").upper()
+                if d_path == lp_path and d_method == lp_method:
+                    # 登录自身不需要从自己提取
+                    continue
+                # 仅对看起来需要鉴权的依赖步骤补充（headers 中声明了 Authorization）
+                headers = step.get("headers") or {}
+                has_auth_header = any(
+                    "authorization" in (k or "").lower() for k in headers.keys()
+                )
+                if not has_auth_header:
+                    continue
+                if "param_mappings" not in step or not isinstance(step["param_mappings"], list):
+                    step["param_mappings"] = []
+                exists = any(
+                    m.get("from_step") == login_step
+                    and (m.get("to_field") or "").lower() == "authorization"
+                    and (m.get("to_type") or "").lower() == "headers"
+                    for m in step["param_mappings"]
+                )
+                if not exists and lp_from_field:
+                    step["param_mappings"].append(
+                        {
+                            "from_step": login_step,
+                            "from_field": lp_from_field,
+                            "to_field": "Authorization",
+                            "to_type": "headers",
+                            "prefix": lp_prefix or "Bearer ",
+                        }
+                    )
+                    _dlog(
+                        f"  为依赖步骤 {d_method} {d_path} 自动补充登录 token 映射："
+                        f"step{login_step}.{lp_from_field} → headers.Authorization"
+                    )
+
+    # ★ 通用依赖补充：根据 provides 自动为后续依赖步骤补充参数映射（不只是 token）
+    # 思路：如果前一个 dep 提供了某个字段 to_field，且后一个 dep 的请求里正好包含这个字段，则自动建立 from_step → 当前步骤的映射
+    for dep in chain:
+        d_key = ((dep.get("api_method") or "POST").upper(), dep.get("api_path"))
+        from_step = path_to_step_index.get(d_key)
+        if not from_step:
+            continue
+        provides = dep.get("provides") or []
+        if not provides:
+            continue
+        for step in new_steps:
+            # 只处理后续步骤：step_order 大于 from_step
+            if step.get("step_order", 0) <= from_step:
+                continue
+            if "param_mappings" not in step or not isinstance(step["param_mappings"], list):
+                step["param_mappings"] = []
+            params = step.get("params") or {}
+            headers = step.get("headers") or {}
+            for prov in provides:
+                to_type = (prov.get("to_type") or "headers").lower()
+                to_field = prov.get("to_field") or ""
+                if not prov.get("from_field") or not to_field:
+                    continue
+                # 仅当当前步骤的请求中实际存在该字段时才自动补充映射，避免误连
+                needs_field = False
+                if to_type == "headers":
+                    needs_field = any((k or "").lower() == to_field.lower() for k in headers.keys())
+                else:  # params/body
+                    needs_field = to_field in params
+                if not needs_field:
+                    continue
+                exists = any(
+                    m.get("from_step") == from_step
+                    and (m.get("to_field") or "").lower() == to_field.lower()
+                    and (m.get("to_type") or "").lower() == to_type
+                    for m in step["param_mappings"]
+                )
+                if exists:
+                    continue
+                step["param_mappings"].append(
+                    {
+                        "from_step": from_step,
+                        "from_field": prov.get("from_field"),
+                        "to_field": to_field,
+                        "to_type": to_type,
+                        "prefix": prov.get("prefix") or "",
+                    }
+                )
+                _dlog(
+                    f"  为依赖步骤 {step.get('api_method')} {step.get('api_path')} 自动补充字段映射："
+                    f"step{from_step}.{prov.get('from_field')} → {to_type}.{to_field}"
+                )
+
+    # ★ 为目标测试用例步骤注入 param_mappings（来自所有 dep 步骤的 provides）
     for ts in target_steps:
         ts["step_order"] = step_order_ptr
         step_order_ptr += 1
-        
+
         if "param_mappings" not in ts or not isinstance(ts["param_mappings"], list):
             ts["param_mappings"] = []
-            
-        # 遍历 AI 链，找到 provides 加入 mapping
+
         for dep in chain:
             d_key = (dep.get("api_method", "POST").upper(), dep.get("api_path"))
             from_step = path_to_step_index.get(d_key)
             if not from_step:
                 continue
-            
             for prov in dep.get("provides") or []:
-                # 避免重复
+                # 避免重复注入
                 exists = any(
                     m.get("to_field") == prov.get("to_field") and m.get("to_type") == prov.get("to_type")
                     for m in ts["param_mappings"]
@@ -432,9 +666,54 @@ def _apply_dep_chain(target_steps: List[Dict], chain: List[Dict], project_id: st
                         "from_field": prov.get("from_field"),
                         "to_field": prov.get("to_field"),
                         "to_type": prov.get("to_type", "headers"),
-                        "prefix": prov.get("prefix", "")
+                        "prefix": prov.get("prefix", ""),
                     })
-                    
+
+    # ★ 场景用例同款（精简版）：执行前按步骤顺序自动分析 body 依赖（仅 sessionId 等极少数字段）
+    # 作用范围：前置依赖步骤 + 目标步骤一起按 step_order 分析
+    all_steps: List[Dict] = new_steps + target_steps
+    for step in all_steps:
+        if not isinstance(step, dict):
+            continue
+        try:
+            current_step_order = int(step.get("step_order") or 0)
+        except Exception:
+            continue
+        if current_step_order <= 1:
+            continue
+
+        params_body = step.get("params") if isinstance(step.get("params"), dict) else {}
+        if not params_body:
+            continue
+
+        pm = step.get("param_mappings")
+        if not isinstance(pm, list):
+            pm = []
+
+        # 4) 常见 body 依赖自动补齐：sessionId（典型 open-pay → close-room）
+        if "sessionId" in params_body:
+            from_step_for_session = current_step_order - 1
+            exists = any(
+                (m.get("from_step") == from_step_for_session)
+                and (m.get("to_field") == "sessionId")
+                and (m.get("to_type", "params") == "params")
+                for m in pm
+            )
+            if not exists:
+                pm.append(
+                    {
+                        "from_step": from_step_for_session,
+                        "from_field": "data.sessionId",
+                        "to_field": "sessionId",
+                        "to_type": "params",
+                    }
+                )
+                _dlog(
+                    f"  自动推断 body 依赖：step{from_step_for_session}.data.sessionId → params.sessionId (step_order={current_step_order})"
+                )
+
+        step["param_mappings"] = pm
+
     return new_steps + target_steps
 
 
@@ -1388,15 +1667,27 @@ _CASE_TYPE_CN = {"positive": "正向", "boundary": "边界", "robustness": "健�
 
 
 def _enrich_step_results_with_plan(step_results: List[Dict], plan: Optional[Dict] = None) -> None:
-    """用计划中的用例名称和 request_template 补全每条执行结果，便于前端显示「正向/边界/健壮」等名称及请求头/body。"""
+    """用计划中的用例名称和 request_template 补全每条执行结果，便于前端显示「正向/边界/健壮」等名称及请求头/body。
+    注意：依赖步骤（is_dep_step=True）会被跳过，不参与与 plan_cases 的对齐索引。
+    """
     if not plan:
         return
     plan_cases = []
     for ep in plan.get("endpoints") or []:
         plan_cases.extend(ep.get("cases") or [])
+
+    # 将依赖步骤与测试用例步骤分开处理，避免索引错位
+    case_idx = 0  # plan_cases 的当前指针，仅在非依赖步骤时推进
     for i, sr in enumerate(step_results):
-        if i < len(plan_cases):
-            pc = plan_cases[i]
+        # 依赖步骤：用 description 作为名称，不与 plan_cases 对齐
+        if sr.get("is_dep_step"):
+            dep_desc = sr.get("description") or ""
+            sr["name"] = dep_desc if dep_desc else f"[前置依赖] 步骤{i + 1}"
+            continue
+
+        # 测试用例步骤：按顺序与 plan_cases 对齐
+        if case_idx < len(plan_cases):
+            pc = plan_cases[case_idx]
             name_from_plan = (pc.get("name") or "").strip()
             # 若计划中无名称或为英文类型名（如 [positive]），用中文类型 + 方法路径 生成名称
             if not name_from_plan or any(name_from_plan.startswith(f"[{t}]") for t in _CASE_TYPE_CN):
@@ -1418,6 +1709,7 @@ def _enrich_step_results_with_plan(step_results: List[Dict], plan: Optional[Dict
                 sr["request_data"] = rt.get("params") or {}
             if not (sr.get("request_headers") or {}):
                 sr["request_headers"] = rt.get("headers") or {}
+            case_idx += 1
         else:
             sr["name"] = sr.get("name") or f"步骤{i + 1}"
 
@@ -3001,6 +3293,8 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                 "request_headers": (step.get("headers") or {}).copy(),
                 "success": False,
                 "status_code": "Error",
+                "is_dep_step": bool(step.get("is_dep_step", False)),
+                "description": step.get("description", ""),
             }
             try:
                 api_path = step.get("api_path", step.get("path", ""))
@@ -3035,18 +3329,24 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                     field_val = _get_value_by_path(from_data, from_field)
                     if field_val is not None:
                         extraction["success"] = True
-                        extraction["extracted_value"] = str(field_val)[:100] if len(str(field_val)) > 100 else field_val
+                        # 应用 prefix（mapping 中声明的前缀，如 "Bearer "）
+                        prefix = mapping.get("prefix") or ""
+                        val_str = str(field_val)
+                        if prefix and not val_str.startswith(prefix):
+                            val_str = f"{prefix}{val_str}"
+                        elif to_type == "headers" and to_field.lower() == "authorization" and not val_str.lower().startswith("bearer "):
+                            # 无 prefix 声明时，Authorization 头自动补 Bearer
+                            val_str = f"Bearer {val_str}"
+                        # 记录实际注入的值（含 prefix），方便前端提取页面显示
+                        extraction["extracted_value"] = val_str[:200] if len(val_str) > 200 else val_str
                         if to_type == "headers":
-                            val_str = str(field_val)
-                            if to_field.lower() == "authorization" and not val_str.lower().startswith("bearer "):
-                                val_str = f"Bearer {val_str}"
                             request_headers[to_field] = val_str
                         elif to_type in ("url_params", "query"):
                             params_query[to_field] = field_val
                         else:
                             params_body[to_field] = field_val
                     else:
-                        extraction["error_msg"] = f"无法从步骤{from_step_idx}提取{from_field}"
+                        extraction["error_msg"] = f"无法从步骤{from_step_idx}提取{from_field}（响应数据: {str(from_data)[:100] if from_data else '空'}）"
                     extractions.append(extraction)
                 step_data["request_data"] = params_body
                 step_data["url_params"] = params_query

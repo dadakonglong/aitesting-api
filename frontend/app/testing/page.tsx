@@ -83,10 +83,12 @@ export default function TestingCenterPage() {
 
     // 生成新的单接口测试时仅追加到列表，不覆盖、不删除之前的记录（会通过 useEffect 持久化）
     const addSingleApiResult = useCallback((data: any) => {
+        const now = Date.now()
         const name = getSingleApiDisplayName(data)
-        const id = `single-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
-        const item: SingleApiCaseItem = { id, name, data, createdAt: Date.now() }
-        setSingleApiResults((prev) => [...prev, item])
+        const id = `single-${now}-${Math.random().toString(36).slice(2, 9)}`
+        const item: SingleApiCaseItem = { id, name, data, createdAt: now }
+        // 新生成的排在最上面
+        setSingleApiResults((prev) => [item, ...prev])
         setSelectedSingleApiId(id)
         setActiveTab('single-api')
     }, [])
