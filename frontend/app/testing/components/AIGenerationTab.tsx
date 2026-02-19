@@ -527,6 +527,40 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                             }
                         }
                     }
+
+                    // 自动保存场景测试报告
+                    try {
+                        const now = new Date()
+                        const timeStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
+                        const reportName = `${scenarioData.name || '场景测试'}-${timeStr}`
+                        const apiBase = process.env.NEXT_PUBLIC_AI_API_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+                        const reportRes = await fetch(`${apiBase}/api/v1/test-reports`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                project_id: currentProject,
+                                name: reportName,
+                                report_type: '场景测试',
+                                trigger_method: 'AI自动执行',
+                                status: execData.status === 'success' ? 'success' : 'error',
+                                payload: {
+                                    scenario: scenarioData,
+                                    execution: execData,
+                                    analysis: analysisData,
+                                    total_steps: analysisData.total_steps ?? 0,
+                                    failed_steps: analysisData.failed_steps ?? 0,
+                                },
+                            }),
+                        })
+                        if (reportRes.ok) {
+                            const saved = await reportRes.json().catch(() => ({}))
+                            console.log('[AI场景测试报告] 保存成功, id:', saved.id)
+                        } else {
+                            console.error('[AI场景测试报告] 保存失败:', reportRes.status)
+                        }
+                    } catch (e) {
+                        console.error('[AI场景测试报告] 网络错误:', e)
+                    }
                 } else {
                     // 如果后端没有返回执行结果，清除阶段三的思考过程
                     setThinkingPhase('')

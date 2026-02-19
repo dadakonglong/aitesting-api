@@ -309,6 +309,41 @@ export default function TestScenariosTab() {
         }
     }
 
+    const saveScenarioReport = async (scenarioId: number, execution: any, status: 'success' | 'error') => {
+        const scenario = scenarios.find(s => s.id === scenarioId)
+        const now = new Date()
+        const timeStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
+        const reportName = `${scenario?.name || '场景测试'}-${timeStr}`
+        const analysis = execution?.analysis || {}
+        const totalSteps = analysis.total_steps ?? (execution?.results?.length ?? 0)
+        const failedSteps = analysis.failed_steps ?? (execution?.results?.filter((r: any) => !r.success).length ?? 0)
+        const apiBase = process.env.NEXT_PUBLIC_AI_API_URL || 'http://localhost:8000'
+        console.log('[场景测试报告] 开始保存:', reportName, 'project:', currentProject, 'api:', apiBase)
+        try {
+            const res = await fetch(`${apiBase}/api/v1/test-reports`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project_id: currentProject,
+                    name: reportName,
+                    report_type: '场景测试',
+                    trigger_method: '手动触发',
+                    status,
+                    payload: { scenario, execution, total_steps: totalSteps, failed_steps: failedSteps },
+                }),
+            })
+            if (res.ok) {
+                const saved = await res.json().catch(() => ({}))
+                console.log('[场景测试报告] 保存成功, id:', saved.id)
+            } else {
+                const errText = await res.text().catch(() => '')
+                console.error('[场景测试报告] 保存失败:', res.status, errText)
+            }
+        } catch (e) {
+            console.error('[场景测试报告] 网络错误:', e)
+        }
+    }
+
     const handleExecute = async (scenarioId: number, testCaseId: string) => {
         setExecutingIds(prev => new Set(prev).add(scenarioId))
         const env = environments.find(e => e.id === selectedEnvId)
@@ -329,11 +364,14 @@ export default function TestScenariosTab() {
                 const execution = await response.json()
                 setExecutionResults(prev => ({ ...prev, [scenarioId]: execution }))
                 setExpandedScenarios(prev => new Set(prev).add(scenarioId))
+                const reportStatus = execution.status === 'success' ? 'success' : 'error'
+                await saveScenarioReport(scenarioId, execution, reportStatus)
             } else {
                 const errData = await response.json().catch(() => ({}))
                 const msg = errData.detail || '接口执行失败，请检查 Base URL 是否有效'
                 setExecutionResults(prev => ({ ...prev, [scenarioId]: { error: msg, id: errData.execution_id } }))
                 setExpandedScenarios(prev => new Set(prev).add(scenarioId))
+                await saveScenarioReport(scenarioId, { status: 'failed', error: msg }, 'error')
                 return
             }
         } catch (error: any) {

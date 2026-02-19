@@ -78,21 +78,52 @@ export default function ReportDetailPage() {
     }
 
     const payload = report.payload || {}
-    const phase4 = payload.phase4_result || {}
-    const phase5 = payload.phase5_report || ''
-    const chartData = payload.phase5_chart_data || {}
-    const summary = chartData.summary || phase4
-    const total = summary.total ?? phase4.total_cases ?? 0
-    const passed = summary.passed ?? phase4.passed_cases ?? 0
-    const failed = summary.failed ?? phase4.failed_cases ?? 0
-    const durationMs = summary.duration_ms ?? phase4.duration_ms ?? 0
-    const results = phase4.results || phase4.case_results || []
+    const isScenarioTest = !!payload.execution
+
+    let total = 0, passed = 0, failed = 0, durationMs = 0, results: any[] = [], phase5 = ''
+
+    if (isScenarioTest) {
+        const execution = payload.execution || {}
+        const analysis = execution.analysis || {}
+        total = analysis.total_steps ?? (execution.results?.length ?? 0)
+        passed = analysis.passed_steps ?? (execution.results?.filter((r: any) => r.success).length ?? 0)
+        failed = analysis.failed_steps ?? (execution.results?.filter((r: any) => !r.success).length ?? 0)
+        durationMs = execution.results?.reduce((sum: number, r: any) => sum + (r.duration_ms ?? 0), 0) ?? 0
+        results = execution.results || []
+    } else {
+        const phase4 = payload.phase4_result || {}
+        const chartData = payload.phase5_chart_data || {}
+        const summary = chartData.summary || phase4
+        total = summary.total ?? phase4.total_cases ?? 0
+        passed = summary.passed ?? phase4.passed_cases ?? 0
+        failed = summary.failed ?? phase4.failed_cases ?? 0
+        durationMs = summary.duration_ms ?? phase4.duration_ms ?? 0
+        results = phase4.results || phase4.case_results || []
+        phase5 = payload.phase5_report || ''
+    }
+
     const failedResults = results.filter((r: any) => !r.success)
     const failurePct = total > 0 ? Math.round((failed / total) * 100) : 0
 
     const phase2 = payload.phase2_plan || {}
     const allCases = (phase2.endpoints || []).flatMap((ep: any) => (ep.cases || []).map((c: any) => c.name || ''))
-    const getStepCaseName = (idx: number) => allCases[idx] || `步骤 ${(results[idx]?.step_order ?? idx) + 1}`
+    const getStepCaseName = (result: any, idx: number) => {
+        if (isScenarioTest) {
+            const url = result?.full_url ?? result?.url ?? ''
+            const method = result?.api_method ?? result?.method ?? ''
+            const stepNum = result?.step_order ?? (idx + 1)
+            if (url) {
+                try {
+                    const urlPath = new URL(url).pathname
+                    return `步骤 ${stepNum}${method ? ' [' + method.toUpperCase() + ']' : ''}: ${urlPath}`
+                } catch {
+                    return `步骤 ${stepNum}: ${url}`
+                }
+            }
+            return `步骤 ${stepNum}`
+        }
+        return allCases[idx] || `步骤 ${(results[idx]?.step_order ?? idx) + 1}`
+    }
 
     const getStepTab = (idx: number) => stepDetailTab[idx] || 'responseBody'
     const setStepTab = (idx: number, tab: StepDetailTab) => setStepDetailTab((p) => ({ ...p, [idx]: tab }))
@@ -228,7 +259,7 @@ export default function ReportDetailPage() {
                                 )}
                             </svg>
                             <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', textAlign: 'center', fontSize: '0.75rem', fontWeight: '600' }}>
-                                {total} 请求
+                                {total} {isScenarioTest ? '步骤' : '请求'}
                             </div>
                         </div>
                         <div style={{ fontSize: '0.875rem' }}>
@@ -238,7 +269,7 @@ export default function ReportDetailPage() {
                     </div>
                     <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <span style={{ fontSize: '0.875rem', color: '#6B7280' }}>步骤:</span>
+                            <span style={{ fontSize: '0.875rem', color: '#6B7280' }}>{isScenarioTest ? '步骤' : '用例'}:</span>
                             <span style={{ fontWeight: '600' }}>{total}</span>
                             <span style={{ color: '#10B981', fontSize: '0.8rem' }}>{passed} 成功</span>
                             <span style={{ color: '#EF4444', fontSize: '0.8rem' }}>{failed} 失败</span>
@@ -316,7 +347,7 @@ export default function ReportDetailPage() {
                                         >
                                             <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                                                 {isExpanded ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
-                                                <span style={{ fontWeight: '500' }}>① {isFailed ? '' : '√'}{getStepCaseName(i)}</span>
+                                                <span style={{ fontWeight: '500' }}>① {isFailed ? '' : '√'}{getStepCaseName(r, i)}</span>
                                                 {isFailed ? <XCircle size={18} color="#EF4444" /> : <CheckCircle size={18} color="#10B981" />}
                                             </span>
                                             <span style={{ color: isFailed ? '#EF4444' : '#10B981', fontWeight: '500' }}>
@@ -352,7 +383,7 @@ export default function ReportDetailPage() {
                                     <div key={i} style={{ border: '1px solid #FECACA', borderRadius: '0.5rem', marginBottom: '0.5rem', overflow: 'hidden', background: '#FEF2F2' }}>
                                         <button type="button" onClick={() => toggleStep(i)} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 1rem', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '0.875rem' }}>
                                             {isExpanded ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
-                                            ① {getStepCaseName(i)} <XCircle size={18} color="#EF4444" />
+                                            ① {getStepCaseName(r, i)} <XCircle size={18} color="#EF4444" />
                                         </button>
                                         {isExpanded && (
                                             <div style={{ padding: '1rem', borderTop: '1px solid #FECACA' }}>
@@ -370,16 +401,98 @@ export default function ReportDetailPage() {
 
                 {activeTab === 'summary' && (
                     <div style={{ marginBottom: '2rem' }}>
-                        <div style={{ padding: '1.5rem', background: '#F9FAFB', borderRadius: '0.5rem', border: '1px solid #E5E7EB' }}>
-                            <div className="prose max-w-none" style={{ whiteSpace: 'pre-wrap', fontSize: '0.875rem', lineHeight: 1.6, color: '#374151' }}>
-                                {phase5 || '暂无详细分析报告'}
+                        {isScenarioTest ? (
+                            <div>
+                                {/* 场景信息 */}
+                                {payload.scenario && (
+                                    <div style={{ marginBottom: '1rem', padding: '1rem', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: '0.5rem' }}>
+                                        <div style={{ fontWeight: '600', color: '#166534', marginBottom: '0.5rem' }}>场景信息</div>
+                                        <div style={{ fontSize: '0.875rem', color: '#374151' }}>
+                                            <strong>名称：</strong>{payload.scenario.name || '-'}<br />
+                                            {payload.scenario.description && <><strong>描述：</strong>{payload.scenario.description}</>}
+                                        </div>
+                                    </div>
+                                )}
+                                {/* 步骤结果列表 */}
+                                {results.length === 0 ? (
+                                    <p style={{ color: '#6B7280' }}>暂无步骤数据</p>
+                                ) : (
+                                    results.map((r: any, i: number) => {
+                                        const isFailed = !r.success
+                                        const isExpanded = expandedSteps.has(i)
+                                        const { requestData, requestHeaders, response, responseHeaders, extractions, fullUrl, method } = getStepData(r, i)
+                                        const currentTab = getStepTab(i)
+                                        return (
+                                            <div key={i} style={{ border: `1px solid ${isFailed ? '#FECACA' : '#E5E7EB'}`, borderRadius: '0.5rem', marginBottom: '0.5rem', overflow: 'hidden', background: isFailed ? '#FEF2F2' : 'white' }}>
+                                                <button type="button" onClick={() => toggleStep(i)} style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.75rem 1rem', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '0.875rem' }}>
+                                                    <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                                        {isExpanded ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                                                        {isFailed ? <XCircle size={16} color="#EF4444" /> : <CheckCircle size={16} color="#10B981" />}
+                                                        <span style={{ fontWeight: '500' }}>{getStepCaseName(r, i)}</span>
+                                                        <span style={{ color: '#9CA3AF', fontSize: '0.75rem' }}>{r.status_code ?? ''}</span>
+                                                    </span>
+                                                    <span style={{ color: isFailed ? '#EF4444' : '#10B981', fontWeight: '500', fontSize: '0.8rem' }}>
+                                                        {isFailed ? '失败' : '成功'}{r.duration_ms != null ? `  ${r.duration_ms}ms` : ''}
+                                                    </span>
+                                                </button>
+                                                {isExpanded && (
+                                                    <div style={{ padding: '1rem', borderTop: '1px solid #E5E7EB', background: '#F9FAFB' }}>
+                                                        {/* 请求信息 */}
+                                                        <div style={{ fontSize: '0.8rem', color: '#6B7280', marginBottom: '0.75rem' }}>
+                                                            <span style={{ fontWeight: '500', color: '#374151' }}>{method} </span>
+                                                            <span style={{ wordBreak: 'break-all' }}>{fullUrl}</span>
+                                                        </div>
+                                                        {/* Tab 切换 */}
+                                                        <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem', borderBottom: '1px solid #E5E7EB', paddingBottom: '0.5rem' }}>
+                                                            {STEP_DETAIL_TABS.map(tab => (
+                                                                <button key={tab} type="button" onClick={() => setStepTab(i, tab)} style={{ padding: '0.25rem 0.75rem', border: 'none', borderRadius: '0.375rem', cursor: 'pointer', fontSize: '0.75rem', fontWeight: '500', background: currentTab === tab ? '#667eea' : '#E5E7EB', color: currentTab === tab ? 'white' : '#374151' }}>
+                                                                    {STEP_TAB_LABELS[tab]}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                        {currentTab === 'responseBody' && <JsonWithLines data={response} />}
+                                                        {currentTab === 'responseHeaders' && <JsonWithLines data={responseHeaders} />}
+                                                        {currentTab === 'assertions' && (
+                                                            <div style={{ fontSize: '0.875rem', color: '#374151' }}>
+                                                                {r.assertions?.length > 0
+                                                                    ? r.assertions.map((a: any, ai: number) => (
+                                                                        <div key={ai} style={{ padding: '0.5rem', background: a.passed ? '#F0FDF4' : '#FEF2F2', borderRadius: '0.25rem', marginBottom: '0.25rem' }}>
+                                                                            {a.passed ? '✓' : '✗'} {a.field ?? a.name ?? JSON.stringify(a)}
+                                                                        </div>
+                                                                    ))
+                                                                    : <span style={{ color: '#9CA3AF' }}>暂无断言</span>
+                                                                }
+                                                            </div>
+                                                        )}
+                                                        {currentTab === 'extraction' && <JsonWithLines data={extractions.length > 0 ? extractions : '暂无提取'} />}
+                                                        {currentTab === 'requestContent' && (
+                                                            <div>
+                                                                <div style={{ marginBottom: '0.5rem', fontSize: '0.75rem', color: '#6B7280' }}>请求头</div>
+                                                                <JsonWithLines data={requestHeaders} maxHeight={150} />
+                                                                <div style={{ margin: '0.5rem 0', fontSize: '0.75rem', color: '#6B7280' }}>请求体</div>
+                                                                <JsonWithLines data={requestData} maxHeight={150} />
+                                                            </div>
+                                                        )}
+                                                        {r.error && <div style={{ marginTop: '0.75rem', color: '#EF4444', fontSize: '0.875rem' }}>错误：{r.error}</div>}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )
+                                    })
+                                )}
                             </div>
-                        </div>
+                        ) : (
+                            <div style={{ padding: '1.5rem', background: '#F9FAFB', borderRadius: '0.5rem', border: '1px solid #E5E7EB' }}>
+                                <div className="prose max-w-none" style={{ whiteSpace: 'pre-wrap', fontSize: '0.875rem', lineHeight: 1.6, color: '#374151' }}>
+                                    {phase5 || '暂无详细分析报告'}
+                                </div>
+                            </div>
+                        )}
                     </div>
                 )}
 
-                {/* 底部报告全文（折叠或简化） */}
-                {phase5 && activeTab !== 'summary' && (
+                {/* 底部报告全文（折叠或简化，仅接口测试） */}
+                {!isScenarioTest && phase5 && activeTab !== 'summary' && (
                     <details style={{ marginTop: '2rem' }}>
                         <summary style={{ cursor: 'pointer', fontWeight: '600', color: '#6B7280', marginBottom: '0.5rem' }}>完整分析报告</summary>
                         <div style={{ padding: '1rem', background: '#F9FAFB', borderRadius: '0.5rem', whiteSpace: 'pre-wrap', fontSize: '0.875rem' }}>{phase5}</div>

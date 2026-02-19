@@ -1486,6 +1486,32 @@ async def delete_scenario(scenario_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.delete("/api/v1/test_cases/{test_case_id}/steps/{step_order}")
+async def delete_test_case_step(test_case_id: int, step_order: int):
+    """删除用例中某一步骤，并对剩余步骤重新排序"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM test_cases WHERE id = ?", (test_case_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="用例不存在")
+    case = dict(row)
+    steps = json.loads(case.get("steps") or "[]")
+    original_len = len(steps)
+    steps = [s for s in steps if int(s.get("step_order", 0)) != step_order]
+    if len(steps) == original_len:
+        conn.close()
+        raise HTTPException(status_code=404, detail=f"步骤 {step_order} 不存在")
+    for i, s in enumerate(steps):
+        s["step_order"] = i + 1
+    cursor.execute("UPDATE test_cases SET steps = ? WHERE id = ?", (json.dumps(steps, ensure_ascii=False), test_case_id))
+    conn.commit()
+    conn.close()
+    return {"success": True, "steps": steps}
+
+
 # ============= 单接口 AI 测试流水线（五阶段） =============
 
 class SingleApiUnderstandRequest(BaseModel):
@@ -2463,20 +2489,28 @@ async def generate_case(scenario_id: int):
             return False
 
         def _ensure_header_mapping(mappings, from_step, from_fields, to_field):
-            """允许多个候选 from_field：前面的失败了，后面的仍可能成功"""
+            """无论 AI 是否已生成映射，都补充所有候选 from_field 路径。
+            执行引擎会按顺序尝试，哪条路径取到值就注入，互不干扰。
+            跳过 (from_step, from_field, to_field) 完全相同的重复项。"""
             if mappings is None:
                 mappings = []
             if not isinstance(mappings, list):
                 mappings = []
-            if _has_mapping(mappings, to_field, "headers"):
-                return mappings
+            existing = {
+                (m.get("from_step"), m.get("from_field"), m.get("to_field"))
+                for m in mappings
+                if isinstance(m, dict)
+            }
             for f in from_fields:
-                mappings.append({
-                    "from_step": from_step,
-                    "from_field": f,
-                    "to_field": to_field,
-                    "to_type": "headers"
-                })
+                key = (from_step, f, to_field)
+                if key not in existing:
+                    mappings.append({
+                        "from_step": from_step,
+                        "from_field": f,
+                        "to_field": to_field,
+                        "to_type": "headers"
+                    })
+                    existing.add(key)
             return mappings
 
         def _enhance_steps_with_headers(project_id: str, steps: List[Dict[str, Any]], cursor):

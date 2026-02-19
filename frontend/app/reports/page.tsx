@@ -81,7 +81,7 @@ export default function ReportsPage() {
                 {loading ? (
                     <div style={{ padding: '3rem', textAlign: 'center', color: '#6B7280' }}>加载中...</div>
                 ) : reports.length === 0 ? (
-                    <div style={{ padding: '3rem', textAlign: 'center', color: '#6B7280' }}>暂无测试报告，执行接口测试后会自动保存</div>
+                    <div style={{ padding: '3rem', textAlign: 'center', color: '#6B7280' }}>暂无测试报告，执行接口测试或场景测试后会自动保存</div>
                 ) : (
                     <div style={{ overflowX: 'auto' }}>
                         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
@@ -127,7 +127,15 @@ export default function ReportsPage() {
                                             )}
                                         </td>
                                         <td style={{ padding: '0.75rem' }}>
-                                            <span style={{ padding: '0.2rem 0.5rem', borderRadius: '0.25rem', border: '1px solid #C4B5FD', background: '#F5F3FF', fontSize: '0.75rem', marginRight: '0.25rem' }}>接口测试</span>
+                                            <span style={{
+                                                padding: '0.2rem 0.5rem',
+                                                borderRadius: '0.25rem',
+                                                border: r.report_type === '场景测试' ? '1px solid #6EE7B7' : '1px solid #C4B5FD',
+                                                background: r.report_type === '场景测试' ? '#ECFDF5' : '#F5F3FF',
+                                                color: r.report_type === '场景测试' ? '#065F46' : '#5B21B6',
+                                                fontSize: '0.75rem',
+                                                marginRight: '0.25rem'
+                                            }}>{r.report_type || '接口测试'}</span>
                                         </td>
                                         <td style={{ padding: '0.75rem', color: '#6B7280' }}>{r.creator || '-'}</td>
                                         <td style={{ padding: '0.75rem', color: '#6B7280' }}>{r.created_at || '-'}</td>
