@@ -303,6 +303,85 @@ API: {api_method} {api_path}
             "healed_expected": new_expected
         }
 
+    async def heal_single_api_plan(self, execution_result: Dict, plan: Dict) -> Dict:
+        """
+        修复单接口测试计划（phase2_plan），不写库，返回修复后的 plan 供前端合并。
+        用于接口用例 Tab 的自愈。
+        """
+        analysis = await self.analyze_failure(execution_result)
+        if not analysis.get("healable", False):
+            return {
+                "status": "cannot_heal",
+                "message": "失败原因需要人工介入",
+                "analysis": analysis
+            }
+        steps = execution_result.get("steps") or []
+        plan_cases = []
+        for ep in plan.get("endpoints") or []:
+            for c in ep.get("cases") or []:
+                plan_cases.append((ep, c))
+        non_dep_steps = [s for s in steps if not s.get("is_dep_step")]
+        if len(non_dep_steps) != len(plan_cases):
+            return {
+                "status": "cannot_heal",
+                "message": "执行步骤与计划用例数量不一致，无法精确修复",
+                "analysis": analysis
+            }
+        healed_plan = await self._heal_plan_with_analysis(plan, plan_cases, non_dep_steps, analysis)
+        return {
+            "status": "healed",
+            "message": "计划已修复，请重新执行验证",
+            "healed_plan": healed_plan,
+            "analysis": analysis
+        }
+
+    async def _heal_plan_with_analysis(
+        self,
+        plan: Dict,
+        plan_cases: List[tuple],
+        steps: List[Dict],
+        analysis: Dict
+    ) -> Dict:
+        """根据失败分析修复 plan 中的 cases"""
+        import copy
+        healed = copy.deepcopy(plan)
+        failed_indices = [i for i, s in enumerate(steps) if not s.get("success")]
+        if not failed_indices:
+            return healed
+        system_prompt = """你是一个接口测试计划修复专家。
+根据失败分析和当前计划，修复 plan 中对应失败用例的 request_template 和 expected_template。
+只修改导致失败的用例，保持其他用例不变。
+
+重要：不要删除或修改需要从前置步骤提取的字段（如 sessionId、venueId、employeeId、token 等），
+这些字段会由系统自动从前置步骤响应中注入。若失败与参数提取有关，应保留字段结构，仅修正错误值或期望。
+
+返回完整的 plan JSON，格式与输入一致，包含 endpoints 数组，每个 endpoint 有 path、method、cases。
+每个 case 有 request_template（params、headers、url_params）、expected_template（status_code、response_body）、case_type、name 等。
+"""
+        user_prompt = f"""当前计划:
+{json.dumps(plan, ensure_ascii=False, indent=2)}
+
+失败步骤索引(0-based): {failed_indices}
+
+失败分析:
+{json.dumps(analysis, ensure_ascii=False, indent=2)}
+
+对应失败步骤详情:
+{json.dumps([steps[i] for i in failed_indices], ensure_ascii=False, indent=2)}
+
+请返回修复后的完整 plan JSON，仅修正导致失败的部分。"""
+        response = await self.ai_client.chat(system_prompt, user_prompt)
+        if isinstance(response, dict) and "endpoints" in response:
+            return response
+        if isinstance(response, str):
+            try:
+                parsed = json.loads(response)
+                if isinstance(parsed, dict) and "endpoints" in parsed:
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+        return healed
+
     async def _heal_api_template(
         self,
         request_template: Dict,

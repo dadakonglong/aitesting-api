@@ -432,6 +432,13 @@ def _apply_dep_chain(target_steps: List[Dict], chain: List[Dict], project_id: st
     if not chain:
         return target_steps
 
+    # 禁止目标接口作为自己的前置依赖：过滤掉与 target 同 path 的 dep
+    target_paths = {str(s.get("api_path") or s.get("path") or "").strip() for s in target_steps}
+    chain = [d for d in chain if str(d.get("api_path") or "").strip() not in target_paths]
+    if not chain:
+        _dlog("过滤自引用后依赖链为空，返回原始步骤")
+        return target_steps
+
     # 拓扑排序，确保执行顺序正确（无前置依赖的步骤排最前）
     chain = _toposort_chain(chain)
     _dlog(f"拓扑排序后链顺序: {[d.get('api_path') for d in chain]}")
@@ -488,6 +495,10 @@ def _apply_dep_chain(target_steps: List[Dict], chain: List[Dict], project_id: st
         dep_mappings: List[Dict] = []
         for need in (dep.get("needs_from_prev") or []):
             from_dep_path = need.get("from_dep_path") or ""
+            # 禁止自引用：当前 dep 不能依赖自己
+            if from_dep_path and str(from_dep_path).strip() == str(d_path or "").strip():
+                _dlog(f"  跳过自引用: dep {d_path} 的 needs_from_prev 指向自身")
+                continue
             from_step = path_only_index.get(from_dep_path)
             if not from_step:
                 # 尝试 path_to_step_index 任意 method 匹配
@@ -1689,6 +1700,129 @@ def _single_api_plan_to_steps(plan: Dict[str, Any]) -> List[Dict]:
     return steps
 
 
+def _enhance_single_api_steps_param_mappings(project_id: str, steps: List[Dict], db_path: str) -> List[Dict]:
+    """
+    单接口执行前：自动补齐 param_mappings（token、sessionId、venueId 等从前置步骤提取）。
+    与场景用例的 _enhance_steps_with_headers 逻辑一致，供 single-api 流水线使用。
+    """
+    if not isinstance(steps, list) or not steps:
+        return steps
+
+    def _safe_load(val, default):
+        if val is None or (isinstance(val, str) and not val.strip()):
+            return default
+        if isinstance(val, (dict, list)):
+            return val
+        try:
+            return json.loads(val) if isinstance(val, str) else default
+        except Exception:
+            return default
+
+    def _norm_headers(h):
+        if not isinstance(h, dict):
+            return {}
+        return {str(k).strip(): ("" if v is None else str(v)) for k, v in h.items() if k is not None}
+
+    def _has_map(mappings, to_field, to_type="headers"):
+        for m in (mappings or []):
+            if isinstance(m, dict) and m.get("to_field") == to_field and m.get("to_type", "params") == to_type:
+                return True
+        return False
+
+    def _ensure_map(mappings, from_step, from_fields, to_field):
+        mappings = mappings if isinstance(mappings, list) else []
+        existing = {(m.get("from_step"), m.get("from_field"), m.get("to_field")) for m in mappings if isinstance(m, dict)}
+        for f in from_fields:
+            if (from_step, f, to_field) not in existing:
+                mappings.append({"from_step": from_step, "from_field": f, "to_field": to_field, "to_type": "headers"})
+                existing.add((from_step, f, to_field))
+        return mappings
+
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT path, method, headers FROM apis WHERE project_id = ?", (project_id,))
+        api_headers_by_key = {}
+        for r in cursor.fetchall():
+            try:
+                p = r["path"] if hasattr(r, "keys") else r[0]
+                m = r["method"] if hasattr(r, "keys") else r[1]
+                h = _safe_load(r["headers"] if hasattr(r, "keys") else r[2], {})
+                api_headers_by_key[(str(m or "").upper(), str(p or ""))] = _norm_headers(h)
+            except Exception:
+                continue
+        conn.close()
+    except Exception:
+        api_headers_by_key = {}
+
+    from_step_for_auth = 1
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        method = str(step.get("api_method") or step.get("method") or "GET").upper()
+        path = str(step.get("api_path") or step.get("path") or "")
+        key = (method, path)
+        headers = _norm_headers(step.get("headers") or {})
+        params_body = step.get("params") if isinstance(step.get("params"), dict) else {}
+        param_mappings = step.get("param_mappings")
+        if not isinstance(param_mappings, list):
+            param_mappings = []
+
+        api_headers = api_headers_by_key.get(key) or {}
+        for hk, hv in api_headers.items():
+            if hk.lower() != "authorization" and hk not in headers and hv:
+                headers[hk] = hv
+        for hk in list(headers.keys()):
+            hv = headers.get(hk, "")
+            if isinstance(hv, str) and ("${" in hv or "{{" in hv) and (hk or "").lower() == "authorization":
+                headers.pop(hk, None)
+
+        current_step_order = int(step.get("step_order") or (i + 1))
+        if current_step_order > 1:
+            if "X-Venue-Id" not in headers:
+                if isinstance(params_body, dict) and params_body.get("venueId"):
+                    headers["X-Venue-Id"] = str(params_body.get("venueId"))
+                else:
+                    param_mappings = _ensure_map(param_mappings, from_step_for_auth,
+                        ["data.venueId", "data.user.venueId", "data.profile.venueId"], "X-Venue-Id")
+            if "X-Employee-Id" not in headers:
+                if isinstance(params_body, dict) and params_body.get("employeeId"):
+                    headers["X-Employee-Id"] = str(params_body.get("employeeId"))
+                else:
+                    param_mappings = _ensure_map(param_mappings, from_step_for_auth,
+                        ["data.employeeId", "data.user.employeeId", "data.profile.employeeId", "data.empId"], "X-Employee-Id")
+            param_mappings = _ensure_map(param_mappings, from_step_for_auth,
+                ["data.token", "token", "data.access_token", "data.accessToken"], "Authorization")
+
+        if isinstance(params_body, dict) and "sessionId" in params_body and current_step_order > 1:
+            if not _has_map(param_mappings, "sessionId", "params"):
+                param_mappings.append({
+                    "from_step": current_step_order - 1,
+                    "from_field": "data.sessionId",
+                    "to_field": "sessionId",
+                    "to_type": "params"
+                })
+
+        if isinstance(params_body, dict) and current_step_order > 1:
+            prev_step = current_step_order - 1
+            for field_name in list(params_body.keys()):
+                if field_name == "sessionId" or _has_map(param_mappings, field_name, "params"):
+                    continue
+                fl = field_name.lower()
+                if fl.endswith("id") or fl.endswith("token") or fl.endswith("session") or fl in ("orderid", "userid", "venueid", "employeeid", "roomid"):
+                    param_mappings.append({
+                        "from_step": prev_step,
+                        "from_field": f"data.{field_name}",
+                        "to_field": field_name,
+                        "to_type": "params"
+                    })
+
+        step["headers"] = headers
+        step["param_mappings"] = param_mappings
+    return steps
+
+
 _CASE_TYPE_CN = {"positive": "正向", "boundary": "边界", "robustness": "健壮", "security": "安全"}
 
 
@@ -1990,6 +2124,8 @@ async def single_api_execute(req: SingleApiExecuteRequest):
         steps = await _resolve_dependencies(
             steps, req.plan, req.project_id, DB_PATH, ai_client
         )
+        # ★ 自动补齐 param_mappings（token、sessionId、venueId 等从前置步骤提取）
+        steps = _enhance_single_api_steps_param_mappings(req.project_id or "default-project", steps, DB_PATH)
 
         start_ts = datetime.now()
         step_results = await _run_steps(steps, base_url)
@@ -2007,6 +2143,21 @@ async def single_api_execute(req: SingleApiExecuteRequest):
                 "duration_ms": int((s.get("duration") or 0) * 1000),
             })
 
+        final_status = "success" if failed == 0 else "failed"
+        execution_id = None
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO executions (test_case_id, status, results, project_id) VALUES (?, ?, ?, ?)",
+                (0, final_status, json.dumps(step_results), req.project_id or "default-project"),
+            )
+            execution_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"DEBUG: 保存接口用例执行记录失败: {e}")
+
         suite_result = {
             "suite_id": "single-api-suite",
             "total_cases": len(step_results),
@@ -2015,6 +2166,7 @@ async def single_api_execute(req: SingleApiExecuteRequest):
             "duration_ms": duration_ms,
             "case_results": case_results,
             "results": step_results,
+            "execution_id": execution_id,
         }
         return suite_result
     except HTTPException:
@@ -2108,6 +2260,8 @@ async def single_api_full_pipeline(req: SingleApiFullPipelineRequest):
                     steps = await _resolve_dependencies(
                         steps, plan_payload, req.project_id, DB_PATH, ai_client
                     )
+                    # ★ 自动补齐 param_mappings
+                    steps = _enhance_single_api_steps_param_mappings(req.project_id or "default-project", steps, DB_PATH)
                     start_ts = datetime.now()
                     step_results = await _run_steps(steps, base_url)
                     duration_ms = int((datetime.now() - start_ts).total_seconds() * 1000)
@@ -2543,6 +2697,7 @@ async def generate_case(scenario_id: int):
                 api_headers_by_key[(str(m or "").upper(), str(p or ""))] = _normalize_headers_dict(_safe_json_loads(h, {}))
 
             # 约定：第 1 步通常是登录/获取 token（从该步提取动态头）
+            # 禁止自引用：步骤 1 不能从步骤 1 提取，仅步骤 2 及之后才添加 from_step=1 的映射
             from_step_for_auth = 1
 
             for i, step in enumerate(steps):
@@ -2575,40 +2730,42 @@ async def generate_case(scenario_id: int):
                         if hk.lower() == "authorization":
                             headers.pop(hk, None)
 
-                # 3) 动态头自动补齐（优先用 step.params 的静态值；否则用 param_mappings 从第1步提取）
-                if "X-Venue-Id" not in headers:
-                    if isinstance(params_body, dict) and params_body.get("venueId"):
-                        headers["X-Venue-Id"] = str(params_body.get("venueId"))
-                    else:
-                        param_mappings = _ensure_header_mapping(
-                            param_mappings,
-                            from_step_for_auth,
-                            ["data.venueId", "data.user.venueId", "data.profile.venueId"],
-                            "X-Venue-Id"
-                        )
+                current_step_order = step.get("step_order") or (i + 1)
+                # 禁止自引用：步骤 1 不能添加 from_step=1 的映射（自己依赖自己）
+                if int(current_step_order) > 1:
+                    # 3) 动态头自动补齐（优先用 step.params 的静态值；否则用 param_mappings 从第1步提取）
+                    if "X-Venue-Id" not in headers:
+                        if isinstance(params_body, dict) and params_body.get("venueId"):
+                            headers["X-Venue-Id"] = str(params_body.get("venueId"))
+                        else:
+                            param_mappings = _ensure_header_mapping(
+                                param_mappings,
+                                from_step_for_auth,
+                                ["data.venueId", "data.user.venueId", "data.profile.venueId"],
+                                "X-Venue-Id"
+                            )
 
-                if "X-Employee-Id" not in headers:
-                    if isinstance(params_body, dict) and params_body.get("employeeId"):
-                        headers["X-Employee-Id"] = str(params_body.get("employeeId"))
-                    else:
-                        param_mappings = _ensure_header_mapping(
-                            param_mappings,
-                            from_step_for_auth,
-                            ["data.employeeId", "data.user.employeeId", "data.profile.employeeId", "data.empId"],
-                            "X-Employee-Id"
-                        )
+                    if "X-Employee-Id" not in headers:
+                        if isinstance(params_body, dict) and params_body.get("employeeId"):
+                            headers["X-Employee-Id"] = str(params_body.get("employeeId"))
+                        else:
+                            param_mappings = _ensure_header_mapping(
+                                param_mappings,
+                                from_step_for_auth,
+                                ["data.employeeId", "data.user.employeeId", "data.profile.employeeId", "data.empId"],
+                                "X-Employee-Id"
+                            )
 
-                # Authorization：无论 API 定义里有没有，都确保通过映射注入
-                param_mappings = _ensure_header_mapping(
-                    param_mappings,
-                    from_step_for_auth,
-                    ["data.token", "token", "data.access_token", "data.accessToken"],
-                    "Authorization"
-                )
+                    # Authorization：无论 API 定义里有没有，都确保通过映射注入
+                    param_mappings = _ensure_header_mapping(
+                        param_mappings,
+                        from_step_for_auth,
+                        ["data.token", "token", "data.access_token", "data.accessToken"],
+                        "Authorization"
+                    )
 
                 # 4) 常见 body 依赖自动补齐：sessionId
                 # 典型链路：步骤2 open-pay 返回 data.sessionId，步骤3 close-room 需要该 sessionId
-                current_step_order = step.get("step_order") or (i + 1)
                 if isinstance(params_body, dict) and "sessionId" in params_body and int(current_step_order) > 1:
                     # 只有在尚未配置映射时才自动添加，避免覆盖人工配置
                     if not _has_mapping(param_mappings, "sessionId", to_type="params"):
@@ -5028,6 +5185,7 @@ def _normalize_results_to_steps(results: List[Dict]) -> List[Dict]:
             "expected_status": r.get("expected_status"),
             "case_type": r.get("case_type"),
             "assertions": r.get("assertions", []),
+            "is_dep_step": r.get("is_dep_step", False),
         })
     return steps
 
@@ -5045,6 +5203,45 @@ class HealApplyRequest(BaseModel):
     test_case_id: Optional[int] = 0
     api_test_case_id: Optional[int] = None
     execution_id: Optional[int] = None  # 不传则需在下次执行后单独传 execution_result
+
+
+class HealApplySingleApiPlanRequest(BaseModel):
+    """接口用例自愈：传入 execution_id 和 plan，返回修复后的 plan 供前端合并"""
+    execution_id: int
+    plan: Dict[str, Any]  # phase2_plan
+
+
+@app.post("/api/v1/heal/apply-single-api-plan")
+async def heal_apply_single_api_plan(req: HealApplySingleApiPlanRequest):
+    """
+    接口用例自愈：根据执行记录分析失败原因，返回修复后的 plan，供前端合并到 phase2_plan。
+    用于测试中心 → 接口用例 Tab。
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT results FROM executions WHERE id = ?", (req.execution_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise HTTPException(status_code=404, detail="执行记录不存在")
+        try:
+            results = json.loads(row["results"] or "[]")
+        except Exception:
+            results = []
+        steps = _normalize_results_to_steps(results)
+        execution_result = {"steps": steps}
+        if not steps:
+            raise HTTPException(status_code=400, detail="执行记录无步骤结果")
+        result = await healer_agent.heal_single_api_plan(execution_result, req.plan)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/v1/projects/{project_id}/export")
