@@ -59,8 +59,8 @@ SYSTEM_PROMPT = """你是专业的接口测试专家，负责根据接口定义�
 
 2. **请求内容 request_template（必须完整）**
    - 对于所有 POST/PUT/PATCH 且存在请求体的接口：
-     - `request_template.params` **禁止为空对象 {}**。
-     - 必须包含接口定义中所有必填字段，并给出**具体取值**。
+     - **正向/边界/安全用例**：`request_template.params` **禁止为空对象 {}**，必须包含接口定义中所有必填字段，并给出**具体取值**。
+     - **健壮用例（robustness）**：若用例场景是「缺少必填字段X」，则 `params` 中**必须故意不包含字段X**，其余必填字段照常填写。这是健壮用例的核心价值所在，不删除该字段就等于没有测试缺参行为。
    - `request_template.headers` 必须存在：
      - 有 Body 时必须包含 `Content-Type`。
      - 若接口定义中提供了示例 headers，请在此基础上进行合理简化或复用，而不是清空。
@@ -68,7 +68,8 @@ SYSTEM_PROMPT = """你是专业的接口测试专家，负责根据接口定义�
    - **禁止出现以下情况：**
      - 缺少 `request_template` 字段；
      - `request_template` 中缺少 `params` / `url_params` / `headers` 任意一个字段；
-     - 对于需要 Body 的接口，`params` 为空对象。
+     - 对于正向/边界/安全用例，`params` 为空对象；
+     - 健壮「缺少字段X」用例，params 中仍然包含字段X（这样的用例毫无意义）。
 
 2.1 **边界用例的参数值要求（严格执行）**
    - **边界用例必须使用真实的边界值，禁止使用正常值冒充边界值。**
@@ -160,7 +161,7 @@ USER_PROMPT_TEMPLATE = """请为以下接口生成测试用例，需包含类型
 - 请求体(OpenAPI requestBody): {request_body}
 - 请求头(OpenAPI headers): {headers}
 
-请为每种请求类型生成至少 1 条**真实**用例。每条用例的 request_template.params 必须包含接口定义中所有必填字段的**具体取值**，且不同用例类型（正向/边界/健壮/安全）的取值应不同，以验证不同请求的不同响应。直接返回上述格式的 JSON。"""
+请为每种请求类型生成至少 1 条**真实**用例。**正向/边界/安全**用例的 params 必须包含所有必填字段的具体取值；**健壮用例**若场景是「缺少字段X」，params 中**必须故意不包含字段X**（这是健壮测试的核心）。不同用例类型的取值应体现差异。直接返回上述格式的 JSON。"""
 
 
 # --- 大请求体智能裁剪（仅用于 AI 提示词，不影响实际执行） ---
@@ -226,6 +227,35 @@ def _is_large_body(request_body: dict) -> bool:
     if not isinstance(request_body, dict):
         return False
     return _count_fields(request_body) >= _LARGE_BODY_FIELD_THRESHOLD
+
+
+def _remove_missing_fields_for_robustness(case_name: str, req_tpl: dict) -> None:
+    """
+    对健壮「缺少字段X」用例，从 request_template.params 中强制删除 X。
+    支持识别格式：「缺少必要字段phone」「缺少参数 phone」「缺少必填 username, password」等。
+    """
+    import re
+    patterns = [
+        r'缺少(?:必要|必填|必须|关键)?(?:字段|参数|属性)[：:\s]*([a-zA-Z_][a-zA-Z0-9_,，\s]*)',
+        r'missing\s+(?:required\s+)?(?:field\s+)?([a-zA-Z_][a-zA-Z0-9_,\s]+)',
+    ]
+    fields_to_remove = []
+    for pattern in patterns:
+        m = re.search(pattern, case_name, re.IGNORECASE)
+        if m:
+            for f in re.split(r'[,，\s]+', m.group(1).strip()):
+                f = f.strip()
+                if f and re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', f):
+                    fields_to_remove.append(f)
+    if not fields_to_remove:
+        return
+    params = req_tpl.get("params")
+    if isinstance(params, dict):
+        removed = [f for f in fields_to_remove if f in params]
+        for f in fields_to_remove:
+            params.pop(f, None)
+        if removed:
+            print(f"[AI Case Gen] 健壮用例「{case_name}」强制删除字段 {removed}")
 
 
 async def generate_cases_for_endpoint(
@@ -381,8 +411,13 @@ async def generate_cases_for_endpoint(
                 req_tpl["url_params"] = {}
             if "headers" not in req_tpl:
                 req_tpl["headers"] = {}
+            # 健壮「缺少字段」用例：强制删除用例名中指定的必填字段，保证测试意图落地
+            if case_type == "robustness":
+                _remove_missing_fields_for_robustness(name, req_tpl)
+
             # 对于需要 body 的接口，如果大模型未给出请求体，直接丢弃该用例，不做自动构造
-            if method in ("POST", "PUT", "PATCH") and not (req_tpl.get("params") or {}):
+            # 例外：健壮用例允许 params 为空（如「请求体为空JSON」是合法的缺参测试场景）
+            if method in ("POST", "PUT", "PATCH") and not (req_tpl.get("params") or {}) and case_type != "robustness":
                 invalid_stats_total["no_body"] += 1
                 continue
             # 自动补充 Content-Type（但跳过明确测试"无 Content-Type"的安全用例）

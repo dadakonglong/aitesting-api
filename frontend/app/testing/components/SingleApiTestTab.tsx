@@ -186,6 +186,7 @@ export default function SingleApiTestTab({
     const [healAnalyzeLoading, setHealAnalyzeLoading] = useState(false)
     const [healAnalyzeResult, setHealAnalyzeResult] = useState<any>(null)
     const [healApplyLoading, setHealApplyLoading] = useState(false)
+    const [healLog, setHealLog] = useState<string[]>([])
 
     useEffect(() => {
         const load = async () => {
@@ -216,9 +217,10 @@ export default function SingleApiTestTab({
         load()
     }, [currentProject])
 
-    // 切换选中的用例时清空失败分析结果，避免在别的用例上误显示
+    // 切换选中的用例时清空失败分析结果和修复日志，避免在别的用例上误显示
     useEffect(() => {
         setHealAnalyzeResult(null)
+        setHealLog([])
     }, [selectedId])
 
     const selected = items.find((it) => it.id === selectedId)
@@ -291,7 +293,7 @@ export default function SingleApiTestTab({
                         report_type: '接口测试',
                         trigger_method: '手动触发',
                         status: suiteResult.failed_cases > 0 ? 'error' : 'success',
-                        payload: { phase2_plan: result.phase2_plan, phase4_result: suiteResult, phase5_report: analyzeData.report, phase5_chart_data: analyzeData.chart_data },
+                        payload: { phase2_plan: newData.phase2_plan, phase4_result: suiteResult, phase5_report: analyzeData.report, phase5_chart_data: analyzeData.chart_data },
                     }),
                 })
             } catch (_e) {
@@ -343,6 +345,7 @@ export default function SingleApiTestTab({
             return
         }
         setHealApplyLoading(true)
+        setHealLog(['🔍 API Healer：分析失败原因...'])
         try {
             const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/heal/apply-single-api-plan`, {
                 method: 'POST',
@@ -351,14 +354,50 @@ export default function SingleApiTestTab({
             })
             const data = await res.json()
             if (!res.ok) throw new Error(data.detail || '修复失败')
-            if (data.status === 'healed' && data.healed_plan) {
+
+            const log: string[] = ['🔍 API Healer：分析失败原因...']
+            const analyses: any[] = data.analysis?.analysis || []
+            analyses.forEach((a: any, i: number) => {
+                if (a.failure_type) log.push(`   ✓ 识别问题 ${analyses.length > 1 ? `#${i + 1}` : ''}：${a.failure_type}`)
+                if (a.root_cause) log.push(`   ✓ 根本原因：${a.root_cause}`)
+                if (a.patch_hint) log.push(`   ✓ 修复提示：${a.patch_hint}`)
+            })
+            if (!analyses.length && data.analysis?.message) {
+                log.push(`   ${data.analysis.message}`)
+            }
+            log.push('')
+
+            if (data.status === 'healed') {
+                log.push('🛠️ API Healer：生成修复方案...')
+                const actions: Record<string, string> = data.heal_actions || {}
+                analyses.forEach((a: any, i: number) => {
+                    const action = actions[String(i)]
+                    if (action === 'fix_request') {
+                        log.push(`   ✓ 修复策略：修正请求参数（健壮用例缺字段校验，删除多余字段）`)
+                    } else if (a.suggested_fix) {
+                        log.push(`   ✓ 修复策略：${a.suggested_fix}`)
+                    }
+                    if (a.can_heal) log.push(`   ✓ 置信度：高`)
+                })
+                log.push('')
+                log.push('✅ API Healer：应用修复...')
+                log.push('   ✓ 更新测试用例计划')
+                log.push('   ✓ 修复完成，请重新执行验证')
+                setHealLog(log)
                 onResultChange(selectedId!, { ...result, phase2_plan: data.healed_plan })
-                alert('✅ 修复成功！计划已更新，请重新执行验证。')
+            } else if (data.status === 'cannot_heal') {
+                const isBug = (data.message || '').includes('接口自身的 Bug') || (data.message || '').includes('未做校验')
+                log.push(isBug ? '🐛 API Healer：发现接口 Bug' : '⚠️ API Healer：无法自动修复')
+                const msgLines = (data.message || '失败原因需要人工介入').split('\n')
+                msgLines.forEach((l: string) => log.push(`   ${l}`))
+                setHealLog(log)
             } else {
-                alert(`⚠️ 无法自动修复\n\n${data.message || '失败原因需要人工介入'}`)
+                log.push('⚠️ API Healer：无法自动修复')
+                log.push(`   ${data.message || '失败原因需要人工介入'}`)
+                setHealLog(log)
             }
         } catch (e: any) {
-            alert(`请求失败: ${e?.message || '未知错误'}`)
+            setHealLog(['🔍 API Healer：分析失败原因...', '', `❌ 请求失败：${e?.message || '未知错误'}`])
         } finally {
             setHealApplyLoading(false)
         }
@@ -785,10 +824,10 @@ export default function SingleApiTestTab({
                                                         </p>
                                                         {result.phase4_result.failed_cases > 0 && result.phase4_result.execution_id && (
                                                             <div style={{ marginBottom: '0.75rem' }}>
-                                                                {(healAnalyzeLoading || healApplyLoading) && (
+                                                                {healAnalyzeLoading && (
                                                                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 0.75rem', background: '#FEF3C7', borderRadius: '0.375rem', marginBottom: '0.5rem', fontSize: '0.875rem', color: '#92400E' }}>
                                                                         <Loader2 size={18} className="animate-spin" style={{ flexShrink: 0 }} />
-                                                                        <span>{healAnalyzeLoading ? '分析中，请稍候...' : '修复中，请稍候...'}</span>
+                                                                        <span>分析中，请稍候...</span>
                                                                     </div>
                                                                 )}
                                                                 <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
@@ -833,6 +872,31 @@ export default function SingleApiTestTab({
                                                         )}
                                                         {healAnalyzeResult && healAnalyzeResult.status !== 'no_failure' && healAnalyzeResult.status !== 'analyzed' && !healAnalyzeResult.healable && (
                                                             <p style={{ fontSize: '0.8125rem', color: '#92400E', marginBottom: '0.5rem' }}>{healAnalyzeResult.message || '失败原因需要人工介入'}</p>
+                                                        )}
+                                                        {(healLog.length > 0 || healApplyLoading) && (
+                                                            <div style={{ marginBottom: '0.75rem', background: '#0F172A', borderRadius: '0.5rem', padding: '0.75rem 1rem', fontFamily: 'monospace', fontSize: '0.8125rem', lineHeight: 1.7 }}>
+                                                                <div style={{ color: '#94A3B8', marginBottom: '0.35rem', fontSize: '0.75rem', letterSpacing: '0.05em' }}>— AI 修复过程 —</div>
+                                                                {healLog.map((line, i) => {
+                                                                    const isEmpty = line === ''
+                                                                    const isSuccess = line.startsWith('✅')
+                                                                    const isWarn = line.startsWith('⚠️')
+                                                                    const isError = line.startsWith('❌')
+                                                                    const isSection = line.startsWith('🔍') || line.startsWith('🛠️')
+                                                                    const isDetail = line.startsWith('   ✓')
+                                                                    const color = isSuccess ? '#4ADE80' : isWarn ? '#FBBF24' : isError ? '#F87171' : isSection ? '#60A5FA' : isDetail ? '#A3E635' : '#E2E8F0'
+                                                                    return isEmpty ? <div key={i} style={{ height: '0.35rem' }} /> : (
+                                                                        <div key={i} style={{ color, display: 'flex', alignItems: 'flex-start', gap: '0.25rem' }}>
+                                                                            <span style={{ whiteSpace: 'pre-wrap' }}>{line}</span>
+                                                                        </div>
+                                                                    )
+                                                                })}
+                                                                {healApplyLoading && (
+                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#94A3B8', marginTop: '0.35rem' }}>
+                                                                        <Loader2 size={13} className="animate-spin" />
+                                                                        <span>处理中...</span>
+                                                                    </div>
+                                                                )}
+                                                            </div>
                                                         )}
                                                         <p style={{ fontSize: '0.8125rem', color: '#6B7280', marginBottom: '0.75rem' }}>
                                                             执行优先按「代码生成」中的用例；解析不到时按「测试计划」用例执行。

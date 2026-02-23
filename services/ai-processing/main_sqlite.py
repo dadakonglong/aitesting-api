@@ -1679,8 +1679,13 @@ def _single_api_plan_to_steps(plan: Dict[str, Any]) -> List[Dict]:
             rt = c.get("request_template") or {}
             et = c.get("expected_template") or {}
             ai_params = rt.get("params") or {}
+            case_type_lower = (c.get("case_type") or "positive").lower()
             # ★ 合并：以原始请求体为基模板，AI 生成的参数覆盖其上
-            if original_body and isinstance(original_body, dict) and ai_params:
+            # 例外：健壮用例（robustness）不合并原始请求体——因为健壮用例可能故意缺少某些字段，
+            # 合并会把原始请求体里的字段补回来，使"缺少字段X"的测试失去意义
+            if case_type_lower == "robustness":
+                merged_params = ai_params  # 直接用 AI 生成的参数，不补全原始字段
+            elif original_body and isinstance(original_body, dict) and ai_params:
                 merged_params = {**original_body, **ai_params}
             else:
                 merged_params = ai_params if ai_params else (original_body.copy() if original_body else {})
@@ -3484,6 +3489,7 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                 "request_headers": (step.get("headers") or {}).copy(),
                 "success": False,
                 "status_code": "Error",
+                "response": None,  # 默认为 None，执行成功后会被覆盖
                 "is_dep_step": bool(step.get("is_dep_step", False)),
                 "description": step.get("description", ""),
             }
@@ -3581,6 +3587,9 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
                     res_content = res.json()
                 except Exception:
                     pass
+                # 响应体为空时补充状态码说明，避免前端显示"暂无响应体"让用户困惑
+                if res_content == "" or res_content is None:
+                    res_content = {"__empty_body__": True, "http_status": res.status_code, "note": f"服务端返回 HTTP {res.status_code}，响应体为空"}
                 full_url = url
                 if params_query:
                     full_url = url + ("&" if "?" in url else "?") + urllib.parse.urlencode(params_query)
@@ -3790,7 +3799,11 @@ async def _run_steps(steps: List[Dict], base_url: str) -> List[Dict]:
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                step_data["error"] = f"{type(e).__name__}: {str(e)}"
+                err_msg = f"{type(e).__name__}: {str(e)}"
+                step_data["error"] = err_msg
+                # 把错误信息也放入 response，方便前端在"响应体"Tab 显示
+                if step_data.get("response") is None:
+                    step_data["response"] = {"__error__": err_msg}
                 step_results.append(step_data)
     return step_results
 
