@@ -626,16 +626,15 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
         allThinkingCompletedRef.current = false // 同时更新ref
         setProgressLines([]) // 初始不显示进度面板
 
-        // 辅助函数：追加进度行（只在所有思考完成后才显示）
+        // 辅助函数：追加进度行（单接口模式下实时显示）
         const appendProgress = (...lines: string[]) => {
-            if (allThinkingCompletedRef.current) {
-                setProgressLines((prev) => [...prev, ...lines])
-                // 滚动到底部
-                setTimeout(() => progressEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50)
-            } else {
-                // 思考过程中，先保存到ref，等思考完成后再显示
-                progressRef.current = [...(progressRef.current || []), ...lines]
-            }
+            setProgressLines((prev) => {
+                const next = [...prev, ...lines]
+                progressRef.current = next
+                return next
+            })
+            // 滚动到底部
+            setTimeout(() => progressEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50)
         }
 
         try {
@@ -668,6 +667,8 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                 { id: '2', title: '检索相关API文档', status: 'thinking', details: ['向量语义检索', '匹配接口定义'] },
                 { id: '3', title: '提取接口关键信息', status: 'thinking', details: ['解析请求参数', '分析响应结构'] },
             ])
+            // 让“思考中”状态停留一小段时间
+            await new Promise((resolve) => setTimeout(resolve, 400))
             
             const phase1Res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/single-api/understand`, {
                 method: 'POST',
@@ -680,12 +681,14 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
             }
             const structured = await phase1Res.json()
             
-            // 更新思考步骤状态
+            // 更新思考步骤状态为完成
             setThinkingSteps([
                 { id: '1', title: '分析接口功能需求', status: 'completed', details: ['理解用户测试意图', '识别目标接口'] },
                 { id: '2', title: '检索相关API文档', status: 'completed', details: ['向量语义检索', '匹配接口定义'] },
                 { id: '3', title: '提取接口关键信息', status: 'completed', details: ['解析请求参数', '分析响应结构'] },
             ])
+            // 给“完成”状态一点展示时间
+            await new Promise((resolve) => setTimeout(resolve, 400))
 
             // 根据 phase1 结果追加进度详情
             const entities = structured?.entities || []
@@ -712,6 +715,7 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                 { id: '5', title: '设计测试用例', status: 'thinking', details: ['正向用例', '边界用例', '异常用例', '安全用例'] },
                 { id: '6', title: '生成测试计划文档', status: 'thinking', details: ['整理测试范围', '定义验收标准'] },
             ])
+            await new Promise((resolve) => setTimeout(resolve, 400))
             
             const phase2Res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/single-api/plan`, {
                 method: 'POST',
@@ -734,6 +738,7 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                 { id: '5', title: '设计测试用例', status: 'completed', details: ['正向用例', '边界用例', '异常用例', '安全用例'] },
                 { id: '6', title: '生成测试计划文档', status: 'completed', details: ['整理测试范围', '定义验收标准'] },
             ])
+            await new Promise((resolve) => setTimeout(resolve, 400))
             
             if (cases.length > 0) appendProgress(`   ✓ 共 ${cases.length} 个测试用例`)
             if (endpoints.length > 0) appendProgress(`   ✓ 覆盖 ${endpoints.length} 个 API 端点`)
@@ -758,6 +763,7 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                 { id: '8', title: '生成测试代码', status: 'thinking', details: ['编写测试函数', '配置断言逻辑'] },
                 { id: '9', title: '优化代码质量', status: 'thinking', details: ['检查代码规范', '确保可执行性'] },
             ])
+            await new Promise((resolve) => setTimeout(resolve, 400))
             
             const targetApi = (endpoints[0]) || {}
             const apiInfo = planPayload.target_api || targetApi || (structured?.api_candidates || [{}])[0] || {}
@@ -779,6 +785,7 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                 { id: '8', title: '生成测试代码', status: 'completed', details: ['编写测试函数', '配置断言逻辑'] },
                 { id: '9', title: '优化代码质量', status: 'completed', details: ['检查代码规范', '确保可执行性'] },
             ])
+            await new Promise((resolve) => setTimeout(resolve, 400))
             
             appendProgress('   ✓ 生成测试文件')
             appendProgress('')
@@ -1191,8 +1198,10 @@ export default function AIGenerationTab({ onSingleApiGenerated }: Props) {
                 />
             )}
 
-            {/* 实时进度展示面板（测试场景 + 接口测试 共用）- 只在所有思考完成后显示 */}
-            {allThinkingCompleted && progressLines.length > 0 && (
+            {/* 实时进度展示面板（测试场景 + 接口测试 共用）
+                - 场景模式：全部思考完成后显示
+                - 单接口模式：生成过程中实时显示 */}
+            {((mode === 'scenario' && allThinkingCompleted) || mode === 'single-api') && progressLines.length > 0 && (
                 <div style={{
                     marginTop: '1.5rem',
                     background: 'linear-gradient(135deg, #f8f9ff 0%, #f0f2ff 100%)',
