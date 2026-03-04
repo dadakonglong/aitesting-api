@@ -5592,13 +5592,72 @@ async def trigger_scheduled_job(job_id: int):
 
 @app.get("/api/v1/scheduler/jobs/{job_id}/history")
 async def get_job_history(job_id: int, limit: int = 50):
-    """获取任务执行历史"""
+    """获取任务执行历史（含自愈状态）"""
     try:
         history = await scheduler_service.get_job_history(job_id, limit)
         return history
     except Exception as e:
         print(f"❌ 获取任务历史失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ---------- 趋势监控 ----------
+
+@app.get("/api/v1/scheduler/jobs/{job_id}/trend")
+async def get_job_performance_trend(job_id: int, days: int = 7):
+    """
+    获取任务近 N 天的执行趋势数据（按天聚合）
+
+    返回：日期 / 成功率 / 平均耗时 / 最大耗时 / 执行次数
+    """
+    try:
+        trend = await scheduler_service.get_performance_trend(job_id, days)
+        return {"job_id": job_id, "days": days, "data": trend}
+    except Exception as e:
+        print(f"❌ 获取趋势数据失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/scheduler/jobs/{job_id}/performance-alert")
+async def get_job_performance_alert(job_id: int):
+    """
+    检测任务是否存在性能劣化（近1天 vs 近7天均值）
+
+    返回：degraded / change_pct / message
+    """
+    try:
+        alert = await scheduler_service.detect_degradation(job_id)
+        return alert
+    except Exception as e:
+        print(f"❌ 获取性能告警失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ---------- 自愈闭环 ----------
+
+@app.post("/api/v1/scheduler/jobs/{job_id}/heal")
+async def trigger_job_heal(job_id: int):
+    """
+    手动触发自愈：取最近一次失败执行，重新进行根因分析并尝试自动修复
+    """
+    try:
+        result = await scheduler_service.trigger_manual_heal(job_id)
+        return result
+    except Exception as e:
+        print(f"❌ 手动触发自愈失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/scheduler/jobs/{job_id}/healing-history")
+async def get_job_healing_history(job_id: int, limit: int = 20):
+    """
+    获取任务的自愈历史列表
+
+    返回：触发时间 / 自愈状态 / 根因分析 / 修复结果
+    """
+    try:
+        history = await scheduler_service.get_healing_history(job_id, limit)
+        return history
+    except Exception as e:
+        print(f"❌ 获取自愈历史失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # 启动时加载所有活跃任务
 @app.on_event("startup")

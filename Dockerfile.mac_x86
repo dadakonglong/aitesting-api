@@ -1,0 +1,39 @@
+# Dockerfile.mac_x86
+# 使用指定平台参数 --platform=linux/amd64，实现在 Mac (M1/M2/M3 等 ARM 架构) 上编译出可用于 x86 服务器的镜像。
+
+# 基础镜像：Python 3.8 或更高版本 (这里以 3.10 为例，适应当下 FastAPI 需求)
+FROM --platform=linux/amd64 python:3.10-slim
+
+# 设置工作目录
+WORKDIR /app
+
+# 设置环境变量
+# 避免 Python 生成 .pyc 文件
+ENV PYTHONDONTWRITEBYTECODE 1
+# 禁用缓冲，让 Python 直接输出日志，方便 Docker 捕获
+ENV PYTHONUNBUFFERED 1
+# 确保系统时区为东八区
+ENV TZ=Asia/Shanghai
+
+# 安装系统依赖 (如需编译 C 扩展、连接数据库等)
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libpq-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# 先单独复制 requirements.txt 以利用 Docker 构建缓存
+COPY services/ai-processing/requirements.txt /tmp/requirements.txt
+
+# 安装 Python 依赖
+# 使用国内镜像源加速安装
+RUN pip install --no-cache-dir -r /tmp/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 注意：为了实现“把代码文件挂载在容器内运行”，这里不需要 COPY 整个代码目录。
+# 代码会在运行时通过 docker-compose 的 volumes 挂载进来。
+
+# 暴露服务端口
+EXPOSE 8000
+
+# 默认启动命令 (容器启动时通过挂载的代码执行)
+CMD ["uvicorn", "services.ai-processing.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

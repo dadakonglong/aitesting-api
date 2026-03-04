@@ -356,7 +356,7 @@ export default function ApiTestPlanTab() {
             </div>
 
             {/* 选择接口 + 为选中接口生成 AI 用例（有进度） */}
-            {plan?.endpoints && plan.endpoints.length > 0 && (
+            {(plan?.endpoints?.length ?? 0) > 0 && (
                 <div style={{ marginBottom: '1.5rem', padding: '1rem', background: '#F9FAFB', borderRadius: '0.5rem', border: '1px solid #E5E7EB' }}>
                     <div style={{ fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>选择要生成 AI 用例的接口</div>
                     <p style={{ fontSize: '0.8rem', color: '#6B7280', marginBottom: '0.75rem' }}>勾选接口后点击下方按钮，大模型会为选中接口生成真实测试用例。</p>
@@ -820,10 +820,10 @@ export default function ApiTestPlanTab() {
             </div>
 
             {/* 测试用例列表 */}
-            {plan?.endpoints?.length > 0 && (
+            {(plan?.endpoints?.length ?? 0) > 0 && (
                 <div ref={testCaseListRef} style={{ marginTop: '1.5rem', border: '1px solid #E5E7EB', borderRadius: '0.75rem', overflow: 'hidden' }}>
                     <h4 style={{ fontSize: '0.95rem', fontWeight: '600', padding: '0.75rem 1rem', background: '#F9FAFB', margin: 0, borderBottom: '1px solid #E5E7EB' }}>
-                        测试用例列表（共 {plan.endpoint_count ?? 0} 个接口，{plan.endpoints?.reduce((n: number, ep: any) => n + (ep.cases?.length || 0), 0) ?? 0} 条用例）
+                        测试用例列表（共 {plan?.endpoint_count ?? 0} 个接口，{plan?.endpoints?.reduce((n: number, ep: any) => n + (ep.cases?.length || 0), 0) ?? 0} 条用例）
                     </h4>
                     <div style={{ maxHeight: '360px', overflowY: 'auto' }}>
                         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
@@ -837,7 +837,7 @@ export default function ApiTestPlanTab() {
                                 </tr>
                             </thead>
                             <tbody>
-                                {plan.endpoints.map((ep: any, ei: number) =>
+                                {plan?.endpoints?.map((ep: any, ei: number) =>
                                     (ep.cases ?? []).map((c: any, ci: number) => {
                                         const caseKey = `${ei}-${ci}`
                                         const runState = singleRunResult[caseKey]

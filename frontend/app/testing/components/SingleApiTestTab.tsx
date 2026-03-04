@@ -48,8 +48,8 @@ function JsonWithLines({ data, maxHeight = 300 }: { data: any; maxHeight?: numbe
     )
 }
 import { useProject } from '../../contexts/ProjectContext'
-import type { SingleApiCaseItem } from '../page'
-import { getSingleApiDisplayName } from '../page'
+import type { SingleApiCaseItem } from '../utils'
+import { getSingleApiDisplayName } from '../utils'
 
 interface EnvItem {
     id: number
