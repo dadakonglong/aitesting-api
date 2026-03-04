@@ -61,7 +61,34 @@ docker-compose -f docker-compose.dev.full.yml up -d --build
 docker-compose -f docker-compose.dev.full.yml restart
 ```
 
-镜像由 `Dockerfile.dev.full` 构建，编排文件为 `docker-compose.dev.full.yml`。
+镜像由 `Dockerfile.dev.full` 构建，编排文件为 `docker-compose.dev.full.yml`。构建为增量友好：仅当 `requirements.txt` 或 `package.json`/`package-lock.json` 变更时才会重新装包；启用 BuildKit 时 pip/npm 会复用缓存，重复构建更快（Docker 23+ 默认开启，旧版可 `export DOCKER_BUILDKIT=1`）。
+
+#### 打包成镜像文件并在其他服务器还原
+
+在当前机器（已能正常运行的环境）打包镜像：
+
+```bash
+# 若尚未构建过，先构建
+docker-compose -f docker-compose.dev.full.yml build
+
+# 导出镜像为 tar 文件（可拷到 U 盘或 scp 到目标机）
+docker save aitesting-api-dev-full -o aitesting-api-dev-full.tar
+```
+
+在**其他服务器**上还原并运行：
+
+1. 将 `aitesting-api-dev-full.tar` 和**项目代码**（整个仓库或至少包含 `docker-compose.offline.yml`、`frontend/`、`services/` 等）拷到目标机同一目录。
+2. 在该目录执行：
+
+```bash
+# 加载镜像
+docker load -i aitesting-api-dev-full.tar
+
+# 使用离线 compose 启动（不构建，只跑已有镜像）
+docker-compose -f docker-compose.offline.yml up -d
+```
+
+目标机只需安装 Docker 和 Docker Compose，无需 Node/Python 环境。端口 3000（前端）、8000（后端）会与当前机器一致。
 
 ### 方式三：定制化脚本部署
 项目根目录下包含众多的运维脚本（如 `deploy_docker_backend.py`, `deploy_aliyun.py`, `deploy_native_ultimate.py`），可根据您的实际宿主机环境和基础系统（如阿里云机房、本地原生 Python/Nodejs 混合裸机）运行对应脚本进行适配部署或环境清理修复。

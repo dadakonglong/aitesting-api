@@ -1,0 +1,22 @@
+# 离线/其他服务器运行：只使用已导出的镜像，不构建
+# 使用前需在该机先 load 镜像，并保证当前目录为项目代码（用于挂载 .:/app）
+
+version: '3.8'
+
+services:
+  app:
+    image: aitesting-api-dev-full
+    container_name: aitesting-dev-full
+    ports:
+      - "3000:3000"
+      - "8000:8000"
+    environment:
+      - TZ=Asia/Shanghai
+      # 其他服务器上避免 Node 线程断言崩溃，用前端生产模式（next build + start）
+      - FRONTEND_MODE=prod
+    volumes:
+      - .:/app
+      - frontend_node_modules:/app/frontend/node_modules
+
+volumes:
+  frontend_node_modules:

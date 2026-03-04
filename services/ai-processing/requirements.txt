@@ -8,7 +8,7 @@ openai
 langchain
 langchain-openai
 langchain-community
-
+APScheduler
 # 向量数据库（可选，用于轻量级向量搜索）
 qdrant-client==1.7.1
 
