@@ -47,5 +47,21 @@
 docker-compose up -d
 ```
 
-### 方式二：定制化脚本部署
+### 方式二：前后端一体开发镜像（只换代码、不重复装包）
+适合日常开发：**依赖在镜像内预装**，运行时只挂载代码；以后每次只更新代码文件即可，无需重新执行 `npm install` / `pip install`。
+
+- **前端**：`cd frontend && npm run dev`（端口 3000）
+- **后端**：`python services/ai-processing/main_sqlite.py`（即 uvicorn main_sqlite，端口 8000）
+
+```bash
+# 构建并启动（首次会构建镜像，之后只需 up）
+docker-compose -f docker-compose.dev.full.yml up -d --build
+
+# 以后只改代码时，直接重启或依赖 --reload 热更即可
+docker-compose -f docker-compose.dev.full.yml restart
+```
+
+镜像由 `Dockerfile.dev.full` 构建，编排文件为 `docker-compose.dev.full.yml`。
+
+### 方式三：定制化脚本部署
 项目根目录下包含众多的运维脚本（如 `deploy_docker_backend.py`, `deploy_aliyun.py`, `deploy_native_ultimate.py`），可根据您的实际宿主机环境和基础系统（如阿里云机房、本地原生 Python/Nodejs 混合裸机）运行对应脚本进行适配部署或环境清理修复。

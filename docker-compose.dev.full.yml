@@ -1,0 +1,26 @@
+# 前后端一体开发：依赖在镜像内预装，只挂载代码，以后只换代码不重复装包
+# 启动：前端 npm run dev (3000)，后端 main_sqlite (8000)
+
+version: '3.8'
+
+services:
+  app:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile.dev.full
+    image: aitesting-api-dev-full
+    container_name: aitesting-dev-full
+    ports:
+      - "3000:3000"
+      - "8000:8000"
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      # 只挂载代码；以后改代码即可，无需重新装包
+      - .:/app
+      # 保留 node_modules，避免被宿主机目录覆盖（首次会从镜像内复制填充）
+      - frontend_node_modules:/app/frontend/node_modules
+
+volumes:
+  frontend_node_modules:
